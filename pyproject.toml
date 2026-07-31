@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wechat-bot-core"
+version = "0.1.0"
+description = "Channel-neutral WeChat bot core with a replaceable LLM provider"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+wechat-bot-core = "wechat_bot.api:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
