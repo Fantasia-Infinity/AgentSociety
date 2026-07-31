@@ -9,3 +9,9 @@ build/
 gateway-state.sqlite3
 gateway-state.sqlite3-shm
 gateway-state.sqlite3-wal
+
+
+.env*
+!.env.example
+!.env.gateway.example
+
