@@ -1,0 +1,1 @@
+"""Concrete WeChat gateway adapters."""
