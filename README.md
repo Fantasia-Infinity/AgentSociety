@@ -1,8 +1,9 @@
 # WeChat Bot
 
 一个面向个人微信号的分离式 Bot：Windows Gateway 负责操作微信客户端，平台无关的
-Bot Core 负责访问控制、会话和 LLM。当前模型调用远程 OpenAI-compatible Chat
-Completions API；以后把同一接口指向本地 LLM 即可，无需改微信消息链路。
+Bot Core 负责访问控制、会话和 LLM。模型可以调用远程 OpenAI-compatible Chat
+Completions API，也可以选择 Mac 上独立运行的 RWKV/llama.cpp；切换模型不需要改微信
+消息链路。
 
 ## 已实现
 
@@ -11,10 +12,11 @@ Completions API；以后把同一接口指向本地 LLM 即可，无需改微信
 - `wechat-gateway`：消息采集、历史游标与 SQLite Inbox、回复长轮询、租约与 ACK、本地发送账本。
 - `mock` 适配器：可在 macOS 上用 JSON 行模拟微信消息，验证完整链路。
 - `wxauto4` / `wxautox4` 适配边界：Windows 下动态加载，不会成为 Core 的依赖。
-- `ModelProvider`：当前为远程 OpenAI-compatible API，已为本地模型保留替换点。
+- `ModelProvider`：支持 `remote`、`local_rwkv` 和显式远程回退的 `auto` 模式。
 
 完整设计见 [架构文档](docs/architecture.md)，Windows 部署见
-[Windows Gateway 指南](docs/windows-gateway.md)。
+[Windows Gateway 指南](docs/windows-gateway.md)，Mac 端侧推理见
+[本地 RWKV 指南](docs/local-rwkv.md)。
 
 ## 在 Mac 上启动 Bot Core
 
@@ -22,7 +24,7 @@ Completions API；以后把同一接口指向本地 LLM 即可，无需改微信
 
 ```bash
 cp .env.example .env
-# 编辑 .env，至少设置 BOT_API_TOKEN、LLM_BASE_URL、LLM_API_KEY、LLM_MODEL
+# 默认 LLM_BACKEND=remote；至少设置 BOT_API_TOKEN、LLM_BASE_URL、LLM_MODEL
 PYTHONPATH=src python3 -m wechat_bot.api
 ```
 
@@ -48,6 +50,20 @@ PYTHONPATH=src python3 -m wechat_gateway
 
 模型回复会以 `BOT_REPLY {...}` 输出。`test-user-id` 也必须存在于 Core 的
 `BOT_ALLOWED_USERS` 中。
+
+## 可选的 Mac 本地 RWKV
+
+本地模式使用单独的 `llama-server` 进程监听 `127.0.0.1:18080`，Core 继续监听
+`8080`。当前远程配置无需删除；把 `LLM_BACKEND` 改成 `local_rwkv` 才会启用本地
+模型，把它改成 `auto` 才会在本地失败后向远程发送同一会话。
+
+```bash
+# 安装 llama.cpp 并下载兼容的 RWKV-6/7 GGUF 后：
+PYTHONPATH=src python3 -m wechat_bot.local_model
+```
+
+模型文件、采样配置、健康检查和 LaunchAgent 模板参见
+[本地 RWKV 指南](docs/local-rwkv.md)。
 
 ## Windows 微信接入
 

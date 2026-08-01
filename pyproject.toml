@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wechat-bot-core"
-version = "0.2.0"
+version = "0.3.0"
 description = "Split WeChat gateway and bot core with a replaceable LLM provider"
 requires-python = ">=3.11"
 dependencies = []
 
 [project.scripts]
 wechat-bot-core = "wechat_bot.api:main"
+wechat-bot-local-llm = "wechat_bot.local_model:main"
 wechat-gateway = "wechat_gateway.main:main"
 
 [tool.setuptools]

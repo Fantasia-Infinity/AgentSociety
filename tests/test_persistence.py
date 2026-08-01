@@ -11,6 +11,7 @@ from wechat_bot.domain import (
     IncomingMessage,
     ModelResponse,
 )
+from wechat_bot.model_provider import ModelProviderError
 from wechat_bot.persistence import (
     CoreInboxStore,
     SqliteActionOutbox,
@@ -24,6 +25,18 @@ from wechat_bot.service import AccessPolicy, BotService
 class FakeProvider:
     def complete(self, request):
         return ModelResponse(text="persistent reply")
+
+
+class RecoveringProvider:
+    def __init__(self) -> None:
+        self.available = False
+        self.calls = 0
+
+    def complete(self, request):
+        self.calls += 1
+        if not self.available:
+            raise ModelProviderError("local unavailable")
+        return ModelResponse(text="recovered reply")
 
 
 def wait_until(predicate, timeout: float = 2) -> bool:
@@ -49,6 +62,55 @@ def message(message_id: str = "persistent-message") -> IncomingMessage:
 
 
 class PersistenceTests(unittest.TestCase):
+    def test_local_model_outage_retries_without_duplicate_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "core.sqlite3"
+            inbox = CoreInboxStore(path)
+            conversations = SqliteConversationStore(path, max_messages=10)
+            dedup = SqliteMessageDeduplicator(path)
+            outbox = SqliteActionOutbox(path)
+            provider = RecoveringProvider()
+            service = BotService(
+                provider=provider,
+                conversations=conversations,
+                policy=AccessPolicy(frozenset({"user-1"}), frozenset()),
+                system_prompt="system",
+                deduplicator=dedup,
+            )
+            runtime = BotRuntime(
+                service,
+                workers=1,
+                queue_size=10,
+                inbox=inbox,
+                action_outbox=outbox,
+                model_provider=provider,
+                closeables=(inbox, conversations, dedup, outbox),
+            )
+            runtime.start()
+            try:
+                runtime.submit(message("local-recovery-message"))
+                self.assertTrue(wait_until(lambda: provider.calls >= 1))
+                provider.available = True
+
+                actions = []
+
+                def collect_action() -> bool:
+                    actions.extend(
+                        outbox.poll("account-1", timeout=0.05, lease_seconds=1)
+                    )
+                    return bool(actions)
+
+                self.assertTrue(wait_until(collect_action, timeout=3))
+                self.assertEqual(len(actions), 1)
+                self.assertEqual(actions[0].content, "recovered reply")
+                self.assertEqual(
+                    outbox.ack("account-1", [actions[0].action_id]),
+                    1,
+                )
+                self.assertEqual(outbox.poll("account-1", timeout=0), [])
+            finally:
+                runtime.stop()
+
     def test_core_inbox_survives_reopen(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "core.sqlite3"

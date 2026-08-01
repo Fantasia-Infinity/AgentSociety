@@ -18,8 +18,35 @@ class FakeProvider:
     def complete(self, request):
         return ModelResponse(text="done")
 
+    def health(self):
+        return {"backend": "fake", "status": "ready"}
+
 
 class RuntimeTests(unittest.TestCase):
+    def test_health_includes_safe_model_status(self) -> None:
+        provider = FakeProvider()
+        service = BotService(
+            provider=provider,
+            conversations=InMemoryConversationStore(max_messages=10),
+            policy=AccessPolicy(frozenset({"user-1"}), frozenset()),
+            system_prompt="system",
+        )
+        runtime = BotRuntime(
+            service,
+            workers=1,
+            queue_size=2,
+            model_provider=provider,
+        )
+
+        self.assertEqual(
+            runtime.health(),
+            {
+                "status": "ok",
+                "queue_depth": 0,
+                "model": {"backend": "fake", "status": "ready"},
+            },
+        )
+
     def test_action_requires_ack_and_reappears_after_lease(self) -> None:
         outbox = ActionOutbox()
         action = OutgoingAction(

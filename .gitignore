@@ -13,6 +13,10 @@ core-state.sqlite3
 core-state.sqlite3-shm
 core-state.sqlite3-wal
 wxauto_logs/
+models/
+*.gguf
+*.pth
+*.safetensors
 
 
 .env*

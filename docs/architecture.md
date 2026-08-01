@@ -12,15 +12,15 @@ Windows 微信设备                       平台无关的 Bot/模型服务器
                                      │          ▼               │
                                      │     ModelProvider        │
                                      │          │               │
-                                     │  远程 API（当前）         │
-                                     │  本地 LLM（未来）         │
+                                     │  远程 API（可选）         │
+                                     │  本地 RWKV（可选）        │
                                      └──────────────────────────┘
 ```
 
 ## 运行边界
 
 - Windows 设备只运行微信客户端与 `wechat-gateway`，不保存 LLM 密钥。
-- macOS 或服务器运行 `wechat-bot-core`，以及当前的远程 LLM API 或未来的本地推理服务。
+- macOS 或服务器运行 `wechat-bot-core`，并选择远程 API 或独立本地推理服务。
 - 两端只共享版本化 JSON 协议和一个设备 Bearer token。
 
 ## 为什么采用事件与动作队列
@@ -42,9 +42,9 @@ Core；Core 把收到的事件、会话、去重状态和回复 Outbox 写入自
 4. 若发送成功但 ACK 丢失，租约到期后动作重新出现；SQLite 账本使 Gateway 只重发 ACK，
    不重复操作微信。
 
-这提供进程重启后仍有效的近似 exactly-once 发送。发送成功与 SQLite 落盘之间仍有一个很小
-的崩溃窗口，无法在第三方 UI 操作与本地事务之间做到严格原子性。Core 进程重启也会丢失
-内存 Outbox；服务器化时需换成持久队列。
+这提供进程重启后仍有效的近似 exactly-once 发送。发送成功与 Windows SQLite 落盘之间仍有
+一个很小的崩溃窗口，无法在第三方 UI 操作与本地事务之间做到严格原子性。Core Outbox 已经
+持久化到 SQLite；服务器化时可以继续使用，或按负载替换为持久消息总线。
 
 微信消息回调只做轻量标准化和本地 SQLite 入队，不在回调里发送或访问网络。Core 下线时，
 Gateway 会保留待上传 Inbox 并持续重试；Gateway 正常重启后会从 Inbox 继续上传。异常断电
@@ -52,9 +52,15 @@ Gateway 会保留待上传 Inbox 并持续重试；Gateway 正常重启后会从
 
 ## 模型抽象
 
-业务层只依赖 `ModelProvider.complete(ModelRequest) -> ModelResponse`。当前
-`OpenAICompatibleProvider` 调用 `/chat/completions`。未来接入 Ollama、vLLM、
-llama.cpp 或其他本地推理服务时有两条路径：
+业务层只依赖 `ModelProvider.complete(ModelRequest) -> ModelResponse`。
+`OpenAICompatibleProvider` 调用 `/chat/completions`，可以连接远程 API 或本机
+llama.cpp。`LLM_BACKEND` 支持三种路由：
+
+1. `remote`：只调用远程 API，也是向后兼容的默认值。
+2. `local_rwkv`：只调用本机推理服务；故障时由持久化 Inbox 退避重试。
+3. `auto`：本地失败后调用远程；这是会改变数据边界的显式选择。
+
+接入 Ollama、vLLM、llama.cpp 或其他推理服务时仍有两条路径：
 
 1. 推理服务兼容 OpenAI API：只修改 `LLM_BASE_URL`、`LLM_MODEL` 和密钥。
 2. 协议不兼容：新增一个 `ModelProvider` 实现，Bot Core 无需改变。
@@ -66,7 +72,7 @@ llama.cpp 或其他本地推理服务时有两条路径：
 
 | 能力 | 当前实现 | 服务器化替换 |
 | --- | --- | --- |
-| 模型 | 远程 OpenAI-compatible API | 本地推理服务 |
+| 模型 | 远程或本机 OpenAI-compatible API | 独立推理服务器 |
 | Gateway Inbox | Windows SQLite，消息状态 + 聊天游标 | Redis Streams/数据库 |
 | Core 任务队列 | Mac SQLite，消息状态 + 租约 | Redis Streams |
 | 回复 Outbox | Mac SQLite，租约 + ACK | Redis/持久消息总线 |
@@ -82,4 +88,6 @@ llama.cpp 或其他本地推理服务时有两条路径：
 - 自己发送的消息不会再次进入 Bot，避免回复死循环。
 - API Key 只从环境读取，不进入事件、回复或日志。
 - 健康检查不包含密钥和聊天内容。
+- 本地模型启动器只允许绑定 loopback，避免无意暴露到局域网。
+- 模型 HTTP 错误正文不会写入日志或持久化重试数据库，防止服务回显提示词。
 - Gateway 只支持配置中列出的监听会话，不主动遍历或群发联系人。

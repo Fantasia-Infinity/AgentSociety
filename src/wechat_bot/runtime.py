@@ -8,6 +8,7 @@ from threading import Condition, Event, Thread
 import time
 
 from .domain import IncomingMessage, OutgoingAction
+from .model_provider import ModelProvider, provider_health
 from .persistence import CoreInboxStore, SqliteActionOutbox
 from .service import BotService
 
@@ -101,12 +102,14 @@ class BotRuntime:
         queue_size: int,
         inbox: CoreInboxStore | None = None,
         action_outbox: SqliteActionOutbox | None = None,
+        model_provider: ModelProvider | None = None,
         closeables: tuple[object, ...] = (),
     ) -> None:
         self._service = service
         self._queue: Queue[IncomingMessage] = Queue(maxsize=queue_size)
         self._inbox = inbox
         self._outbox = action_outbox or ActionOutbox()
+        self._model_provider = model_provider
         self._closeables = closeables
         self._stop = Event()
         self._threads = [
@@ -151,6 +154,15 @@ class BotRuntime:
         if self._inbox is not None:
             return self._inbox.queue_depth()
         return self._queue.qsize()
+
+    def health(self) -> dict[str, object]:
+        result: dict[str, object] = {
+            "status": "ok",
+            "queue_depth": self.queue_depth(),
+        }
+        if self._model_provider is not None:
+            result["model"] = provider_health(self._model_provider)
+        return result
 
     def stop(self) -> None:
         self._stop.set()

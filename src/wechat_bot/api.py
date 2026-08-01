@@ -10,7 +10,6 @@ from urllib.parse import parse_qs, urlparse
 
 from .config import Settings
 from .domain import IncomingMessage
-from .openai_compatible import OpenAICompatibleProvider
 from .persistence import (
     CoreInboxStore,
     SqliteActionOutbox,
@@ -18,6 +17,7 @@ from .persistence import (
     SqliteMessageDeduplicator,
 )
 from .runtime import BotRuntime
+from .provider_routing import build_model_provider
 from .service import AccessPolicy, BotService
 
 
@@ -68,10 +68,7 @@ class BotRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/health":
-            self._send_json(
-                HTTPStatus.OK,
-                {"status": "ok", "queue_depth": self.server.runtime.queue_depth()},
-            )
+            self._send_json(HTTPStatus.OK, self.server.runtime.health())
             return
         if parsed.path == "/v1/actions":
             if not self._authorized():
@@ -157,14 +154,7 @@ class BotRequestHandler(BaseHTTPRequestHandler):
 
 
 def build_runtime(settings: Settings) -> BotRuntime:
-    provider = OpenAICompatibleProvider(
-        base_url=settings.llm_base_url,
-        api_key=settings.llm_api_key,
-        model=settings.llm_model,
-        timeout_seconds=settings.llm_timeout_seconds,
-        temperature=settings.llm_temperature,
-        max_output_tokens=settings.llm_max_output_tokens,
-    )
+    provider = build_model_provider(settings)
     inbox = CoreInboxStore(settings.state_db)
     conversations = SqliteConversationStore(
         settings.state_db, settings.max_history_messages
@@ -189,6 +179,7 @@ def build_runtime(settings: Settings) -> BotRuntime:
         queue_size=settings.queue_size,
         inbox=inbox,
         action_outbox=action_outbox,
+        model_provider=provider,
         closeables=(inbox, conversations, deduplicator, action_outbox),
     )
 
@@ -206,7 +197,19 @@ def main() -> None:
     runtime = build_runtime(settings)
     runtime.start()
     server = BotHttpServer((settings.api_host, settings.api_port), runtime, settings.api_token)
-    logger.info("bot_core_started host=%s port=%s", settings.api_host, settings.api_port)
+    logger.info(
+        "bot_core_started host=%s port=%s llm_backend=%s",
+        settings.api_host,
+        settings.api_port,
+        settings.llm_backend,
+    )
+    model_health = runtime.health().get("model", {})
+    if isinstance(model_health, dict):
+        logger.info(
+            "model_health backend=%s status=%s",
+            model_health.get("backend", settings.llm_backend),
+            model_health.get("status", "unknown"),
+        )
     try:
         server.serve_forever()
     except KeyboardInterrupt:
