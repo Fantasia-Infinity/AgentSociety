@@ -42,6 +42,7 @@ class GatewaySettings:
     driver: str
     listen_chats: tuple[str, ...]
     bot_mention: str
+    wechat_poll_interval_seconds: float
     poll_timeout_seconds: float
     action_lease_seconds: float
     http_timeout_seconds: float
@@ -60,6 +61,9 @@ class GatewaySettings:
             driver=os.environ.get("WECHAT_DRIVER", "mock").strip().lower(),
             listen_chats=_csv("WECHAT_LISTEN_CHATS"),
             bot_mention=os.environ.get("WECHAT_BOT_MENTION", "").strip(),
+            wechat_poll_interval_seconds=float(
+                os.environ.get("WECHAT_POLL_INTERVAL_SECONDS", "1")
+            ),
             poll_timeout_seconds=float(
                 os.environ.get("GATEWAY_POLL_TIMEOUT_SECONDS", "20")
             ),
@@ -88,6 +92,13 @@ class GatewaySettings:
             raise ValueError("WECHAT_DRIVER must be mock, wxauto4, or wxautox4")
         if self.driver != "mock" and not self.listen_chats:
             raise ValueError("WECHAT_LISTEN_CHATS is required for a wxauto driver")
+        if (
+            self.wechat_poll_interval_seconds < 1
+            or self.wechat_poll_interval_seconds > 60
+        ):
+            raise ValueError(
+                "WECHAT_POLL_INTERVAL_SECONDS must be between 1 and 60"
+            )
         if self.poll_timeout_seconds < 0 or self.poll_timeout_seconds > 30:
             raise ValueError("GATEWAY_POLL_TIMEOUT_SECONDS must be between 0 and 30")
         if self.action_lease_seconds < 5 or self.action_lease_seconds > 300:

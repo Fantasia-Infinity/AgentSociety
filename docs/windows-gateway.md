@@ -22,15 +22,22 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e .
 ```
 
-当前官方文档把回调监听 `AddListenChat` 标记为 Plus 能力，推荐：
+Plus 版可使用回调监听 `AddListenChat`：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install wxautox4
 # 按 wxauto 官方说明激活 Plus
 ```
 
-`wxauto4` 仍可作为兼容性测试项安装；如果所装版本不提供监听能力，Gateway 会在启动时
-直接报错，而不会静默漏消息。
+没有 Plus 激活码时可以安装免费版：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install wxauto4
+```
+
+免费包没有 `AddListenChat` 时，Gateway 会自动使用前台轮询。启动时先把当前可见消息记为
+基线，只上报之后出现的新消息；轮询会逐个切换 `WECHAT_LISTEN_CHATS` 中的会话，因此建议
+首轮只配置一个专用测试好友，并保持微信窗口可交互。
 
 ## 配置
 
@@ -48,12 +55,14 @@ BOT_API_TOKEN=与Core完全相同的长随机值
 WECHAT_DRIVER=wxautox4
 WECHAT_LISTEN_CHATS=文件传输助手,家人群
 WECHAT_BOT_MENTION=@你的微信昵称
+WECHAT_POLL_INTERVAL_SECONDS=1
 ```
 
 - `WECHAT_LISTEN_CHATS` 是明确允许监听的好友备注名/群名，使用英文逗号分隔。
 - wxauto 暴露的是界面显示名称而非稳定微信 ID，因此改备注、群名重名都会影响路由。
 - Core 的 `BOT_ALLOWED_USERS` / `BOT_ALLOWED_GROUPS` 要填写相同的界面名称。
 - 群聊默认只有文本中包含 `WECHAT_BOT_MENTION` 才会进入模型。
+- `WECHAT_POLL_INTERVAL_SECONDS` 只影响没有回调接口的免费版，允许范围为 1–60 秒。
 - `GATEWAY_STATE_DB` 保存已发送动作 ID，不能放在会被定期清理的临时目录。
 
 如果 Core 暂时运行在 Mac，把 `.env` 中 `BOT_API_HOST` 改成 `0.0.0.0`，并将
@@ -84,6 +93,8 @@ wxauto 依赖可交互桌面。Windows 锁屏、RDP 断开后切换到不可交�
 ## 已知限制
 
 - 当前只回复文本；图片、语音、文件会被标准化，但 Core 会拒绝为不支持的内容类型。
+- 免费版轮询启动时有约 3 秒预热，预热期间出现的消息会被当作基线忽略。微信 UI 可能
+  合并短时间内的相同消息预览，因此高频或严格不丢消息的场景应使用 Plus 回调或其他渠道。
 - Gateway 上行事件队列位于内存；断网会持续重试，进程崩溃仍可能丢事件。
 - Core 的会话、去重和 Outbox 目前也在内存；正式服务器化应换成持久存储。
 - 这是 UI Automation 方案，并非微信官方 Bot API。账号风控与合规风险需要由使用者评估。
