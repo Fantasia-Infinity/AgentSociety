@@ -8,6 +8,7 @@ from threading import Condition, Event, Thread
 import time
 
 from .domain import IncomingMessage, OutgoingAction
+from .persistence import CoreInboxStore, SqliteActionOutbox
 from .service import BotService
 
 
@@ -92,10 +93,21 @@ class ActionOutbox:
 
 
 class BotRuntime:
-    def __init__(self, service: BotService, *, workers: int, queue_size: int) -> None:
+    def __init__(
+        self,
+        service: BotService,
+        *,
+        workers: int,
+        queue_size: int,
+        inbox: CoreInboxStore | None = None,
+        action_outbox: SqliteActionOutbox | None = None,
+        closeables: tuple[object, ...] = (),
+    ) -> None:
         self._service = service
         self._queue: Queue[IncomingMessage] = Queue(maxsize=queue_size)
-        self._outbox = ActionOutbox()
+        self._inbox = inbox
+        self._outbox = action_outbox or ActionOutbox()
+        self._closeables = closeables
         self._stop = Event()
         self._threads = [
             Thread(target=self._worker, name=f"bot-worker-{index + 1}", daemon=True)
@@ -107,6 +119,12 @@ class BotRuntime:
             thread.start()
 
     def submit(self, message: IncomingMessage) -> SubmitResult:
+        if self._inbox is not None:
+            inserted = self._inbox.insert(message)
+            return SubmitResult(
+                accepted=True,
+                reason="queued" if inserted else "duplicate",
+            )
         try:
             self._queue.put_nowait(message)
         except Full:
@@ -130,30 +148,63 @@ class BotRuntime:
         return self._outbox.ack(account_id, action_ids)
 
     def queue_depth(self) -> int:
+        if self._inbox is not None:
+            return self._inbox.queue_depth()
         return self._queue.qsize()
 
     def stop(self) -> None:
         self._stop.set()
         for thread in self._threads:
             thread.join(timeout=2)
+        if self._inbox is not None:
+            self._inbox.release_leases()
+        for closeable in self._closeables:
+            close = getattr(closeable, "close", None)
+            if callable(close):
+                close()
 
     def _worker(self) -> None:
+        if self._inbox is not None:
+            self._persistent_worker()
+            return
         while not self._stop.is_set():
             try:
                 message = self._queue.get(timeout=0.25)
             except Empty:
                 continue
             try:
-                result = self._service.handle(message)
-                if result.action is not None:
-                    self._outbox.push(result.action)
-                logger.info(
-                    "message_processed message_id=%s accepted=%s reason=%s",
-                    message.message_id,
-                    result.accepted,
-                    result.reason,
-                )
-            except Exception:
-                logger.exception("message_failed message_id=%s", message.message_id)
+                self._process_message(message)
             finally:
                 self._queue.task_done()
+
+    def _persistent_worker(self) -> None:
+        assert self._inbox is not None
+        while not self._stop.is_set():
+            claimed = self._inbox.claim_pending(limit=1)
+            if not claimed:
+                self._stop.wait(0.1)
+                continue
+            message, attempt = claimed[0]
+            try:
+                self._process_message(message)
+            except Exception as exc:
+                delay = min(max(0.25, 2 ** min(attempt - 1, 6)), 30)
+                self._inbox.retry(message.message_id, str(exc), delay)
+                logger.exception(
+                    "message_failed message_id=%s retry_in=%s",
+                    message.message_id,
+                    delay,
+                )
+
+    def _process_message(self, message: IncomingMessage) -> None:
+        result = self._service.handle(message)
+        if result.action is not None:
+            self._outbox.push(result.action)
+        if self._inbox is not None:
+            self._inbox.mark_completed(message.message_id, result.reason)
+        logger.info(
+            "message_processed message_id=%s accepted=%s reason=%s",
+            message.message_id,
+            result.accepted,
+            result.reason,
+        )

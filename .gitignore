@@ -9,10 +9,12 @@ build/
 gateway-state.sqlite3
 gateway-state.sqlite3-shm
 gateway-state.sqlite3-wal
+core-state.sqlite3
+core-state.sqlite3-shm
+core-state.sqlite3-wal
 wxauto_logs/
 
 
 .env*
 !.env.example
 !.env.gateway.example
-

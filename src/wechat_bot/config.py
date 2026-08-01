@@ -66,6 +66,7 @@ class Settings:
     llm_max_output_tokens: int
     system_prompt: str
     max_history_messages: int
+    state_db: Path
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -90,6 +91,9 @@ class Settings:
                 "You are a concise and helpful assistant responding through WeChat.",
             ),
             max_history_messages=int(os.environ.get("BOT_MAX_HISTORY_MESSAGES", "20")),
+            state_db=Path(
+                os.environ.get("BOT_STATE_DB", "core-state.sqlite3")
+            ).expanduser(),
         )
         settings.validate()
         return settings
@@ -109,4 +113,3 @@ class Settings:
             raise ValueError("LLM_MAX_OUTPUT_TOKENS must be positive")
         if self.max_history_messages < 0:
             raise ValueError("BOT_MAX_HISTORY_MESSAGES cannot be negative")
-

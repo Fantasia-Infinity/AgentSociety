@@ -100,6 +100,33 @@ class OutgoingAction:
     action_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     created_at: int = field(default_factory=lambda: int(time.time()))
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "OutgoingAction":
+        required = (
+            "account_id",
+            "chat_id",
+            "chat_type",
+            "content_type",
+            "content",
+        )
+        missing = [name for name in required if name not in data]
+        if missing:
+            raise ValueError(f"Missing action fields: {', '.join(missing)}")
+        return cls(
+            account_id=str(data["account_id"]),
+            chat_id=str(data["chat_id"]),
+            chat_type=ChatType(str(data["chat_type"])),
+            content_type=ContentType(str(data["content_type"])),
+            content=str(data["content"]),
+            reply_to_message_id=(
+                None
+                if data.get("reply_to_message_id") is None
+                else str(data["reply_to_message_id"])
+            ),
+            action_id=str(data.get("action_id") or uuid.uuid4()),
+            created_at=int(data.get("created_at") or time.time()),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["chat_type"] = self.chat_type.value
@@ -112,4 +139,3 @@ class HandleResult:
     accepted: bool
     reason: str
     action: OutgoingAction | None = None
-

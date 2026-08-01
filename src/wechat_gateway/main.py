@@ -9,13 +9,16 @@ from .adapters.wxauto import WxAutoAdapter
 from .config import GatewaySettings
 from .core_client import GatewayCoreClient
 from .runtime import GatewayRuntime
-from .state import SentActionStore
+from .state import GatewayInboxStore, SentActionStore
 
 
 logger = logging.getLogger(__name__)
 
 
-def build_adapter(settings: GatewaySettings) -> WeChatAdapter:
+def build_adapter(
+    settings: GatewaySettings,
+    inbox: GatewayInboxStore | None = None,
+) -> WeChatAdapter:
     if settings.driver == "mock":
         return MockWeChatAdapter(account_id=settings.account_id, interactive=True)
     return WxAutoAdapter(
@@ -24,12 +27,25 @@ def build_adapter(settings: GatewaySettings) -> WeChatAdapter:
         listen_chats=settings.listen_chats,
         bot_mention=settings.bot_mention,
         poll_interval_seconds=settings.wechat_poll_interval_seconds,
+        cursor_getter=(
+            None
+            if inbox is None
+            else lambda chat_id: inbox.get_cursor(settings.account_id, chat_id)
+        ),
+        cursor_setter=(
+            None
+            if inbox is None
+            else lambda chat_id, cursor: inbox.set_cursor(
+                settings.account_id, chat_id, cursor
+            )
+        ),
     )
 
 
 def build_runtime(settings: GatewaySettings) -> GatewayRuntime:
+    inbox = GatewayInboxStore(settings.state_db)
     return GatewayRuntime(
-        adapter=build_adapter(settings),
+        adapter=build_adapter(settings, inbox),
         client=GatewayCoreClient(
             base_url=settings.core_url,
             api_token=settings.api_token,
@@ -37,6 +53,7 @@ def build_runtime(settings: GatewaySettings) -> GatewayRuntime:
             timeout_seconds=settings.http_timeout_seconds,
         ),
         sent_actions=SentActionStore(settings.state_db),
+        inbox=inbox,
         event_queue_size=settings.event_queue_size,
         poll_timeout_seconds=settings.poll_timeout_seconds,
         action_lease_seconds=settings.action_lease_seconds,

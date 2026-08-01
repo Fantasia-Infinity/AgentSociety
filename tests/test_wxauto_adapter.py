@@ -208,6 +208,80 @@ class WxAutoAdapterTests(unittest.TestCase):
         time.sleep(0.04)
         self.assertEqual(wechat.poll_calls, calls_after_stop)
 
+    def test_history_recovery_uses_persisted_cursor(self) -> None:
+        old_message = SimpleNamespace(
+            attr="friend",
+            type="text",
+            content="old",
+            sender="测试好友",
+            hash="old-hash",
+        )
+        wechat = FakePollingWeChat([old_message])
+        events = []
+        adapter = WxAutoAdapter(
+            account_id="account-1",
+            module_name="wxauto4",
+            listen_chats=("测试好友",),
+            bot_mention="",
+            poll_interval_seconds=0.01,
+            poll_load_wait_seconds=0.01,
+            poll_baseline_seconds=0,
+            wechat_factory=lambda: wechat,
+            cursor_getter=lambda chat_id: "old-hash",
+            cursor_setter=lambda chat_id, cursor: None,
+        )
+        adapter.start(events.append)
+        try:
+            time.sleep(0.04)
+            self.assertEqual(events, [])
+            wechat.append(
+                SimpleNamespace(
+                    attr="friend",
+                    type="text",
+                    content="new",
+                    sender="测试好友",
+                    hash="new-hash",
+                )
+            )
+            self.assertTrue(
+                wait_until(lambda: any(event.content == "new" for event in events))
+            )
+            self.assertEqual([event.content for event in events], ["new"])
+            self.assertEqual(events[0].message_id, "wxauto:account-1:new-hash")
+        finally:
+            adapter.stop()
+
+    def test_history_recovery_emits_visible_messages_without_cursor(self) -> None:
+        wechat = FakePollingWeChat(
+            [
+                SimpleNamespace(
+                    attr="friend",
+                    type="text",
+                    content="offline message",
+                    sender="测试好友",
+                    hash="offline-hash",
+                )
+            ]
+        )
+        events = []
+        adapter = WxAutoAdapter(
+            account_id="account-1",
+            module_name="wxauto4",
+            listen_chats=("测试好友",),
+            bot_mention="",
+            poll_interval_seconds=0.05,
+            poll_load_wait_seconds=0.01,
+            wechat_factory=lambda: wechat,
+            cursor_getter=lambda chat_id: None,
+            cursor_setter=lambda chat_id, cursor: None,
+        )
+        adapter.start(events.append)
+        try:
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].content, "offline message")
+        finally:
+            adapter.stop()
+
     def test_navigation_alias_matches_wechat_brand_label(self) -> None:
         class FakeControlClass:
             def __init__(self, search_properties=None) -> None:

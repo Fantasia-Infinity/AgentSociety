@@ -64,6 +64,8 @@ WECHAT_POLL_INTERVAL_SECONDS=1
 - 群聊默认只有文本中包含 `WECHAT_BOT_MENTION` 才会进入模型。
 - `WECHAT_POLL_INTERVAL_SECONDS` 只影响没有回调接口的免费版，允许范围为 1–60 秒。
 - `GATEWAY_STATE_DB` 保存已发送动作 ID，不能放在会被定期清理的临时目录。
+- 同一个 SQLite 文件还保存 Gateway Inbox 与每个聊天的历史同步游标。消息会先落库再上传
+  Core，因此 Core 短暂离线时不会因为 HTTP 失败直接丢失已采集消息。
 
 如果 Core 暂时运行在 Mac，把 `.env` 中 `BOT_API_HOST` 改成 `0.0.0.0`，并将
 `BOT_CORE_URL` 指向 Mac 的局域网地址。明文 HTTP 只适合可信局域网；跨公网应使用 HTTPS
@@ -95,6 +97,9 @@ wxauto 依赖可交互桌面。Windows 锁屏、RDP 断开后切换到不可交�
 - 当前只回复文本；图片、语音、文件会被标准化，但 Core 会拒绝为不支持的内容类型。
 - 免费版轮询启动时有约 3 秒预热，预热期间出现的消息会被当作基线忽略。微信 UI 可能
   合并短时间内的相同消息预览，因此高频或严格不丢消息的场景应使用 Plus 回调或其他渠道。
-- Gateway 上行事件队列位于内存；断网会持续重试，进程崩溃仍可能丢事件。
-- Core 的会话、去重和 Outbox 目前也在内存；正式服务器化应换成持久存储。
+- Gateway 会从 SQLite Inbox 和聊天游标恢复上传；微信 UI 能够加载出的历史消息会在启动/重连
+  时回补。若消息已经被微信客户端清理、尚未同步到 UI 或超出 UI 可加载范围，wxauto 无法
+  保证获取。
+- Core 的收件箱、会话、去重和 Outbox 已持久化；正式服务器化时可将 SQLite 替换为持久队列
+  和 PostgreSQL。
 - 这是 UI Automation 方案，并非微信官方 Bot API。账号风控与合规风险需要由使用者评估。

@@ -24,6 +24,35 @@ class GatewayEvent:
     is_self: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "GatewayEvent":
+        required = (
+            "message_id",
+            "account_id",
+            "chat_id",
+            "sender_id",
+            "chat_type",
+            "content_type",
+            "content",
+            "timestamp",
+        )
+        missing = [name for name in required if name not in data]
+        if missing:
+            raise ValueError(f"Missing event fields: {', '.join(missing)}")
+        values = {name: str(data[name]).strip() for name in required[:4]}
+        if any(not value for value in values.values()):
+            raise ValueError("Event identifiers cannot be empty")
+        return cls(
+            **values,
+            chat_type=str(data["chat_type"]),
+            content_type=str(data["content_type"]),
+            content=str(data["content"]),
+            timestamp=int(data["timestamp"]),
+            mentioned_bot=bool(data.get("mentioned_bot", False)),
+            is_self=bool(data.get("is_self", False)),
+            metadata=dict(data.get("metadata", {})),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 

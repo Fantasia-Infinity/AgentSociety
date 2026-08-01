@@ -14,6 +14,10 @@ class GatewayCoreClientError(RuntimeError):
     pass
 
 
+class GatewayCoreRejectedError(GatewayCoreClientError):
+    """Core accepted the HTTP request but permanently rejected the event."""
+
+
 class JsonTransport(Protocol):
     def request_json(
         self,
@@ -89,7 +93,7 @@ class GatewayCoreClient:
         )
         if response.get("accepted") is not True:
             reason = str(response.get("reason") or "rejected")
-            raise GatewayCoreClientError(f"Bot Core rejected event: {reason}")
+            raise GatewayCoreRejectedError(f"Bot Core rejected event: {reason}")
 
     def poll_actions(
         self,

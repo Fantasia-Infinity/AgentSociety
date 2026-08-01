@@ -27,7 +27,14 @@ class InMemoryConversationStore:
         with self._lock:
             return tuple(self._messages[conversation_id])
 
-    def append_exchange(self, conversation_id: str, user: str, assistant: str) -> None:
+    def append_exchange(
+        self,
+        conversation_id: str,
+        user: str,
+        assistant: str,
+        *,
+        message_id: str | None = None,
+    ) -> None:
         if self._max_messages == 0:
             return
         with self._lock:
@@ -69,4 +76,3 @@ class MessageDeduplicator:
     def release(self, message_id: str) -> None:
         with self._lock:
             self._in_flight.discard(message_id)
-

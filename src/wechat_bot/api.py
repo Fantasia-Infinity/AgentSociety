@@ -9,9 +9,14 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .config import Settings
-from .conversations import InMemoryConversationStore
 from .domain import IncomingMessage
 from .openai_compatible import OpenAICompatibleProvider
+from .persistence import (
+    CoreInboxStore,
+    SqliteActionOutbox,
+    SqliteConversationStore,
+    SqliteMessageDeduplicator,
+)
 from .runtime import BotRuntime
 from .service import AccessPolicy, BotService
 
@@ -160,7 +165,12 @@ def build_runtime(settings: Settings) -> BotRuntime:
         temperature=settings.llm_temperature,
         max_output_tokens=settings.llm_max_output_tokens,
     )
-    conversations = InMemoryConversationStore(settings.max_history_messages)
+    inbox = CoreInboxStore(settings.state_db)
+    conversations = SqliteConversationStore(
+        settings.state_db, settings.max_history_messages
+    )
+    deduplicator = SqliteMessageDeduplicator(settings.state_db)
+    action_outbox = SqliteActionOutbox(settings.state_db)
     policy = AccessPolicy(
         allowed_users=settings.allowed_users,
         allowed_groups=settings.allowed_groups,
@@ -171,8 +181,16 @@ def build_runtime(settings: Settings) -> BotRuntime:
         conversations=conversations,
         policy=policy,
         system_prompt=settings.system_prompt,
+        deduplicator=deduplicator,
     )
-    return BotRuntime(service, workers=settings.workers, queue_size=settings.queue_size)
+    return BotRuntime(
+        service,
+        workers=settings.workers,
+        queue_size=settings.queue_size,
+        inbox=inbox,
+        action_outbox=action_outbox,
+        closeables=(inbox, conversations, deduplicator, action_outbox),
+    )
 
 
 def main() -> None:

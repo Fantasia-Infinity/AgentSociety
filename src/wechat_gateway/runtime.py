@@ -5,9 +5,9 @@ from queue import Empty, Full, Queue
 from threading import Event, Thread
 
 from .adapter import WeChatAdapter
-from .core_client import GatewayCoreClient
+from .core_client import GatewayCoreClient, GatewayCoreRejectedError
 from .domain import GatewayEvent
-from .state import SentActionStore
+from .state import GatewayInboxStore, SentActionStore
 
 
 logger = logging.getLogger(__name__)
@@ -25,6 +25,7 @@ class GatewayRuntime:
         action_lease_seconds: float,
         retry_min_seconds: float,
         retry_max_seconds: float,
+        inbox: GatewayInboxStore | None = None,
     ) -> None:
         self._adapter = adapter
         self._client = client
@@ -34,6 +35,7 @@ class GatewayRuntime:
         self._lease_seconds = action_lease_seconds
         self._retry_min = retry_min_seconds
         self._retry_max = retry_max_seconds
+        self._inbox = inbox
         self._stop = Event()
         self._adapter_ready = Event()
         self._startup_error: Exception | None = None
@@ -68,11 +70,37 @@ class GatewayRuntime:
             self._uploader.join(timeout=5)
         if self._actions.is_alive():
             self._actions.join(timeout=max(self._poll_timeout + 6, 10))
+        try:
+            self._sent_actions.close()
+        finally:
+            if self._inbox is not None:
+                self._inbox.release_leases()
+                self._inbox.close()
 
     def event_queue_depth(self) -> int:
+        if self._inbox is not None:
+            return self._inbox.pending_count()
         return self._events.qsize()
 
-    def _accept_event(self, event: GatewayEvent) -> None:
+    def _accept_event(self, event: GatewayEvent) -> bool:
+        if self._inbox is not None:
+            try:
+                inserted = self._inbox.insert(event)
+                source_key = str(event.metadata.get("source_key", "")).strip()
+                if source_key:
+                    self._inbox.set_cursor(
+                        event.account_id, event.chat_id, source_key
+                    )
+            except Exception:
+                logger.exception(
+                    "gateway_event_persist_failed message_id=%s", event.message_id
+                )
+                return False
+            if not inserted:
+                logger.info(
+                    "gateway_event_duplicate message_id=%s", event.message_id
+                )
+            return True
         try:
             self._events.put_nowait(event)
         except Full:
@@ -81,8 +109,13 @@ class GatewayRuntime:
                 event.message_id,
                 event.chat_id,
             )
+            return False
+        return True
 
     def _upload_loop(self) -> None:
+        if self._inbox is not None:
+            self._durable_upload_loop()
+            return
         while not self._stop.is_set():
             try:
                 event = self._events.get(timeout=0.25)
@@ -108,6 +141,42 @@ class GatewayRuntime:
                         delay = min(delay * 2, self._retry_max)
             finally:
                 self._events.task_done()
+
+    def _durable_upload_loop(self) -> None:
+        assert self._inbox is not None
+        while not self._stop.is_set():
+            claimed = self._inbox.claim_pending(lease_seconds=max(self._retry_max, 60))
+            if not claimed:
+                self._stop.wait(0.25)
+                continue
+            event = claimed[0]
+            delay = self._retry_min
+            while not self._stop.is_set():
+                try:
+                    self._client.submit_event(event)
+                    self._inbox.mark_uploaded(event.message_id)
+                    logger.info(
+                        "gateway_event_uploaded message_id=%s", event.message_id
+                    )
+                    break
+                except GatewayCoreRejectedError as exc:
+                    self._inbox.mark_rejected(event.message_id, str(exc))
+                    logger.warning(
+                        "gateway_event_rejected message_id=%s reason=%s",
+                        event.message_id,
+                        str(exc),
+                    )
+                    break
+                except Exception as exc:
+                    self._inbox.retry(event.message_id, str(exc), delay)
+                    logger.exception(
+                        "gateway_event_upload_failed message_id=%s retry_in=%s",
+                        event.message_id,
+                        delay,
+                    )
+                    if self._stop.wait(delay):
+                        break
+                    delay = min(delay * 2, self._retry_max)
 
     def _action_loop(self) -> None:
         try:

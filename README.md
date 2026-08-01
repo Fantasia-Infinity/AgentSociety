@@ -6,8 +6,9 @@ Completions API；以后把同一接口指向本地 LLM 即可，无需改微信
 
 ## 已实现
 
-- `wechat-bot-core`：HTTP 接入、显式 allowlist、去重、会话、任务队列和 LLM 调用。
-- `wechat-gateway`：消息上报、回复长轮询、租约与 ACK、本地 SQLite 发送账本。
+- `wechat-bot-core`：HTTP 接入、显式 allowlist、持久化收件箱、去重、会话、回复 Outbox
+  和 LLM 调用。
+- `wechat-gateway`：消息采集、历史游标与 SQLite Inbox、回复长轮询、租约与 ACK、本地发送账本。
 - `mock` 适配器：可在 macOS 上用 JSON 行模拟微信消息，验证完整链路。
 - `wxauto4` / `wxautox4` 适配边界：Windows 下动态加载，不会成为 Core 的依赖。
 - `ModelProvider`：当前为远程 OpenAI-compatible API，已为本地模型保留替换点。

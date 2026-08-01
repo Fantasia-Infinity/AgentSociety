@@ -29,8 +29,10 @@ Windows 微信设备                       平台无关的 Bot/模型服务器
 长轮询取得发送动作。未来本地模型变慢、服务器短暂断线或增加多账号时，微信侧仍可
 持续收消息。
 
-当前 Core 的事件队列和 Outbox 在内存中，适合单实例开发。服务器化时保持 HTTP 协议
-不变，把它们替换为 Redis Streams 或其他持久队列即可。
+Gateway 和 Core 现在都采用本地 SQLite 持久化：Gateway 先把消息写入 Inbox，再上传
+Core；Core 把收到的事件、会话、去重状态和回复 Outbox 写入自己的数据库。服务器化时
+保持 HTTP 协议不变，可把两端 SQLite 分别替换为 Redis Streams、PostgreSQL 或其他持久
+队列/数据库。
 
 ## 回复投递语义
 
@@ -44,8 +46,9 @@ Windows 微信设备                       平台无关的 Bot/模型服务器
 的崩溃窗口，无法在第三方 UI 操作与本地事务之间做到严格原子性。Core 进程重启也会丢失
 内存 Outbox；服务器化时需换成持久队列。
 
-微信消息回调只做轻量标准化和内存入队，不在回调里发送或访问网络。当前 Gateway 的上行
-事件队列尚未持久化；离线期间会重试，但进程崩溃可能丢失尚未上报的事件。
+微信消息回调只做轻量标准化和本地 SQLite 入队，不在回调里发送或访问网络。Core 下线时，
+Gateway 会保留待上传 Inbox 并持续重试；Gateway 正常重启后会从 Inbox 继续上传。异常断电
+时依靠租约恢复，仍应通过实机故障测试验证极端崩溃窗口。
 
 ## 模型抽象
 
@@ -64,11 +67,12 @@ llama.cpp 或其他本地推理服务时有两条路径：
 | 能力 | 当前实现 | 服务器化替换 |
 | --- | --- | --- |
 | 模型 | 远程 OpenAI-compatible API | 本地推理服务 |
-| 任务队列 | 进程内有界队列 | Redis Streams |
-| 回复 Outbox | 进程内、租约 + ACK | Redis/持久消息总线 |
-| 会话历史 | 进程内存 | PostgreSQL |
+| Gateway Inbox | Windows SQLite，消息状态 + 聊天游标 | Redis Streams/数据库 |
+| Core 任务队列 | Mac SQLite，消息状态 + 租约 | Redis Streams |
+| 回复 Outbox | Mac SQLite，租约 + ACK | Redis/持久消息总线 |
+| 会话历史 | Mac SQLite | PostgreSQL |
 | 微信接入 | Windows Gateway + mock/wxauto 适配器 | 其他合规渠道适配器 |
-| Gateway 发送账本 | 本地 SQLite | SQLite 可继续使用 |
+| Gateway 消息与发送账本 | 本地 SQLite | SQLite 可继续使用 |
 | 鉴权 | Bearer token | TLS + 设备身份/密钥轮换 |
 
 ## 安全默认值

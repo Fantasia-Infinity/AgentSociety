@@ -43,6 +43,8 @@ class WxAutoAdapter:
         poll_load_wait_seconds: float = 1.0,
         poll_baseline_seconds: float = 3.0,
         wechat_factory: Callable[[], Any] | None = None,
+        cursor_getter: Callable[[str], str | None] | None = None,
+        cursor_setter: Callable[[str, str], None] | None = None,
     ) -> None:
         if module_name not in {"wxauto4", "wxautox4"}:
             raise ValueError("unsupported wxauto module")
@@ -60,6 +62,8 @@ class WxAutoAdapter:
         self._poll_load_wait = poll_load_wait_seconds
         self._poll_baseline = poll_baseline_seconds
         self._factory = wechat_factory
+        self._cursor_getter = cursor_getter
+        self._cursor_setter = cursor_setter
         self._wechat: Any | None = None
         self._on_event: EventCallback | None = None
         self._ui_lock = RLock()
@@ -97,6 +101,7 @@ class WxAutoAdapter:
                 self._wechat = factory()
             add_listen_chat = getattr(self._wechat, "AddListenChat", None)
             if callable(add_listen_chat):
+                self._recover_callback_history()
                 self._start_callback_listener(add_listen_chat)
                 mode = "callback"
             else:
@@ -164,6 +169,58 @@ class WxAutoAdapter:
                     f"{_response_message(result)}"
                 )
 
+    def _recover_callback_history(self) -> None:
+        wechat = self._wechat
+        if self._cursor_getter is None or wechat is None:
+            return
+        if not callable(getattr(wechat, "ChatWith", None)) or not callable(
+            getattr(wechat, "GetAllMessage", None)
+        ):
+            logger.info("wxauto_history_recovery_unavailable mode=callback")
+            return
+        for nickname in self._listen_chats:
+            self._recover_chat(nickname)
+
+    def _recover_chat(self, nickname: str) -> None:
+        wechat = self._wechat
+        if wechat is None:
+            return
+        with self._ui_lock:
+            result = wechat.ChatWith(nickname, exact=True)
+            if result is not None and not bool(result):
+                raise WeChatAdapterError(
+                    f"wxauto could not open {nickname}: {_response_message(result)}"
+                )
+            if self._stop.wait(self._poll_load_wait):
+                return
+            confirmed_chat = result.strip() if isinstance(result, str) else ""
+            actual_chat = self._wait_for_chat(
+                wechat,
+                nickname,
+                confirmed_chat=confirmed_chat,
+            )
+            if actual_chat is None:
+                return
+            messages = list(wechat.GetAllMessage())
+
+        snapshot = _poll_snapshot(nickname, messages)
+        cursor = self._cursor_getter(nickname) if self._cursor_getter else None
+        start_index = 0
+        if cursor:
+            for index, (_, key) in enumerate(snapshot):
+                if key == cursor or key == f"{cursor}:0":
+                    start_index = index + 1
+                    break
+        for message, key in snapshot[start_index:]:
+            self._remember_polled_message(nickname, key)
+            if _is_deliverable_message(message):
+                self._handle_message(message, wechat, source_key=key)
+        for _, key in snapshot[:start_index]:
+            self._remember_polled_message(nickname, key)
+        self._poll_snapshot_ready[nickname] = True
+        session_marker, _ = _session_state(wechat, nickname)
+        self._poll_session_markers[nickname] = session_marker
+
     def _start_polling_listener(self) -> None:
         wechat = self._wechat
         if wechat is None:
@@ -177,7 +234,10 @@ class WxAutoAdapter:
             )
 
         for nickname in self._listen_chats:
-            self._baseline_chat(nickname)
+            if self._cursor_getter is not None:
+                self._recover_chat(nickname)
+            else:
+                self._baseline_chat(nickname)
         self._poller = Thread(
             target=self._poll_loop,
             name="wxauto-free-poller",
@@ -213,8 +273,6 @@ class WxAutoAdapter:
             return
         with self._ui_lock:
             snapshot_ready = self._poll_snapshot_ready.get(nickname, False)
-            session_marker, session_new_count = _session_state(wechat, nickname)
-            self._poll_session_markers.setdefault(nickname, session_marker)
             previous_marker = self._poll_session_markers.get(nickname, "")
             result = wechat.ChatWith(nickname, exact=True)
             if result is not None and not bool(result):
@@ -232,6 +290,7 @@ class WxAutoAdapter:
             if actual_chat is None:
                 return
             messages = list(wechat.GetAllMessage())
+            session_marker, session_new_count = _session_state(wechat, nickname)
             snapshot = _poll_snapshot(nickname, messages)
             if not snapshot_ready:
                 for _, key in snapshot:
@@ -310,10 +369,16 @@ class WxAutoAdapter:
             seen.discard(order.popleft())
         return True
 
-    def _handle_message(self, message: Any, chat: Any) -> None:
+    def _handle_message(
+        self,
+        message: Any,
+        chat: Any,
+        *,
+        source_key: str | None = None,
+    ) -> bool | None:
         callback = self._on_event
         if callback is None:
-            return
+            return False
         try:
             attr = str(getattr(message, "attr", "other"))
             if attr not in {"friend", "self"}:
@@ -335,40 +400,44 @@ class WxAutoAdapter:
             chat_type = "group" if raw_chat_type == "group" else "direct"
             sender_id = str(getattr(message, "sender", "") or chat_id).strip()
             content = str(getattr(message, "content", ""))
-            timestamp = int(time.time())
-            callback(
-                GatewayEvent(
-                    message_id=_message_id(
-                        self._account_id,
-                        message,
-                        chat_id,
-                        sender_id,
-                        content,
-                        timestamp,
-                    ),
-                    account_id=self._account_id,
-                    chat_id=chat_id,
-                    sender_id=sender_id,
-                    chat_type=chat_type,
-                    content_type=content_type,
-                    content=content,
-                    timestamp=timestamp,
-                    mentioned_bot=(
-                        chat_type == "group"
-                        and bool(self._bot_mention)
-                        and self._bot_mention in content
-                    ),
-                    is_self=attr == "self",
-                    metadata={
-                        "driver": self._module_name,
-                        "wxauto_attr": attr,
-                        "wxauto_type": raw_type,
-                        "wxauto_chat_type": raw_chat_type,
-                    },
-                )
+            timestamp = _message_timestamp(message)
+            stable_source_key = source_key or _message_source_key(chat_id, message)
+            message_id = _message_id(
+                self._account_id,
+                message,
+                chat_id,
+                sender_id,
+                content,
+                timestamp,
+                source_key=stable_source_key,
             )
+            event = GatewayEvent(
+                message_id=message_id,
+                account_id=self._account_id,
+                chat_id=chat_id,
+                sender_id=sender_id,
+                chat_type=chat_type,
+                content_type=content_type,
+                content=content,
+                timestamp=timestamp,
+                mentioned_bot=(
+                    chat_type == "group"
+                    and bool(self._bot_mention)
+                    and self._bot_mention in content
+                ),
+                is_self=attr == "self",
+                metadata={
+                    "driver": self._module_name,
+                    "wxauto_attr": attr,
+                    "wxauto_type": raw_type,
+                    "wxauto_chat_type": raw_chat_type,
+                    "source_key": stable_source_key,
+                },
+            )
+            return callback(event)
         except Exception:
             logger.exception("wxauto_message_normalization_failed")
+            return False
 
 
 def _chat_info(chat: Any) -> dict[str, Any]:
@@ -394,6 +463,14 @@ def _poll_snapshot(
 
 
 def _poll_message_fingerprint(chat_id: str, message: Any) -> str:
+    return _message_source_key(chat_id, message)
+
+
+def _message_source_key(chat_id: str, message: Any) -> str:
+    for name in ("hash", "id"):
+        value = getattr(message, name, None)
+        if value is not None and not callable(value) and str(value).strip():
+            return str(value).strip()
     raw = "\0".join(
         (
             chat_id,
@@ -402,9 +479,18 @@ def _poll_message_fingerprint(chat_id: str, message: Any) -> str:
             str(getattr(message, "type", "")),
             str(getattr(message, "sender", "")),
             str(getattr(message, "content", "")),
+            str(getattr(message, "time", "")),
         )
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _message_timestamp(message: Any) -> int:
+    for name in ("time", "timestamp", "created_at"):
+        value = getattr(message, name, None)
+        if isinstance(value, (int, float)) and value > 0:
+            return int(value)
+    return int(time.time())
 
 
 def _is_deliverable_message(message: Any) -> bool:
@@ -448,13 +534,20 @@ def _message_id(
     sender_id: str,
     content: str,
     timestamp: int,
+    *,
+    source_key: str | None = None,
 ) -> str:
-    for name in ("hash", "id"):
-        value = getattr(message, name, None)
-        if value is not None and not callable(value) and str(value).strip():
-            return f"wxauto:{account_id}:{value}"
-    raw = "\0".join((account_id, chat_id, sender_id, content, str(timestamp)))
-    return "wxauto:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    key = source_key
+    if not key:
+        for name in ("hash", "id"):
+            value = getattr(message, name, None)
+            if value is not None and not callable(value) and str(value).strip():
+                key = str(value).strip()
+                break
+    if not key:
+        raw = "\0".join((account_id, chat_id, sender_id, content, str(timestamp)))
+        key = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return f"wxauto:{account_id}:{key}"
 
 
 def _response_message(response: Any) -> str:

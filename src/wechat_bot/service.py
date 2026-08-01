@@ -80,6 +80,7 @@ class BotService:
                     message.conversation_id,
                     message.content.strip(),
                     response.text,
+                    message_id=message.message_id,
                 )
                 action = OutgoingAction(
                     account_id=message.account_id,
@@ -88,10 +89,10 @@ class BotService:
                     content_type=ContentType.TEXT,
                     content=response.text,
                     reply_to_message_id=message.message_id,
+                    action_id=f"reply:{message.message_id}",
                 )
             self._deduplicator.complete(message.message_id)
             return HandleResult(accepted=True, reason="completed", action=action)
         except Exception:
             self._deduplicator.release(message.message_id)
             raise
-
