@@ -52,12 +52,17 @@ class FakePollingWeChat:
         self._messages = list(messages)
         self._empty_polls = empty_polls
         self._volatile_hashes = volatile_hashes
+        self._session_message = None
+        self._session_time = None
         self._lock = Lock()
+        self.available = True
         self.current_chat = ""
         self.poll_calls = 0
         self.sent = []
 
     def ChatWith(self, who, exact=True):
+        if not self.available:
+            raise LookupError("stale WeChat controls")
         self.current_chat = who
         return True
 
@@ -81,12 +86,20 @@ class FakePollingWeChat:
 
     def GetSession(self):
         with self._lock:
-            message = self._messages[-1] if self._messages else None
+            message = (
+                self._session_message
+                if self._session_message is not None
+                else (self._messages[-1] if self._messages else None)
+            )
             return [
                 SimpleNamespace(
                     name="测试好友",
                     content=getattr(message, "content", ""),
-                    time=str(len(self._messages)),
+                    time=(
+                        self._session_time
+                        if self._session_time is not None
+                        else str(len(self._messages))
+                    ),
                     new_count=0,
                     isnew=False,
                 )
@@ -99,6 +112,11 @@ class FakePollingWeChat:
     def append(self, message) -> None:
         with self._lock:
             self._messages.append(message)
+
+    def set_session_preview(self, message, *, marker_time: str) -> None:
+        with self._lock:
+            self._session_message = message
+            self._session_time = marker_time
 
 
 def wait_until(predicate, timeout: float = 2) -> bool:
@@ -238,6 +256,95 @@ class WxAutoAdapterTests(unittest.TestCase):
         )
         self.assertFalse(unrelated._CompareFunction(actual, 1))
 
+    def test_polling_defers_preview_marker_until_hidden_snapshot_recovers(self) -> None:
+        old_message = SimpleNamespace(
+            attr="friend",
+            type="text",
+            content="old",
+            sender="测试好友",
+            hash="old-hash",
+        )
+        new_message = SimpleNamespace(
+            attr="friend",
+            type="text",
+            content="new while minimized",
+            sender="测试好友",
+            hash="new-hash",
+        )
+        wechat = FakePollingWeChat([old_message])
+        events = []
+        adapter = WxAutoAdapter(
+            account_id="account-1",
+            module_name="wxauto4",
+            listen_chats=("测试好友",),
+            bot_mention="",
+            poll_interval_seconds=0.01,
+            poll_load_wait_seconds=0.01,
+            poll_baseline_seconds=0.03,
+            wechat_factory=lambda: wechat,
+        )
+        adapter.start(events.append)
+        try:
+            calls_before_preview = wechat.poll_calls
+            wechat.set_session_preview(new_message, marker_time="new")
+            self.assertTrue(
+                wait_until(lambda: wechat.poll_calls > calls_before_preview)
+            )
+            self.assertEqual(events, [])
+
+            wechat.append(new_message)
+            self.assertTrue(wait_until(lambda: len(events) == 1))
+            time.sleep(0.04)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].content, "new while minimized")
+        finally:
+            adapter.stop()
+
+    def test_polling_defers_seen_commit_until_preview_recovers(self) -> None:
+        old_message = SimpleNamespace(
+            attr="friend",
+            type="text",
+            content="old",
+            sender="测试好友",
+            hash="old-hash",
+        )
+        new_message = SimpleNamespace(
+            attr="friend",
+            type="text",
+            content="new controls before preview",
+            sender="测试好友",
+            hash="new-hash",
+        )
+        wechat = FakePollingWeChat([old_message])
+        wechat.set_session_preview(old_message, marker_time="old")
+        events = []
+        adapter = WxAutoAdapter(
+            account_id="account-1",
+            module_name="wxauto4",
+            listen_chats=("测试好友",),
+            bot_mention="",
+            poll_interval_seconds=0.01,
+            poll_load_wait_seconds=0.01,
+            poll_baseline_seconds=0.03,
+            wechat_factory=lambda: wechat,
+        )
+        adapter.start(events.append)
+        try:
+            calls_before_snapshot = wechat.poll_calls
+            wechat.append(new_message)
+            self.assertTrue(
+                wait_until(lambda: wechat.poll_calls > calls_before_snapshot)
+            )
+            self.assertEqual(events, [])
+
+            wechat.set_session_preview(new_message, marker_time="new")
+            self.assertTrue(wait_until(lambda: len(events) == 1))
+            time.sleep(0.04)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0].content, "new controls before preview")
+        finally:
+            adapter.stop()
+
     def test_polling_rejects_an_unexpected_chat(self) -> None:
         wechat = FakePollingWeChat([])
         wechat.ChatInfo = lambda: {
@@ -261,3 +368,80 @@ class WxAutoAdapterTests(unittest.TestCase):
         ):
             adapter.start(lambda event: None)
         adapter.stop()
+
+    def test_polling_reconnects_and_rebaselines_after_client_restart(self) -> None:
+        old_message = SimpleNamespace(
+            attr="friend",
+            type="text",
+            content="old",
+            sender="测试好友",
+            hash="old-hash",
+        )
+        offline_message = SimpleNamespace(
+            attr="friend",
+            type="text",
+            content="arrived while client was offline",
+            sender="测试好友",
+            hash="offline-hash",
+        )
+        live_message = SimpleNamespace(
+            attr="friend",
+            type="text",
+            content="after reconnect",
+            sender="测试好友",
+            hash="live-hash",
+        )
+        first = FakePollingWeChat([old_message])
+        second = FakePollingWeChat([old_message, offline_message])
+        clients = iter((first, second))
+        factory_calls = []
+
+        def factory():
+            factory_calls.append(time.monotonic())
+            return next(clients)
+
+        events = []
+        adapter = WxAutoAdapter(
+            account_id="account-1",
+            module_name="wxauto4",
+            listen_chats=("测试好友",),
+            bot_mention="",
+            poll_interval_seconds=0.01,
+            poll_load_wait_seconds=0.01,
+            poll_baseline_seconds=0.03,
+            poll_reconnect_min_seconds=0.01,
+            poll_reconnect_max_seconds=0.04,
+            wechat_factory=factory,
+        )
+        adapter.start(events.append)
+        try:
+            first.available = False
+            self.assertTrue(wait_until(lambda: len(factory_calls) == 2))
+            self.assertTrue(wait_until(lambda: second.poll_calls >= 3))
+            self.assertEqual(events, [])
+
+            second.append(live_message)
+            self.assertTrue(wait_until(lambda: len(events) == 1))
+            self.assertEqual(events[0].content, "after reconnect")
+
+            action = GatewayAction(
+                action_id="action-after-reconnect",
+                account_id="account-1",
+                chat_id="测试好友",
+                chat_type="direct",
+                content_type="text",
+                content="reconnected reply",
+            )
+            adapter.send(action)
+            self.assertEqual(
+                second.sent,
+                [
+                    {
+                        "msg": "reconnected reply",
+                        "who": "测试好友",
+                        "exact": True,
+                    }
+                ],
+            )
+        finally:
+            adapter.stop()
