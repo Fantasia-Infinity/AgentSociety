@@ -91,6 +91,12 @@ class BotServiceTests(unittest.TestCase):
         self.assertFalse(result.accepted)
         self.assertEqual(result.reason, "user_not_allowed")
 
+    def test_self_message_does_not_generate_a_reply(self) -> None:
+        result = self.service.handle(message(is_self=True))
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.reason, "self_message")
+        self.assertEqual(self.provider.requests, [])
+
 
 if __name__ == "__main__":
     unittest.main()

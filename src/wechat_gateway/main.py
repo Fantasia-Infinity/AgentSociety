@@ -23,6 +23,7 @@ def build_adapter(settings: GatewaySettings) -> WeChatAdapter:
         module_name=settings.driver,
         listen_chats=settings.listen_chats,
         bot_mention=settings.bot_mention,
+        poll_interval_seconds=settings.wechat_poll_interval_seconds,
     )
 
 
