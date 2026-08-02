@@ -9,7 +9,6 @@ import {
   ModelRuntime,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
-import { execFileSync } from "node:child_process";
 import { Type } from "typebox";
 
 import { assertRemoteUrl, type AgentHostConfig } from "./config.js";
@@ -52,7 +51,7 @@ export class PiAgentEngine implements AgentEngine {
     } else {
       provider = "agent-society-remote";
       modelId = config.remoteModel!;
-      const apiKey = remoteApiKey(config);
+      const apiKey = config.remoteApiKey;
       runtime.registerProvider(provider, {
         name: "AgentSociety remote OpenAI-compatible API",
         baseUrl: config.remoteBaseUrl!,
@@ -332,26 +331,6 @@ export class PiAgentEngine implements AgentEngine {
       content: [{ type: "text" as const, text: JSON.stringify(value) }],
       details: {},
     };
-  }
-}
-
-function remoteApiKey(config: AgentHostConfig): string | undefined {
-  if (config.remoteApiKey) return config.remoteApiKey;
-  if (!config.remoteApiKeyKeychainService) return undefined;
-  if (process.platform !== "darwin") {
-    throw new Error("macOS Keychain model credentials require macOS");
-  }
-  const account = config.remoteApiKeyKeychainAccount;
-  const args = ["find-generic-password"];
-  if (account) args.push("-a", account);
-  args.push("-s", config.remoteApiKeyKeychainService, "-w");
-  try {
-    return execFileSync("/usr/bin/security", args, {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-  } catch {
-    throw new Error("Could not load the remote model credential from Keychain");
   }
 }
 

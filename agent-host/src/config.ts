@@ -1,7 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
 import { homedir, hostname, userInfo } from "node:os";
 import { resolve } from "node:path";
+
+import {
+  readLegacyMacKeychainCredential,
+  readSystemCredential,
+} from "./credential-store.js";
 
 export type RemoteToolPolicy = "no_tools" | "read_only" | "full";
 
@@ -24,8 +28,6 @@ export interface AgentHostConfig {
   piModel?: string;
   remoteBaseUrl?: string;
   remoteApiKey?: string;
-  remoteApiKeyKeychainService?: string;
-  remoteApiKeyKeychainAccount?: string;
   remoteModel?: string;
   contextWindow: number;
   maxOutputTokens: number;
@@ -115,7 +117,9 @@ export function loadConfig(): AgentHostConfig {
   const hubToken = hubRuntimeDisabled
     ? undefined
     : process.env.AGENT_HUB_TOKEN?.trim() ||
-      readKeychainSecret(
+      configuredCredential(
+        process.env.AGENT_HUB_TOKEN_CREDENTIAL_SERVICE?.trim(),
+        process.env.AGENT_HUB_TOKEN_CREDENTIAL_ACCOUNT?.trim(),
         process.env.AGENT_HUB_TOKEN_KEYCHAIN_SERVICE?.trim(),
         process.env.AGENT_HUB_TOKEN_KEYCHAIN_ACCOUNT?.trim(),
         "Hub",
@@ -139,11 +143,13 @@ export function loadConfig(): AgentHostConfig {
   const remoteApiKey =
     process.env.AGENT_REMOTE_API_KEY?.trim() ||
     process.env.LLM_API_KEY?.trim() ||
-    undefined;
-  const remoteApiKeyKeychainService =
-    process.env.AGENT_REMOTE_API_KEY_KEYCHAIN_SERVICE?.trim() || undefined;
-  const remoteApiKeyKeychainAccount =
-    process.env.AGENT_REMOTE_API_KEY_KEYCHAIN_ACCOUNT?.trim() || undefined;
+    configuredCredential(
+      process.env.AGENT_REMOTE_API_KEY_CREDENTIAL_SERVICE?.trim(),
+      process.env.AGENT_REMOTE_API_KEY_CREDENTIAL_ACCOUNT?.trim(),
+      process.env.AGENT_REMOTE_API_KEY_KEYCHAIN_SERVICE?.trim(),
+      process.env.AGENT_REMOTE_API_KEY_KEYCHAIN_ACCOUNT?.trim(),
+      "remote model",
+    );
   if (!piProvider && (!remoteBaseUrl || !remoteModel)) {
     throw new Error(
       "Configure PI_PROVIDER/PI_MODEL or a remote LLM_BASE_URL/LLM_MODEL",
@@ -173,16 +179,21 @@ export function loadConfig(): AgentHostConfig {
     ...(piModel ? { piModel } : {}),
     ...(remoteBaseUrl ? { remoteBaseUrl } : {}),
     ...(remoteApiKey ? { remoteApiKey } : {}),
-    ...(remoteApiKeyKeychainService
-      ? { remoteApiKeyKeychainService }
-      : {}),
-    ...(remoteApiKeyKeychainAccount
-      ? { remoteApiKeyKeychainAccount }
-      : {}),
     ...(remoteModel ? { remoteModel } : {}),
     contextWindow: positiveNumber("AGENT_MODEL_CONTEXT_WINDOW", 128_000),
     maxOutputTokens: positiveNumber("AGENT_MODEL_MAX_TOKENS", 8_192),
   };
+}
+
+function configuredCredential(
+  service: string | undefined,
+  account: string | undefined,
+  legacyService: string | undefined,
+  legacyAccount: string | undefined,
+  label: string,
+): string | undefined {
+  if (service || account) return readSystemCredential(service, account, label);
+  return readLegacyMacKeychainCredential(legacyService, legacyAccount, label);
 }
 
 export function resolveHubConfig(
@@ -225,26 +236,4 @@ function secureHubToken(value: string): string {
     throw new Error("AGENT_HUB_TOKEN must contain at least 24 characters");
   }
   return value;
-}
-
-function readKeychainSecret(
-  service: string | undefined,
-  account: string | undefined,
-  label: string,
-): string | undefined {
-  if (!service) return undefined;
-  if (process.platform !== "darwin") {
-    throw new Error(`${label} Keychain credentials require macOS`);
-  }
-  const args = ["find-generic-password"];
-  if (account) args.push("-a", account);
-  args.push("-s", service, "-w");
-  try {
-    return execFileSync("/usr/bin/security", args, {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-  } catch {
-    throw new Error(`Could not load the ${label} credential from Keychain`);
-  }
 }

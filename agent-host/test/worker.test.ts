@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { Entry } from "@napi-rs/keyring";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   mkdirSync,
   mkdtempSync,
@@ -23,9 +25,17 @@ import type { AgentEngine, HubClaim, HubTask } from "../src/types.js";
 import { resolveTaskWorkspace, TaskWorker } from "../src/worker.js";
 
 const temporaryDirectories: string[] = [];
+const temporaryCredentials: Entry[] = [];
 afterEach(() => {
   for (const path of temporaryDirectories.splice(0)) {
     rmSync(path, { recursive: true, force: true });
+  }
+  for (const entry of temporaryCredentials.splice(0)) {
+    try {
+      entry.deletePassword();
+    } catch {
+      // A failed setup may not have created the credential.
+    }
   }
 });
 
@@ -33,6 +43,22 @@ function temporaryDirectory(): string {
   const path = mkdtempSync(join(tmpdir(), "agent-host-test-"));
   temporaryDirectories.push(path);
   return path;
+}
+
+function temporaryCredentialNamespace(): {
+  namespace: string;
+  account: string;
+} {
+  return {
+    namespace: `AgentSociety Test ${randomUUID()}`,
+    account: `test-${randomUUID()}`,
+  };
+}
+
+function trackedCredential(service: string, account: string): Entry {
+  const entry = new Entry(service, account);
+  temporaryCredentials.push(entry);
+  return entry;
 }
 
 function config(workspaceRoot: string): AgentHostConfig {
@@ -196,16 +222,23 @@ test("agent-specific environment takes precedence over the legacy project env", 
   assert.equal(discoverProjectEnv(host), join(repository, ".env"));
 });
 
-test("setup needs only model configuration and an automatic workspace", () => {
+test("setup stores the model key outside its non-secret configuration", () => {
   const workspace = temporaryDirectory();
   const configPath = join(workspace, ".env.agent");
   const script = resolve(process.cwd(), "scripts/setup.mjs");
+  const credential = temporaryCredentialNamespace();
+  const modelEntry = trackedCredential(
+    `${credential.namespace} Remote LLM API`,
+    credential.account,
+  );
   const result = spawnSync(process.execPath, [script, "--configure-only"], {
     cwd: workspace,
     env: {
       ...process.env,
       AGENT_SETUP_CONFIG_PATH: configPath,
       AGENT_SETUP_WORKSPACE: workspace,
+      AGENT_CREDENTIAL_NAMESPACE: credential.namespace,
+      AGENT_CREDENTIAL_ACCOUNT: credential.account,
       AGENT_HUB_URL: "",
       AGENT_HUB_TOKEN: "",
       AGENT_REMOTE_BASE_URL: "https://model.test.invalid/v1",
@@ -217,23 +250,64 @@ test("setup needs only model configuration and an automatic workspace", () => {
   assert.equal(result.status, 0, result.stderr);
   const contents = readFileSync(configPath, "utf8");
   assert.doesNotMatch(contents, /AGENT_HUB_/u);
+  assert.doesNotMatch(contents, /test-model-key/u);
+  assert.doesNotMatch(contents, /^AGENT_REMOTE_API_KEY=/mu);
   assert.match(contents, /AGENT_REMOTE_MODEL="test-model"/u);
+  assert.ok(
+    contents.includes(
+      `AGENT_REMOTE_API_KEY_CREDENTIAL_SERVICE="${credential.namespace} Remote LLM API"`,
+    ),
+  );
+  assert.equal(modelEntry.getPassword(), "test-model-key");
+  assert.doesNotMatch(`${result.stdout}${result.stderr}`, /test-model-key/u);
+  const repeated = spawnSync(process.execPath, [script, "--configure-only"], {
+    cwd: workspace,
+    env: {
+      ...process.env,
+      AGENT_SETUP_CONFIG_PATH: configPath,
+      AGENT_SETUP_WORKSPACE: workspace,
+      AGENT_CREDENTIAL_NAMESPACE: credential.namespace,
+      AGENT_CREDENTIAL_ACCOUNT: credential.account,
+      AGENT_HUB_URL: "",
+      AGENT_HUB_TOKEN: "",
+      AGENT_REMOTE_BASE_URL: "",
+      AGENT_REMOTE_MODEL: "",
+      AGENT_REMOTE_API_KEY: "",
+    },
+    encoding: "utf8",
+  });
+  assert.equal(repeated.status, 0, repeated.stderr);
+  assert.doesNotMatch(
+    readFileSync(configPath, "utf8"),
+    /test-model-key|^AGENT_REMOTE_API_KEY=/mu,
+  );
   assert.match(contents, new RegExp(`AGENT_WORKSPACE_ROOT="${workspace}"`, "u"));
   if (process.platform !== "win32") {
     assert.equal(statSync(configPath).mode & 0o777, 0o600);
   }
 });
 
-test("setup adds Hub configuration only when both Hub values are supplied", () => {
+test("setup stores model and Hub secrets only in the system credential store", () => {
   const workspace = temporaryDirectory();
   const configPath = join(workspace, ".env.agent");
   const script = resolve(process.cwd(), "scripts/setup.mjs");
+  const credential = temporaryCredentialNamespace();
+  const modelEntry = trackedCredential(
+    `${credential.namespace} Remote LLM API`,
+    credential.account,
+  );
+  const hubEntry = trackedCredential(
+    `${credential.namespace} Hub`,
+    credential.account,
+  );
   const result = spawnSync(process.execPath, [script, "--configure-only"], {
     cwd: workspace,
     env: {
       ...process.env,
       AGENT_SETUP_CONFIG_PATH: configPath,
       AGENT_SETUP_WORKSPACE: workspace,
+      AGENT_CREDENTIAL_NAMESPACE: credential.namespace,
+      AGENT_CREDENTIAL_ACCOUNT: credential.account,
       AGENT_HUB_URL: "https://hub.test.invalid",
       AGENT_HUB_TOKEN: "test-hub-token-with-24-characters",
       AGENT_REMOTE_BASE_URL: "https://model.test.invalid/v1",
@@ -245,7 +319,68 @@ test("setup adds Hub configuration only when both Hub values are supplied", () =
   assert.equal(result.status, 0, result.stderr);
   const contents = readFileSync(configPath, "utf8");
   assert.match(contents, /AGENT_HUB_URL="https:\/\/hub\.test\.invalid"/u);
-  assert.match(contents, /AGENT_HUB_TOKEN="test-hub-token-with-24-characters"/u);
+  assert.doesNotMatch(contents, /test-model-key|test-hub-token-with-24-characters/u);
+  assert.doesNotMatch(contents, /^AGENT_(?:REMOTE_API_KEY|HUB_TOKEN)=/mu);
+  assert.ok(
+    contents.includes(
+      `AGENT_HUB_TOKEN_CREDENTIAL_SERVICE="${credential.namespace} Hub"`,
+    ),
+  );
+  assert.equal(modelEntry.getPassword(), "test-model-key");
+  assert.equal(hubEntry.getPassword(), "test-hub-token-with-24-characters");
+  assert.doesNotMatch(
+    `${result.stdout}${result.stderr}`,
+    /test-model-key|test-hub-token-with-24-characters/u,
+  );
+});
+
+test("setup migrates legacy plaintext secrets out of an existing config", () => {
+  const workspace = temporaryDirectory();
+  const configPath = join(workspace, ".env.agent");
+  const script = resolve(process.cwd(), "scripts/setup.mjs");
+  const credential = temporaryCredentialNamespace();
+  const modelEntry = trackedCredential(
+    `${credential.namespace} Remote LLM API`,
+    credential.account,
+  );
+  const hubEntry = trackedCredential(
+    `${credential.namespace} Hub`,
+    credential.account,
+  );
+  writeFileSync(
+    configPath,
+    [
+      "AGENT_REMOTE_BASE_URL=https://model.test.invalid/v1",
+      "AGENT_REMOTE_MODEL=test-model",
+      "AGENT_REMOTE_API_KEY=legacy-model-secret",
+      "AGENT_HUB_URL=https://hub.test.invalid",
+      "AGENT_HUB_TOKEN=legacy-hub-token-with-24-characters",
+      "",
+    ].join("\n"),
+  );
+  const result = spawnSync(process.execPath, [script, "--configure-only"], {
+    cwd: workspace,
+    env: {
+      ...process.env,
+      AGENT_SETUP_CONFIG_PATH: configPath,
+      AGENT_SETUP_WORKSPACE: workspace,
+      AGENT_CREDENTIAL_NAMESPACE: credential.namespace,
+      AGENT_CREDENTIAL_ACCOUNT: credential.account,
+      AGENT_HUB_URL: "",
+      AGENT_HUB_TOKEN: "",
+      AGENT_REMOTE_BASE_URL: "",
+      AGENT_REMOTE_MODEL: "",
+      AGENT_REMOTE_API_KEY: "",
+      LLM_API_KEY: "",
+    },
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const contents = readFileSync(configPath, "utf8");
+  assert.doesNotMatch(contents, /legacy-model-secret|legacy-hub-token/u);
+  assert.doesNotMatch(contents, /^AGENT_(?:REMOTE_API_KEY|HUB_TOKEN)=/mu);
+  assert.equal(modelEntry.getPassword(), "legacy-model-secret");
+  assert.equal(hubEntry.getPassword(), "legacy-hub-token-with-24-characters");
 });
 
 test("run registry resolves run, task, and session identifiers", () => {

@@ -49,7 +49,9 @@ Windows PowerShell 使用 `./agent.ps1`。首次运行只要求 OpenAI-compatibl
 ID 和 API key；Hub URL/token 是可留空的附加项。随后自动安装锁定依赖、应用安全补丁、构建、
 生成本机身份、使用仓库根目录作为 workspace、调用一次最小模型连通性检查，并打开 Pi 原生
 TUI。配置 Hub 时才会额外登记 Principal/Actor/Node。
-配置保存在被 Git 忽略且权限为 `0600` 的 `.env.agent`。
+非敏感配置保存在被 Git 忽略且权限为 `0600` 的 `.env.agent`；LLM API key 和 Hub token
+只保存到 macOS Keychain、Windows Credential Manager 或 Linux Secret Service，配置文件
+不含明文凭据。系统安全凭据库不可用时 setup 会停止，不会降级写入文件。
 
 后续常用命令：
 
