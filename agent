@@ -1,7 +1,20 @@
 #!/bin/sh
 set -eu
 
-repository_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+script_path=$0
+case "$script_path" in
+    */*) ;;
+    *) script_path=$(command -v "$script_path") ;;
+esac
+while [ -L "$script_path" ]; do
+    script_dir=$(CDPATH= cd -- "$(dirname -- "$script_path")" && pwd -P)
+    link_target=$(readlink "$script_path")
+    case "$link_target" in
+        /*) script_path=$link_target ;;
+        *) script_path="$script_dir/$link_target" ;;
+    esac
+done
+repository_root=$(CDPATH= cd -- "$(dirname -- "$script_path")" && pwd -P)
 agent_host="$repository_root/agent-host"
 command=${1:-tui}
 if [ "$#" -gt 0 ]; then
@@ -13,8 +26,32 @@ if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
     exit 1
 fi
 
+install_global_command() {
+    global_bin=${AGENT_GLOBAL_BIN:-"${HOME}/.local/bin"}
+    global_command="$global_bin/agent"
+
+    mkdir -p "$global_bin"
+    if [ -e "$global_command" ] || [ -L "$global_command" ]; then
+        existing_target=$(readlink "$global_command" 2>/dev/null || true)
+        if [ "$existing_target" != "$repository_root/agent" ]; then
+            echo "Refusing to overwrite existing command: $global_command" >&2
+            return 1
+        fi
+    else
+        ln -s "$repository_root/agent" "$global_command"
+    fi
+
+    echo "Global command available as: $global_command"
+    case ":${PATH:-}:" in
+        *:"$global_bin":*) ;;
+        *) echo "Add $global_bin to PATH to run 'agent' from any directory." >&2 ;;
+    esac
+}
+
 if [ "$command" = "setup" ]; then
-    exec npm --prefix "$agent_host" run setup -- "$@"
+    npm --prefix "$agent_host" run setup -- "$@"
+    install_global_command
+    exit 0
 fi
 
 did_setup=0
@@ -22,6 +59,7 @@ if [ ! -f "$agent_host/.setup-complete" ] || [ ! -f "$repository_root/.env.agent
     npm --prefix "$agent_host" run setup
     did_setup=1
 fi
+install_global_command
 if [ "$command" = "doctor" ] && [ "$did_setup" -eq 1 ]; then
     exit 0
 fi

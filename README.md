@@ -53,6 +53,10 @@ TUI。配置 Hub 时才会额外登记 Principal/Actor/Node。
 只保存到 macOS Keychain、Windows Credential Manager 或 Linux Secret Service，配置文件
 不含明文凭据。系统安全凭据库不可用时 setup 会停止，不会降级写入文件。
 
+安装完成后，入口会自动在用户级 `~/.local/bin/agent` 注册全局命令；只要该目录在
+`PATH` 中，之后可从任意目录直接运行 `agent`。已有同名非 AgentSociety 命令时，安装器
+会拒绝覆盖；可用 `AGENT_GLOBAL_BIN=/path/to/bin` 指定其他用户级目录。
+
 后续常用命令：
 
 ```bash
