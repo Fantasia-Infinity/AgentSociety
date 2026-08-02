@@ -13,7 +13,7 @@ import { execFileSync } from "node:child_process";
 import { Type } from "typebox";
 
 import { assertRemoteUrl, type AgentHostConfig } from "./config.js";
-import { HubClient } from "./hub-client.js";
+import type { HubClient } from "./hub-client.js";
 import type {
   AgentConversation,
   AgentEngine,
@@ -31,7 +31,7 @@ const HUB_TOOL_NAMES = [
 export class PiAgentEngine implements AgentEngine {
   private constructor(
     private readonly config: AgentHostConfig,
-    private readonly hub: HubClient,
+    private readonly hub: HubClient | undefined,
     private readonly modelRuntime: ModelRuntime,
     private readonly model: NonNullable<
       ReturnType<ModelRuntime["getModel"]>
@@ -40,7 +40,7 @@ export class PiAgentEngine implements AgentEngine {
 
   static async create(
     config: AgentHostConfig,
-    hub: HubClient,
+    hub?: HubClient,
   ): Promise<PiAgentEngine> {
     const runtime = await ModelRuntime.create();
     let provider: string;
@@ -50,11 +50,11 @@ export class PiAgentEngine implements AgentEngine {
       provider = config.piProvider;
       modelId = config.piModel;
     } else {
-      provider = "ssh-remote";
+      provider = "agent-society-remote";
       modelId = config.remoteModel!;
       const apiKey = remoteApiKey(config);
       runtime.registerProvider(provider, {
-        name: "SSH remote OpenAI-compatible API",
+        name: "AgentSociety remote OpenAI-compatible API",
         baseUrl: config.remoteBaseUrl!,
         api: "openai-completions",
         ...(apiKey ? { apiKey } : {}),
@@ -226,6 +226,7 @@ export class PiAgentEngine implements AgentEngine {
 
   private toolNames(mode: "local" | "remote" | "diagnostic"): string[] {
     if (mode === "diagnostic") return [];
+    const hubTools = this.hub ? HUB_TOOL_NAMES : [];
     if (mode === "local") {
       return [
         "read",
@@ -235,7 +236,7 @@ export class PiAgentEngine implements AgentEngine {
         "grep",
         "find",
         "ls",
-        ...HUB_TOOL_NAMES,
+        ...hubTools,
       ];
     }
     if (this.config.remoteToolPolicy === "full") {
@@ -247,23 +248,25 @@ export class PiAgentEngine implements AgentEngine {
         "grep",
         "find",
         "ls",
-        ...HUB_TOOL_NAMES,
+        ...hubTools,
       ];
     }
     if (this.config.remoteToolPolicy === "read_only") {
-      return ["read", "grep", "find", "ls", ...HUB_TOOL_NAMES];
+      return ["read", "grep", "find", "ls", ...hubTools];
     }
-    return [...HUB_TOOL_NAMES];
+    return [...hubTools];
   }
 
   private createHubTools() {
+    if (!this.hub) return [];
+    const hub = this.hub;
     const listActors = defineTool({
       name: "hub_list_actors",
       label: "List collaboration actors",
       description:
         "List human, agent, and service actors registered in the coordination Hub.",
       parameters: Type.Object({}),
-      execute: async () => this.toolResult(await this.hub.listActors()),
+      execute: async () => this.toolResult(await hub.listActors()),
     });
     const listTasks = defineTool({
       name: "hub_list_tasks",
@@ -282,7 +285,7 @@ export class PiAgentEngine implements AgentEngine {
       }),
       execute: async (_id, params) =>
         this.toolResult(
-          await this.hub.listTasks(params.status as TaskStatus | undefined),
+          await hub.listTasks(params.status as TaskStatus | undefined),
         ),
     });
     const getTask = defineTool({
@@ -291,7 +294,7 @@ export class PiAgentEngine implements AgentEngine {
       description: "Read one task, including its result and artifact references.",
       parameters: Type.Object({ taskId: Type.String({ minLength: 1 }) }),
       execute: async (_id, params) =>
-        this.toolResult(await this.hub.getTask(params.taskId)),
+        this.toolResult(await hub.getTask(params.taskId)),
     });
     const createTask = defineTool({
       name: "hub_create_task",
@@ -306,7 +309,7 @@ export class PiAgentEngine implements AgentEngine {
       }),
       execute: async (_id, params) =>
         this.toolResult(
-          await this.hub.createTask({
+          await hub.createTask({
             principal_id: this.config.principalId,
             delegator_actor_id: this.config.actorId,
             objective: params.objective,

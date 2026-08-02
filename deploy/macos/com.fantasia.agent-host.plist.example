@@ -7,11 +7,11 @@
     <key>ProgramArguments</key>
     <array>
         <string>/opt/homebrew/bin/node</string>
-        <string>/absolute/path/to/ssh/agent-host/dist/src/cli.js</string>
+        <string>/absolute/path/to/AgentSociety/agent-host/dist/src/cli.js</string>
         <string>worker</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/absolute/path/to/ssh/agent-host</string>
+    <string>/absolute/path/to/AgentSociety/agent-host</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>

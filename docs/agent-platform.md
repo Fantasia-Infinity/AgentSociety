@@ -1,4 +1,4 @@
-# 基于 Pi 的本地优先 Agent 协作平台
+# AgentSociety：基于 Pi 的本地优先 Agent 平台
 
 ## 已落地的第一条纵切
 
@@ -102,23 +102,21 @@ LLM_BACKEND=remote PYTHONPATH=src python3 -m wechat_bot.api
 唯一系统前置条件是 Git 和 Node.js 22.19+。在 macOS/Linux 上：
 
 ```bash
-git clone <repository-url> ssh
-cd ssh
+git clone <repository-url> AgentSociety
+cd AgentSociety
 ./agent
 ```
 
-Windows PowerShell 使用 `./agent.ps1`。引导器只要求输入：
+Windows PowerShell 使用 `./agent.ps1`。引导器只要求输入三项模型信息：
 
-1. Hub URL。
-2. Hub token。
-3. OpenAI-compatible 模型 URL。
-4. Model ID。
-5. Model API key。
+1. OpenAI-compatible 模型 URL。
+2. Model ID。
+3. Model API key。
 
-其余项目自动完成：依赖安装、安全补丁、TypeScript 构建、稳定本机身份、仓库 workspace、
-session 目录、Hub 注册和 doctor 检查。doctor 使用不暴露任何工具的临时 session，发送一次
-不含仓库内容的最小模型请求，确保地址、模型与凭据真实可用；成功后首次 `./agent` 会继续
-打开 Pi 原生 TUI。
+Hub URL/token 是同一次引导中的可选项，直接回车即可保持普通 Agent 模式。其余项目自动完成：
+依赖安装、安全补丁、TypeScript 构建、稳定本机身份、仓库 workspace、session 目录和 doctor
+检查。doctor 使用不暴露任何工具的临时 session，发送一次不含仓库内容的最小模型请求；配置
+Hub 时才执行 Hub 注册。成功后首次 `./agent` 会继续打开 Pi 原生 TUI。
 
 Pi 0.83.0 自带 shrinkwrap 固定了存在 OOM DoS 公告的 `brace-expansion 5.0.7`，且 npm
 override 无法越过该 shrinkwrap。因此 setup 直接锁定安全版 5.0.9，并用仓库内脚本只覆盖
@@ -129,6 +127,11 @@ setup 把配置写入项目根目录 `.env.agent`，Agent Host 会优先自动�
 兼容回退。模型地址必须是远程 HTTP(S) 地址，loopback 会被拒绝。Principal 默认为
 `human-<登录用户名>`，Actor/Node 根据主机名生成；workspace 自动设为 clone 后的仓库根目录。
 可以参照 `.env.agent.example` 覆盖这些高级默认值。
+
+没有 `AGENT_HUB_URL`/`AGENT_HUB_TOKEN` 时，本地 TUI、session 和模型完全独立运行，也不会向
+Pi 暴露 Hub 工具。`worker`、`once`、`observe`、`attach`、`register` 是显式协作命令，缺少
+Hub 配置时会给出清晰错误。以后需要协作时重新运行 `./agent setup`，补入 Hub 两项即可；
+已经配置 Hub 时仍可用 `./agent local` 临时强制脱离 Hub。
 
 若 Mac 上的远程 API key 已放在 Login Keychain，可避免把密钥写进 `.env.agent`：
 
@@ -144,6 +147,9 @@ Agent Host 通过参数数组调用系统 `security` 命令，密钥不会进入
 ```bash
 # 本地用户使用 Pi 原生完整 TUI 直接操作
 ./agent
+
+# 忽略已有 Hub 配置，强制作为普通本地 Agent 启动
+./agent local
 
 # 领取一个任务，便于调试
 ./agent once
@@ -176,7 +182,7 @@ curl -X POST http://127.0.0.1:8090/v1/hub/tasks \
     "delegator_actor_id":"pi-macbook",
     "assignee_actor_id":"pi-server",
     "objective":"运行测试并返回失败摘要",
-    "input":{"workspace":"ssh"},
+    "input":{"workspace":"."},
     "required_capabilities":["code"],
     "idempotency_key":"test-2026-08-02-1"
   }'

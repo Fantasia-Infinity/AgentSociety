@@ -15,8 +15,8 @@
 在 PowerShell 中：
 
 ```powershell
-git clone https://github.com/Fantasia-Infinity/wechat-bot-core.git
-cd wechat-bot-core
+git clone https://github.com/Fantasia-Infinity/AgentSociety.git
+cd AgentSociety
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -e .

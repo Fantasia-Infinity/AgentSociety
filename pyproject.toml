@@ -3,9 +3,9 @@ requires = ["setuptools>=75"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "wechat-bot-core"
+name = "agent-society"
 version = "0.4.0"
-description = "Local-first agent collaboration hub, Pi host, and thin WeChat gateway"
+description = "AgentSociety local-first agents, optional collaboration hub, and channel adapters"
 requires-python = ">=3.11"
 dependencies = []
 

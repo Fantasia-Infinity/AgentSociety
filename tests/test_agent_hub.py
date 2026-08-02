@@ -74,7 +74,7 @@ class AgentHubStoreTests(unittest.TestCase):
             context_id="context-1",
             idempotency_key=idempotency_key,
             required_capabilities=("code", "filesystem"),
-            input={"repository": "ssh"},
+            input={"repository": "AgentSociety"},
             metadata={},
             origin="local_ui",
         )

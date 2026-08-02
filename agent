@@ -27,8 +27,8 @@ if [ "$command" = "doctor" ] && [ "$did_setup" -eq 1 ]; then
 fi
 
 case "$command" in
-    tui|interactive)
-        exec npm --prefix "$agent_host" run tui
+    tui|interactive|local)
+        exec npm --prefix "$agent_host" run start -- "$command"
         ;;
     worker)
         exec npm --prefix "$agent_host" run worker
@@ -40,7 +40,7 @@ case "$command" in
         exec npm --prefix "$agent_host" run start -- "$command" "$@"
         ;;
     *)
-        echo "Usage: ./agent [setup|tui|worker|doctor|sessions|register|once|observe ID|attach ID]" >&2
+        echo "Usage: ./agent [setup|tui|local|worker|doctor|sessions|register|once|observe ID|attach ID]" >&2
         exit 2
         ;;
 esac

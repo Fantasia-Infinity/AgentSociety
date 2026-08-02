@@ -6,7 +6,7 @@ import { PiAgentEngine } from "./pi-engine.js";
 
 export async function runDoctor(
   config: AgentHostConfig,
-  hub: HubClient,
+  hub?: HubClient,
 ): Promise<void> {
   if (!statSync(config.workspaceRoot).isDirectory()) {
     throw new Error("AGENT_WORKSPACE_ROOT must be a directory");
@@ -32,7 +32,11 @@ export async function runDoctor(
     conversation.dispose();
   }
 
-  console.log(`Hub connection:   ok (${config.hubUrl})`);
+  console.log(
+    hub
+      ? `Hub connection:   ok (${config.hubUrl})`
+      : "Hub connection:   disabled (local Agent mode)",
+  );
   console.log(`Agent identity:   ${config.actorId} on ${config.nodeId}`);
   console.log(`Workspace:        ok (${config.workspaceRoot})`);
   console.log(`Session storage:  ok (${config.sessionDir})`);

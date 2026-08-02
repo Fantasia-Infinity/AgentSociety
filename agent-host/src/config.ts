@@ -6,8 +6,9 @@ import { resolve } from "node:path";
 export type RemoteToolPolicy = "no_tools" | "read_only" | "full";
 
 export interface AgentHostConfig {
-  hubUrl: string;
-  hubToken: string;
+  hubEnabled: boolean;
+  hubUrl?: string;
+  hubToken?: string;
   principalId: string;
   principalDisplayName: string;
   actorId: string;
@@ -107,13 +108,19 @@ export function loadConfig(): AgentHostConfig {
       "AGENT_REMOTE_TOOL_POLICY must be no_tools, read_only, or full",
     );
   }
-  const hubToken =
-    process.env.AGENT_HUB_TOKEN?.trim() ||
-    readKeychainSecret(
-      process.env.AGENT_HUB_TOKEN_KEYCHAIN_SERVICE?.trim(),
-      process.env.AGENT_HUB_TOKEN_KEYCHAIN_ACCOUNT?.trim(),
-      "Hub",
-    );
+  const hubRuntimeDisabled = process.env.AGENT_HUB_RUNTIME_DISABLED === "1";
+  const hubUrl = hubRuntimeDisabled
+    ? undefined
+    : process.env.AGENT_HUB_URL?.trim() || undefined;
+  const hubToken = hubRuntimeDisabled
+    ? undefined
+    : process.env.AGENT_HUB_TOKEN?.trim() ||
+      readKeychainSecret(
+        process.env.AGENT_HUB_TOKEN_KEYCHAIN_SERVICE?.trim(),
+        process.env.AGENT_HUB_TOKEN_KEYCHAIN_ACCOUNT?.trim(),
+        "Hub",
+      );
+  const hubConfig = resolveHubConfig(hubUrl, hubToken);
 
   const piProvider = process.env.PI_PROVIDER?.trim() || undefined;
   const piModel = process.env.PI_MODEL?.trim() || undefined;
@@ -147,11 +154,7 @@ export function loadConfig(): AgentHostConfig {
     process.env.AGENT_WORKSPACE_ROOT?.trim() || process.cwd(),
   );
   return {
-    hubUrl: required("AGENT_HUB_URL", "http://127.0.0.1:8090").replace(
-      /\/$/u,
-      "",
-    ),
-    hubToken: secureHubToken(required("AGENT_HUB_TOKEN", hubToken)),
+    ...hubConfig,
     principalId: required("AGENT_PRINCIPAL_ID", `human-${owner}`),
     principalDisplayName: required(
       "AGENT_PRINCIPAL_NAME",
@@ -180,6 +183,33 @@ export function loadConfig(): AgentHostConfig {
     contextWindow: positiveNumber("AGENT_MODEL_CONTEXT_WINDOW", 128_000),
     maxOutputTokens: positiveNumber("AGENT_MODEL_MAX_TOKENS", 8_192),
   };
+}
+
+export function resolveHubConfig(
+  hubUrl?: string,
+  hubToken?: string,
+):
+  | { hubEnabled: false }
+  | { hubEnabled: true; hubUrl: string; hubToken: string } {
+  if ((hubUrl === undefined) !== (hubToken === undefined)) {
+    throw new Error(
+      "AGENT_HUB_URL and AGENT_HUB_TOKEN must be configured together",
+    );
+  }
+  if (!hubUrl || !hubToken) return { hubEnabled: false };
+  return {
+    hubEnabled: true,
+    hubUrl: assertHttpUrl(hubUrl, "AGENT_HUB_URL"),
+    hubToken: secureHubToken(hubToken),
+  };
+}
+
+function assertHttpUrl(value: string, name: string): string {
+  const url = new URL(value);
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error(`${name} must use HTTP or HTTPS`);
+  }
+  return value.replace(/\/$/u, "");
 }
 
 export function loadSessionDir(loadEnv = true): string {

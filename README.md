@@ -1,9 +1,9 @@
-# WeChat Bot
+# AgentSociety
 
-一个本地优先的 Agent 协作平台及微信通信适配器。Windows Gateway 只负责操作微信客户端；
-微信 Core 只负责消息、回复和模型调用；Coordination Hub 是可独立部署的进程。每台开发设备
-可运行 Pi Agent Host，既允许登录用户直接操作，也能领取其他设备委派的持久任务。所有 Agent
-默认调用远程 API。
+一个本地优先、可独立使用也可组成协作网络的 Agent 平台。每台设备上的 Agent 默认就是普通
+Pi Agent，通过本机 TUI 由登录用户直接操作；配置 Hub 后才增加跨设备任务、Run、Artifact
+和 session 观察能力。微信只是可选通信适配器：Windows Gateway 负责客户端操作，微信 Core
+负责消息、回复和模型调用。所有 Agent 默认调用远程 API。
 
 ## 已实现
 
@@ -37,23 +37,25 @@ PYTHONPATH=src python3 -m agent_hub.server
 
 ## Pi Agent Host
 
-新设备只需要 Git、Node.js 22.19+，以及 Hub/远程模型的五项连接信息。clone 后直接运行：
+新设备只需要 Git、Node.js 22.19+ 和远程模型的三项连接信息。clone 后直接运行：
 
 ```bash
-git clone <repository-url> ssh
-cd ssh
+git clone <repository-url> AgentSociety
+cd AgentSociety
 ./agent
 ```
 
-Windows PowerShell 使用 `./agent.ps1`。首次运行只询问 Hub URL/token、OpenAI-compatible
-模型 URL/model ID/API key；随后自动安装锁定依赖、应用安全补丁、构建、生成本机身份、使用
-仓库根目录作为 workspace、注册 Hub、调用一次最小模型连通性检查，并打开 Pi 原生 TUI。
+Windows PowerShell 使用 `./agent.ps1`。首次运行只要求 OpenAI-compatible 模型 URL、model
+ID 和 API key；Hub URL/token 是可留空的附加项。随后自动安装锁定依赖、应用安全补丁、构建、
+生成本机身份、使用仓库根目录作为 workspace、调用一次最小模型连通性检查，并打开 Pi 原生
+TUI。配置 Hub 时才会额外登记 Principal/Actor/Node。
 配置保存在被 Git 忽略且权限为 `0600` 的 `.env.agent`。
 
 后续常用命令：
 
 ```bash
 ./agent                 # 打开本机 Pi TUI
+./agent local           # 即使已配置 Hub，也强制以普通 Agent 模式启动
 ./agent worker          # 持续领取 Hub 任务
 ./agent doctor          # 复查 Hub、workspace、session 和远端模型
 ./agent sessions        # 离线列出本机 session

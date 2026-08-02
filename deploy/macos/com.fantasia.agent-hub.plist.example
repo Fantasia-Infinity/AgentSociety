@@ -8,10 +8,10 @@
     <array>
         <string>/bin/zsh</string>
         <string>-lc</string>
-        <string>export AGENT_HUB_TOKEN=&quot;$(/usr/bin/security find-generic-password -a 'your account' -s agent-hub-token -w)&quot; &amp;&amp; exec /absolute/path/to/ssh/.venv/bin/agent-hub</string>
+        <string>export AGENT_HUB_TOKEN=&quot;$(/usr/bin/security find-generic-password -a 'your account' -s agent-hub-token -w)&quot; &amp;&amp; exec /absolute/path/to/AgentSociety/.venv/bin/agent-hub</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/absolute/path/to/ssh</string>
+    <string>/absolute/path/to/AgentSociety</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>

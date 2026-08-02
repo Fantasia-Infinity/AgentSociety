@@ -30,7 +30,10 @@ if ($Command -eq "doctor" -and $DidSetup) {
 }
 
 switch ($Command) {
-    { $_ -in "tui", "interactive" } { & npm --prefix $AgentHost run tui; break }
+    { $_ -in "tui", "interactive", "local" } {
+        & npm --prefix $AgentHost run start -- $Command
+        break
+    }
     "worker" { & npm --prefix $AgentHost run worker; break }
     { $_ -in "doctor", "sessions" } { & npm --prefix $AgentHost run $Command; break }
     { $_ -in "register", "once", "observe", "attach" } {
@@ -38,7 +41,7 @@ switch ($Command) {
         break
     }
     default {
-        throw "Usage: .\\agent.ps1 [setup|tui|worker|doctor|sessions|register|once|observe ID|attach ID]"
+        throw "Usage: .\\agent.ps1 [setup|tui|local|worker|doctor|sessions|register|once|observe ID|attach ID]"
     }
 }
 exit $LASTEXITCODE

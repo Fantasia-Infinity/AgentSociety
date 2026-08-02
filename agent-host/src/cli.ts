@@ -12,6 +12,7 @@ import { TaskWorker } from "./worker.js";
 
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "interactive";
+  if (command === "local") process.env.AGENT_HUB_RUNTIME_DISABLED = "1";
   if (command === "sessions") {
     const records = new RunSessionRegistry(loadSessionDir()).list();
     if (!records.length) {
@@ -32,7 +33,10 @@ async function main(): Promise<void> {
   }
 
   const config = loadConfig();
-  const hub = new HubClient(config.hubUrl, config.hubToken);
+  const hubRuntimeDisabled = process.env.AGENT_HUB_RUNTIME_DISABLED === "1";
+  const hub = config.hubEnabled && !hubRuntimeDisabled
+    ? new HubClient(config.hubUrl!, config.hubToken!)
+    : undefined;
   if (command === "__tui-child") {
     const runId = process.argv[3]?.trim();
     if (!runId) throw new Error("Internal TUI child requires a run_id");
@@ -41,7 +45,13 @@ async function main(): Promise<void> {
     return;
   }
 
-  await registerHost(config, hub);
+  const hubCommands = new Set(["register", "observe", "attach", "once", "worker"]);
+  if (hubCommands.has(command) && !hub) {
+    throw new Error(
+      `The ${command} command requires Hub configuration. Run ./agent setup to add one.`,
+    );
+  }
+  if (hub) await registerHost(config, hub);
 
   if (command === "register") {
     console.log(`Registered ${config.actorId} on ${config.nodeId}`);
@@ -54,17 +64,17 @@ async function main(): Promise<void> {
   if (command === "observe" || command === "attach") {
     const id = process.argv[3]?.trim();
     if (!id) throw new Error(`${command} requires a run_id or task_id`);
-    await observeRun(config, hub, id);
+    await observeRun(config, hub!, id);
     return;
   }
 
-  if (command === "interactive" || command === "tui") {
+  if (command === "interactive" || command === "tui" || command === "local") {
     await runInteractive(config, hub);
     return;
   }
 
   const engine = await PiAgentEngine.create(config, hub);
-  const worker = new TaskWorker(config, hub, engine);
+  const worker = new TaskWorker(config, hub!, engine);
   if (command === "once") {
     const worked = await worker.runOnce();
     console.log(worked ? "Processed one task" : "No matching task");

@@ -1,9 +1,9 @@
 {
-  "name": "@ssh/agent-host",
+  "name": "@agent-society/agent-host",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Local-first Pi Agent Host with coordination Hub integration",
+  "description": "AgentSociety local-first Pi host with optional Hub collaboration",
   "engines": {
     "node": ">=22.19.0"
   },

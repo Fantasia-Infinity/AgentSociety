@@ -15,6 +15,7 @@ import { afterEach, test } from "node:test";
 import {
   assertRemoteUrl,
   discoverProjectEnv,
+  resolveHubConfig,
   type AgentHostConfig,
 } from "../src/config.js";
 import { RunSessionRegistry } from "../src/run-registry.js";
@@ -36,6 +37,7 @@ function temporaryDirectory(): string {
 
 function config(workspaceRoot: string): AgentHostConfig {
   return {
+    hubEnabled: true,
     hubUrl: "http://127.0.0.1:8090",
     hubToken: "test-token",
     principalId: "principal-owner",
@@ -164,6 +166,25 @@ test("remote model endpoint rejects loopback", () => {
   );
 });
 
+test("Hub is optional but partial Hub configuration is rejected", () => {
+  assert.deepEqual(resolveHubConfig(), { hubEnabled: false });
+  assert.throws(
+    () => resolveHubConfig("https://hub.test.invalid", undefined),
+    /must be configured together/u,
+  );
+  assert.deepEqual(
+    resolveHubConfig(
+      "https://hub.test.invalid/",
+      "test-hub-token-with-24-characters",
+    ),
+    {
+      hubEnabled: true,
+      hubUrl: "https://hub.test.invalid",
+      hubToken: "test-hub-token-with-24-characters",
+    },
+  );
+});
+
 test("agent-specific environment takes precedence over the legacy project env", () => {
   const repository = temporaryDirectory();
   const host = join(repository, "agent-host");
@@ -175,7 +196,35 @@ test("agent-specific environment takes precedence over the legacy project env", 
   assert.equal(discoverProjectEnv(host), join(repository, ".env"));
 });
 
-test("setup writes the five supplied connections and automatic workspace", () => {
+test("setup needs only model configuration and an automatic workspace", () => {
+  const workspace = temporaryDirectory();
+  const configPath = join(workspace, ".env.agent");
+  const script = resolve(process.cwd(), "scripts/setup.mjs");
+  const result = spawnSync(process.execPath, [script, "--configure-only"], {
+    cwd: workspace,
+    env: {
+      ...process.env,
+      AGENT_SETUP_CONFIG_PATH: configPath,
+      AGENT_SETUP_WORKSPACE: workspace,
+      AGENT_HUB_URL: "",
+      AGENT_HUB_TOKEN: "",
+      AGENT_REMOTE_BASE_URL: "https://model.test.invalid/v1",
+      AGENT_REMOTE_MODEL: "test-model",
+      AGENT_REMOTE_API_KEY: "test-model-key",
+    },
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const contents = readFileSync(configPath, "utf8");
+  assert.doesNotMatch(contents, /AGENT_HUB_/u);
+  assert.match(contents, /AGENT_REMOTE_MODEL="test-model"/u);
+  assert.match(contents, new RegExp(`AGENT_WORKSPACE_ROOT="${workspace}"`, "u"));
+  if (process.platform !== "win32") {
+    assert.equal(statSync(configPath).mode & 0o777, 0o600);
+  }
+});
+
+test("setup adds Hub configuration only when both Hub values are supplied", () => {
   const workspace = temporaryDirectory();
   const configPath = join(workspace, ".env.agent");
   const script = resolve(process.cwd(), "scripts/setup.mjs");
@@ -196,11 +245,7 @@ test("setup writes the five supplied connections and automatic workspace", () =>
   assert.equal(result.status, 0, result.stderr);
   const contents = readFileSync(configPath, "utf8");
   assert.match(contents, /AGENT_HUB_URL="https:\/\/hub\.test\.invalid"/u);
-  assert.match(contents, /AGENT_REMOTE_MODEL="test-model"/u);
-  assert.match(contents, new RegExp(`AGENT_WORKSPACE_ROOT="${workspace}"`, "u"));
-  if (process.platform !== "win32") {
-    assert.equal(statSync(configPath).mode & 0o777, 0o600);
-  }
+  assert.match(contents, /AGENT_HUB_TOKEN="test-hub-token-with-24-characters"/u);
 });
 
 test("run registry resolves run, task, and session identifiers", () => {
