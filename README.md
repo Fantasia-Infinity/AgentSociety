@@ -68,6 +68,18 @@ TUI。配置 Hub 时才会额外登记 Principal/Actor/Node。
 ./agent observe task_xxx
 ```
 
+本地 TUI 使用 Pi 原生资源加载器，兼容 Pi Package 中的 Extension 自定义工具、命令、事件、
+Skill、Prompt 和 Theme。Package 仍用 Pi 自己的入口管理，不额外包装安装命令：
+
+```bash
+npm --prefix agent-host exec -- pi install npm:<package-name>
+npm --prefix agent-host exec -- pi list
+```
+
+项目内 `.pi` 资源首次加载前会要求信任；Hub worker 默认不执行 Pi Package。远程插件策略见
+[Pi Agent 协作平台](docs/agent-platform.md)。第三方 Extension 与普通本地程序权限相同，安装前
+应审查来源和代码。
+
 高级身份覆盖、workspace、权限策略、远端 session 查看方式及 API 见
 [Pi Agent 协作平台](docs/agent-platform.md)。
 

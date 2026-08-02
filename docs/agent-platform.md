@@ -29,7 +29,9 @@ flowchart LR
   Task、Run、Artifact 数据模型及 SQLite 持久化状态机。
 - `/v1/hub/*`：身份登记、节点心跳、任务创建/查询/领取/更新/取消、Run 和 Artifact API。
 - `agent-host`：基于 `@earendil-works/pi-coding-agent` SDK 的 Node 进程。
-- 本地入口：Pi 0.83.0 原生完整 TUI；登录设备的人可以直接操作，session 会持久化。
+- 本地入口：Pi 0.83.0 原生完整 TUI 和 Resource Loader；登录设备的人可以直接操作，
+  session 会持久化，已安装 Package 的 Extension 工具、命令、事件、Skill、Prompt 和 Theme
+  按 Pi 语义加载。
 - 远程入口：worker 长轮询领取任务；每次领取产生独立、持久的 Pi session 和 Run，使用
   租约、心跳、幂等任务和终态结果。
 - Pi Hub 工具：Agent 可列出 Actor/Task、读取 Task、创建子任务。工具定义留在 Pi Adapter，
@@ -52,17 +54,39 @@ flowchart LR
 
 ## 两条控制路径
 
-本地路径的授权根是设备的登录用户：本地交互使用指定 workspace，并开放 Pi 的常规
-`read/bash/edit/write/grep/find/ls` 工具。session 保存在 `AGENT_SESSION_DIR`，同时在 Hub
-记录一个 `origin=local_ui` 的 Run。
+本地路径的授权根是设备的登录用户：本地交互使用指定 workspace，并开放 Pi 的全部内置工具
+和 Extension 注册工具。Package 可继续通过 Pi 自己的 CLI 安装，无需 AgentSociety 包装：
+
+```bash
+npm --prefix agent-host exec -- pi install npm:<package-name>
+npm --prefix agent-host exec -- pi install git:github.com/user/repository@tag
+npm --prefix agent-host exec -- pi list
+```
+
+Pi 的全局 `~/.pi/agent` 资源直接视为登录用户主动安装的资源；项目 `.pi` 设置、Package 和
+Extension 首次加载前必须在 TUI 中明确授信，决定记录在 Pi 的 `trust.json`。未授信项目仍可
+使用全局资源和普通上下文文件。session 保存在 `AGENT_SESSION_DIR`，同时在 Hub 记录一个
+`origin=local_ui` 的 Run。
 
 远程路径的授权根是 Hub 中的 Task。默认 `AGENT_REMOTE_TOOL_POLICY=read_only`，只向 Pi
 开放 `read/grep/find/ls` 和 Hub 协作工具。把它改成 `full` 是显式提升权限，会加入
 `bash/edit/write`；设为 `no_tools` 则只保留 Hub 工具。Task 请求的 workspace 必须是
 `AGENT_WORKSPACE_ROOT` 的现有子目录，路径逃逸会被拒绝。
 
+Hub worker 还独立使用 `AGENT_REMOTE_PI_RESOURCES` 控制 Package：
+
+- `disabled`（默认）：不加载 Extension、Skill、Prompt 或 Theme。
+- `global`：只加载登录用户安装在 `~/.pi/agent` 的资源，不加载任务 workspace 中的 `.pi`。
+- `trusted_project`：在 `global` 基础上，仅加载之前由本地 TUI 明确授信的项目资源；worker
+  不会在无人值守状态弹出信任确认。
+
+即使选择 `global` 或 `trusted_project`，`read_only`/`no_tools` 仍会过滤 Extension 自定义工具；
+只有 `AGENT_REMOTE_TOOL_POLICY=full` 才向远程模型开放这些工具。Extension 的初始化代码和事件
+Hook 不受工具名单约束，因此远程加载 Package 必须是设备所有者的显式选择。
+
 注意：Pi 本身不是 OS 沙箱。`read_only` 是工具暴露策略，不应被当成敌对代码隔离。公网
-接收不可信任务前，还需要容器/虚拟机、每节点身份和审批策略。
+接收不可信任务前，还需要容器/虚拟机、每节点身份和审批策略。第三方 Package 还可能自行
+保存凭据；AgentSociety 的系统凭据库保证只覆盖自身 setup 管理的模型 Key 和 Hub token。
 
 ## 任务语义
 

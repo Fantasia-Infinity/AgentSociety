@@ -8,6 +8,10 @@ import {
 } from "./credential-store.js";
 
 export type RemoteToolPolicy = "no_tools" | "read_only" | "full";
+export type RemotePiResourcePolicy =
+  | "disabled"
+  | "global"
+  | "trusted_project";
 
 export interface AgentHostConfig {
   hubEnabled: boolean;
@@ -24,6 +28,7 @@ export interface AgentHostConfig {
   pollSeconds: number;
   leaseSeconds: number;
   remoteToolPolicy: RemoteToolPolicy;
+  remotePiResourcePolicy: RemotePiResourcePolicy;
   piProvider?: string;
   piModel?: string;
   remoteBaseUrl?: string;
@@ -110,6 +115,17 @@ export function loadConfig(): AgentHostConfig {
       "AGENT_REMOTE_TOOL_POLICY must be no_tools, read_only, or full",
     );
   }
+  const remotePiResourcePolicy = (process.env.AGENT_REMOTE_PI_RESOURCES ??
+    "disabled") as RemotePiResourcePolicy;
+  if (
+    !["disabled", "global", "trusted_project"].includes(
+      remotePiResourcePolicy,
+    )
+  ) {
+    throw new Error(
+      "AGENT_REMOTE_PI_RESOURCES must be disabled, global, or trusted_project",
+    );
+  }
   const hubRuntimeDisabled = process.env.AGENT_HUB_RUNTIME_DISABLED === "1";
   const hubUrl = hubRuntimeDisabled
     ? undefined
@@ -175,6 +191,7 @@ export function loadConfig(): AgentHostConfig {
     pollSeconds: Math.min(30, positiveNumber("AGENT_POLL_SECONDS", 20)),
     leaseSeconds: Math.min(900, positiveNumber("AGENT_LEASE_SECONDS", 300)),
     remoteToolPolicy,
+    remotePiResourcePolicy,
     ...(piProvider ? { piProvider } : {}),
     ...(piModel ? { piModel } : {}),
     ...(remoteBaseUrl ? { remoteBaseUrl } : {}),

@@ -77,6 +77,7 @@ function config(workspaceRoot: string): AgentHostConfig {
     pollSeconds: 1,
     leaseSeconds: 300,
     remoteToolPolicy: "read_only",
+    remotePiResourcePolicy: "disabled",
     remoteBaseUrl: "https://models.example/v1",
     remoteApiKey: "key",
     remoteModel: "model",

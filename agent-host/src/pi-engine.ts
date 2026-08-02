@@ -1,18 +1,23 @@
 import {
-  createAgentSession,
   createAgentSessionFromServices,
   createAgentSessionRuntime,
-  createAgentSessionServices,
   defineTool,
   getAgentDir,
   InteractiveMode,
   ModelRuntime,
   SessionManager,
+  type ProjectTrustContext,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 import { assertRemoteUrl, type AgentHostConfig } from "./config.js";
 import type { HubClient } from "./hub-client.js";
+import {
+  activateCompatibleTools,
+  collectPiDiagnostics,
+  createPiServices,
+  sessionToolSelection,
+} from "./pi-compatibility.js";
 import type {
   AgentConversation,
   AgentEngine,
@@ -32,9 +37,8 @@ export class PiAgentEngine implements AgentEngine {
     private readonly config: AgentHostConfig,
     private readonly hub: HubClient | undefined,
     private readonly modelRuntime: ModelRuntime,
-    private readonly model: NonNullable<
-      ReturnType<ModelRuntime["getModel"]>
-    >,
+    private readonly provider: string,
+    private readonly modelId: string,
   ) {}
 
   static async create(
@@ -72,18 +76,7 @@ export class PiAgentEngine implements AgentEngine {
       });
     }
 
-    const model = runtime.getModel(provider, modelId);
-    if (!model) {
-      throw new Error(`Pi model not found: ${provider}/${modelId}`);
-    }
-    assertRemoteUrl(model.baseUrl);
-    const auth = await runtime.getAuth(model);
-    if (!auth) {
-      throw new Error(
-        `No remote API credential is configured for Pi provider ${provider}`,
-      );
-    }
-    return new PiAgentEngine(config, hub, runtime, model);
+    return new PiAgentEngine(config, hub, runtime, provider, modelId);
   }
 
   async createConversation(options: {
@@ -97,11 +90,28 @@ export class PiAgentEngine implements AgentEngine {
     const sessionManager = options.persisted
       ? SessionManager.create(options.cwd, this.config.sessionDir)
       : SessionManager.inMemory(options.cwd);
-    const { session } = await createAgentSession({
+    const services = await createPiServices({
       cwd: options.cwd,
+      agentDir: getAgentDir(),
       modelRuntime: this.modelRuntime,
-      model: this.model,
+      mode: options.mode,
+      remotePiResourcePolicy: this.config.remotePiResourcePolicy,
+    });
+    const diagnostics = collectPiDiagnostics(services);
+    const errors = diagnostics.filter((item) => item.type === "error");
+    if (errors.length) {
+      throw new Error(errors.map((item) => item.message).join("; "));
+    }
+    const model = await this.resolveModel();
+    const selectedTools = sessionToolSelection(
+      options.mode,
+      this.config.remoteToolPolicy,
       tools,
+    );
+    const { session } = await createAgentSessionFromServices({
+      services,
+      model,
+      ...(selectedTools === undefined ? {} : { tools: selectedTools }),
       customTools,
       sessionManager,
       sessionStartEvent: {
@@ -109,6 +119,11 @@ export class PiAgentEngine implements AgentEngine {
         reason: "startup",
       },
     });
+    activateCompatibleTools(
+      session,
+      options.mode,
+      this.config.remoteToolPolicy,
+    );
 
     return {
       sessionId: session.sessionId,
@@ -167,26 +182,33 @@ export class PiAgentEngine implements AgentEngine {
         reason: "startup" | "reload" | "new" | "resume" | "fork";
         previousSessionFile?: string;
       };
+      projectTrustContext?: ProjectTrustContext;
     }) => {
-      const services = await createAgentSessionServices({
+      const services = await createPiServices({
         cwd: runtimeOptions.cwd,
         agentDir: runtimeOptions.agentDir,
         modelRuntime: this.modelRuntime,
+        mode: "local",
+        remotePiResourcePolicy: this.config.remotePiResourcePolicy,
+        ...(runtimeOptions.projectTrustContext
+          ? { projectTrustContext: runtimeOptions.projectTrustContext }
+          : {}),
       });
+      const model = await this.resolveModel();
       const created = await createAgentSessionFromServices({
         services,
         sessionManager: runtimeOptions.sessionManager,
         ...(runtimeOptions.sessionStartEvent
           ? { sessionStartEvent: runtimeOptions.sessionStartEvent }
           : {}),
-        model: this.model,
-        tools: this.toolNames("local"),
+        model,
         customTools: this.createHubTools(),
       });
+      activateCompatibleTools(created.session, "local", "full");
       return {
         ...created,
         services,
-        diagnostics: services.diagnostics,
+        diagnostics: collectPiDiagnostics(services),
       };
     };
     const runtime = await createAgentSessionRuntime(createRuntime, {
@@ -198,11 +220,6 @@ export class PiAgentEngine implements AgentEngine {
         reason: options.sessionFile ? "resume" : "startup",
       },
     });
-    const errors = runtime.diagnostics.filter((item) => item.type === "error");
-    if (errors.length) {
-      await runtime.dispose();
-      throw new Error(errors.map((item) => item.message).join("; "));
-    }
     options.onSessionReady?.({
       sessionId: runtime.session.sessionId,
       ...(runtime.session.sessionFile
@@ -221,6 +238,23 @@ export class PiAgentEngine implements AgentEngine {
         : {}),
       lastText: optionalLastAssistantText(runtime.session.messages),
     };
+  }
+
+  private async resolveModel(): Promise<
+    NonNullable<ReturnType<ModelRuntime["getModel"]>>
+  > {
+    const model = this.modelRuntime.getModel(this.provider, this.modelId);
+    if (!model) {
+      throw new Error(`Pi model not found: ${this.provider}/${this.modelId}`);
+    }
+    assertRemoteUrl(model.baseUrl);
+    const auth = await this.modelRuntime.getAuth(model);
+    if (!auth) {
+      throw new Error(
+        `No remote API credential is configured for Pi provider ${this.provider}`,
+      );
+    }
+    return model;
   }
 
   private toolNames(mode: "local" | "remote" | "diagnostic"): string[] {
