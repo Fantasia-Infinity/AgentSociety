@@ -25,6 +25,7 @@ agent-host/dist/
 agent-host/.agent-sessions/
 agent-host/.setup-complete
 .local/
+gateway-logs/
 
 
 .env*

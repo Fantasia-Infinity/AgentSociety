@@ -79,6 +79,27 @@ WECHAT_POLL_INTERVAL_SECONDS=1
 .\.venv\Scripts\python.exe -m wechat_gateway
 ```
 
+### 长期运行
+
+微信必须保持已登录且 Windows 用户会话保持可交互。可将 Gateway 注册为当前用户登录时
+自动启动的计划任务；Gateway 断开 Core、微信退出或进程异常结束时会自动重试/拉起：
+
+```powershell
+.\scripts\install-gateway-task.ps1
+```
+
+任务名为 `WechatBotGateway`。运行日志写入 `gateway-logs/`，不包含 API token。查看、停止或
+手动启动任务：
+
+```powershell
+Get-ScheduledTask -TaskName WechatBotGateway
+Stop-ScheduledTask -TaskName WechatBotGateway
+Start-ScheduledTask -TaskName WechatBotGateway
+```
+
+Mac 上的 Bot Core 也必须以持续运行的后台服务方式启动；如果 Mac 用户会话退出或 Core
+进程停止，Windows Gateway 只会缓存/重试，无法自行恢复 Core 进程。
+
 wxauto 依赖可交互桌面。Windows 锁屏、RDP 断开后切换到不可交互会话、微信升级或窗口
 结构变化都可能中断监听。官方的[云服务器部署说明](https://docs.wxauto.org/deploy.html)
 也明确要求窗口保持活跃。
@@ -97,6 +118,10 @@ wxauto 依赖可交互桌面。Windows 锁屏、RDP 断开后切换到不可交�
 - 当前只回复文本；图片、语音、文件会被标准化，但 Core 会拒绝为不支持的内容类型。
 - 免费版轮询启动时有约 3 秒预热，预热期间出现的消息会被当作基线忽略。微信 UI 可能
   合并短时间内的相同消息预览，因此高频或严格不丢消息的场景应使用 Plus 回调或其他渠道。
+- 微信窗口最小化时，免费版轮询可能暂时看不到新的消息控件；恢复可见窗口后会等待会话
+  预览与消息快照对齐，再补处理期间的新消息。长期运行仍应保持窗口可见且可交互。
+- 微信客户端退出后，免费版会按指数退避尝试重建 UI 连接。重新登录后会使用持久聊天游标
+  回补微信 UI 当前仍能加载的历史消息。
 - Gateway 会从 SQLite Inbox 和聊天游标恢复上传；微信 UI 能够加载出的历史消息会在启动/重连
   时回补。若消息已经被微信客户端清理、尚未同步到 UI 或超出 UI 可加载范围，wxauto 无法
   保证获取。

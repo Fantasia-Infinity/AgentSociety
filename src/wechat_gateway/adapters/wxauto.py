@@ -42,6 +42,8 @@ class WxAutoAdapter:
         poll_interval_seconds: float = 1.0,
         poll_load_wait_seconds: float = 1.0,
         poll_baseline_seconds: float = 3.0,
+        poll_reconnect_min_seconds: float = 1.0,
+        poll_reconnect_max_seconds: float = 30.0,
         wechat_factory: Callable[[], Any] | None = None,
         cursor_getter: Callable[[str], str | None] | None = None,
         cursor_setter: Callable[[str, str], None] | None = None,
@@ -54,6 +56,12 @@ class WxAutoAdapter:
             raise ValueError("wxauto poll load wait cannot be negative")
         if poll_baseline_seconds < 0:
             raise ValueError("wxauto poll baseline cannot be negative")
+        if poll_reconnect_min_seconds <= 0:
+            raise ValueError("wxauto reconnect minimum must be positive")
+        if poll_reconnect_max_seconds < poll_reconnect_min_seconds:
+            raise ValueError(
+                "wxauto reconnect maximum cannot be less than the minimum"
+            )
         self._account_id = account_id
         self._module_name = module_name
         self._listen_chats = listen_chats
@@ -61,9 +69,12 @@ class WxAutoAdapter:
         self._poll_interval = poll_interval_seconds
         self._poll_load_wait = poll_load_wait_seconds
         self._poll_baseline = poll_baseline_seconds
+        self._poll_reconnect_min = poll_reconnect_min_seconds
+        self._poll_reconnect_max = poll_reconnect_max_seconds
         self._factory = wechat_factory
         self._cursor_getter = cursor_getter
         self._cursor_setter = cursor_setter
+        self._resolved_factory: Callable[..., Any] | None = None
         self._wechat: Any | None = None
         self._on_event: EventCallback | None = None
         self._ui_lock = RLock()
@@ -73,13 +84,12 @@ class WxAutoAdapter:
         self._seen_message_order: dict[str, deque[str]] = {}
         self._poll_snapshot_ready: dict[str, bool] = {}
         self._poll_session_markers: dict[str, str] = {}
+        self._poll_pending_counts: dict[str, int] = {}
 
     def start(self, on_event: EventCallback) -> None:
         self._stop.clear()
-        self._seen_message_ids.clear()
-        self._seen_message_order.clear()
-        self._poll_snapshot_ready.clear()
-        self._poll_session_markers.clear()
+        self._reset_poll_state()
+        self._resolved_factory = None
         if self._factory is None:
             try:
                 module = importlib.import_module(self._module_name)
@@ -93,12 +103,10 @@ class WxAutoAdapter:
         else:
             factory = self._factory
 
+        self._resolved_factory = factory
         self._on_event = on_event
         try:
-            if self._factory is None and self._module_name == "wxauto4":
-                self._wechat = factory(ads=False)
-            else:
-                self._wechat = factory()
+            self._wechat = self._create_wechat()
             add_listen_chat = getattr(self._wechat, "AddListenChat", None)
             if callable(add_listen_chat):
                 self._recover_callback_history()
@@ -246,14 +254,80 @@ class WxAutoAdapter:
         self._poller.start()
 
     def _poll_loop(self) -> None:
+        reconnect_delay = self._poll_reconnect_min
         while not self._stop.wait(self._poll_interval):
-            for nickname in self._listen_chats:
-                if self._stop.is_set():
-                    return
-                try:
+            failed_chat = ""
+            try:
+                for nickname in self._listen_chats:
+                    failed_chat = nickname
+                    if self._stop.is_set():
+                        return
                     self._poll_chat(nickname, emit_new=True)
+                reconnect_delay = self._poll_reconnect_min
+                continue
+            except Exception:
+                logger.exception(
+                    "wxauto_poll_failed chat_id=%s reconnect_in=%s",
+                    failed_chat,
+                    reconnect_delay,
+                )
+
+            if self._stop.wait(reconnect_delay):
+                return
+            while not self._stop.is_set():
+                try:
+                    self._reconnect_polling_client()
                 except Exception:
-                    logger.exception("wxauto_poll_failed chat_id=%s", nickname)
+                    reconnect_delay = min(
+                        reconnect_delay * 2,
+                        self._poll_reconnect_max,
+                    )
+                    logger.exception(
+                        "wxauto_reconnect_failed retry_in=%s",
+                        reconnect_delay,
+                    )
+                    if self._stop.wait(reconnect_delay):
+                        return
+                    continue
+                logger.info(
+                    "wxauto_reconnected driver=%s chats=%s",
+                    self._module_name,
+                    len(self._listen_chats),
+                )
+                reconnect_delay = self._poll_reconnect_min
+                break
+
+    def _create_wechat(self) -> Any:
+        factory = self._resolved_factory
+        if factory is None:
+            raise WeChatAdapterError("wxauto factory has not been initialized")
+        if self._factory is None and self._module_name == "wxauto4":
+            return factory(ads=False)
+        return factory()
+
+    def _reconnect_polling_client(self) -> None:
+        with self._ui_lock:
+            wechat = self._create_wechat()
+            if not callable(getattr(wechat, "ChatWith", None)) or not callable(
+                getattr(wechat, "GetAllMessage", None)
+            ):
+                raise WeChatAdapterError(
+                    "reconnected wxauto client does not support polling"
+                )
+            self._wechat = wechat
+            self._reset_poll_state()
+            for nickname in self._listen_chats:
+                if self._cursor_getter is not None:
+                    self._recover_chat(nickname)
+                else:
+                    self._baseline_chat(nickname)
+
+    def _reset_poll_state(self) -> None:
+        self._seen_message_ids.clear()
+        self._seen_message_order.clear()
+        self._poll_snapshot_ready.clear()
+        self._poll_session_markers.clear()
+        self._poll_pending_counts.clear()
 
     def _baseline_chat(self, nickname: str) -> None:
         deadline = time.monotonic() + self._poll_baseline
@@ -314,20 +388,50 @@ class WxAutoAdapter:
                         self._handle_message(message, wechat)
                 self._poll_session_markers[nickname] = session_marker
                 return
+            seen = self._seen_message_ids.get(nickname, set())
             unseen = [
-                message
+                (message, key)
                 for message, key in snapshot
-                if self._remember_polled_message(nickname, key)
+                if key not in seen
             ]
             marker_available = bool(previous_marker and session_marker)
             session_changed = marker_available and session_marker != previous_marker
-            if emit_new and unseen and (session_changed or not marker_available):
+            if emit_new and session_changed and not unseen:
+                # The session preview can update while a minimized/hidden chat still
+                # exposes the previous message controls. Keep the committed marker
+                # unchanged until the message snapshot catches up after restoration.
+                self._poll_pending_counts[nickname] = max(
+                    self._poll_pending_counts.get(nickname, 0),
+                    session_new_count,
+                    1,
+                )
+                return
+            if emit_new and unseen and not (session_changed or not marker_available):
+                # The message controls can refresh before the session preview. Do
+                # not mark these candidates as seen until the preview catches up,
+                # otherwise restoration permanently suppresses the new message.
+                self._poll_pending_counts[nickname] = max(
+                    self._poll_pending_counts.get(nickname, 0),
+                    session_new_count,
+                    1,
+                )
+                return
+            if emit_new and unseen:
                 deliverable = [
-                    message for message in unseen if _is_deliverable_message(message)
+                    message
+                    for message, _ in unseen
+                    if _is_deliverable_message(message)
                 ]
-                count = session_new_count if session_new_count > 0 else 1
+                count = max(
+                    session_new_count,
+                    self._poll_pending_counts.get(nickname, 0),
+                    1,
+                )
                 for message in deliverable[-count:]:
                     self._handle_message(message, wechat)
+            for _, key in unseen:
+                self._remember_polled_message(nickname, key)
+            self._poll_pending_counts.pop(nickname, None)
             self._poll_session_markers[nickname] = session_marker
 
     def _wait_for_chat(
