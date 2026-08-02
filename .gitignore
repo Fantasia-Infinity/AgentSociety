@@ -17,6 +17,10 @@ models/
 *.gguf
 *.pth
 *.safetensors
+agent-host/node_modules/
+agent-host/dist/
+agent-host/.agent-sessions/
+.local/
 
 
 .env*

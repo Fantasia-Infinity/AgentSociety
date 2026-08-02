@@ -119,6 +119,8 @@ class Settings:
     api_host: str
     api_port: int
     api_token: str
+    agent_hub_token: str
+    agent_hub_allow_remote: bool
     workers: int
     queue_size: int
     allowed_users: frozenset[str]
@@ -146,10 +148,14 @@ class Settings:
             if backend in {"local_rwkv", "auto"}
             else None
         )
+        api_token = _required("BOT_API_TOKEN")
         settings = cls(
             api_host=os.environ.get("BOT_API_HOST", "127.0.0.1"),
             api_port=int(os.environ.get("BOT_API_PORT", "8080")),
-            api_token=_required("BOT_API_TOKEN"),
+            api_token=api_token,
+            agent_hub_token=os.environ.get("AGENT_HUB_TOKEN", "").strip()
+            or api_token,
+            agent_hub_allow_remote=_bool("AGENT_HUB_ALLOW_REMOTE", False),
             workers=int(os.environ.get("BOT_WORKERS", "2")),
             queue_size=int(os.environ.get("BOT_QUEUE_SIZE", "100")),
             allowed_users=_csv("BOT_ALLOWED_USERS"),

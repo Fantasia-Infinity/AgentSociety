@@ -3,10 +3,14 @@ from __future__ import annotations
 import hmac
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import ipaddress
 import json
 import logging
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+
+from agent_hub.api import AgentHubApi
+from agent_hub.store import AgentHubStore
 
 from .config import Settings
 from .domain import IncomingMessage
@@ -56,10 +60,21 @@ def parse_action_ack_payload(payload: dict[str, Any]) -> tuple[str, list[str]]:
 class BotHttpServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address: tuple[str, int], runtime: BotRuntime, api_token: str):
+    def __init__(
+        self,
+        address: tuple[str, int],
+        runtime: BotRuntime,
+        api_token: str,
+        agent_hub: AgentHubApi | None = None,
+        agent_hub_token: str | None = None,
+        agent_hub_allow_remote: bool = False,
+    ):
         super().__init__(address, BotRequestHandler)
         self.runtime = runtime
         self.api_token = api_token
+        self.agent_hub = agent_hub
+        self.agent_hub_token = agent_hub_token or api_token
+        self.agent_hub_allow_remote = agent_hub_allow_remote
 
 
 class BotRequestHandler(BaseHTTPRequestHandler):
@@ -68,8 +83,27 @@ class BotRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/health":
-            self._send_json(HTTPStatus.OK, self.server.runtime.health())
+            health = self.server.runtime.health()
+            if self.server.agent_hub is not None:
+                health["agent_hub"] = self.server.agent_hub.store.stats()
+            self._send_json(HTTPStatus.OK, health)
             return
+        if AgentHubApi.matches(parsed.path):
+            if not self._hub_client_allowed():
+                return
+            if not self._authorized(self.server.agent_hub_token):
+                return
+            if self.server.agent_hub is None:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+                return
+            try:
+                response = self.server.agent_hub.get(parsed.path, parsed.query)
+            except (LookupError, PermissionError, ValueError) as exc:
+                self._send_hub_error(exc)
+                return
+            if response is not None:
+                self._send_json(*response)
+                return
         if parsed.path == "/v1/actions":
             if not self._authorized():
                 return
@@ -91,6 +125,26 @@ class BotRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if AgentHubApi.matches(parsed.path):
+            if not self._hub_client_allowed():
+                return
+            if not self._authorized(self.server.agent_hub_token):
+                return
+            if self.server.agent_hub is None:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+                return
+            try:
+                payload = self._read_json()
+                response = self.server.agent_hub.post(parsed.path, payload)
+            except (json.JSONDecodeError, LookupError, PermissionError, ValueError) as exc:
+                self._send_hub_error(exc)
+                return
+            if response is not None:
+                self._send_json(*response)
+                return
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+            return
+
         if parsed.path == "/v1/events/wechat":
             if not self._authorized():
                 return
@@ -124,11 +178,26 @@ class BotRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         logger.info("http %s", format % args)
 
-    def _authorized(self) -> bool:
+    def _authorized(self, token: str | None = None) -> bool:
         supplied = self.headers.get("Authorization", "")
-        expected = f"Bearer {self.server.api_token}"
+        expected = f"Bearer {token or self.server.api_token}"
         if not hmac.compare_digest(supplied, expected):
             self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+            return False
+        return True
+
+    def _hub_client_allowed(self) -> bool:
+        if self.server.agent_hub_allow_remote:
+            return True
+        try:
+            is_loopback = ipaddress.ip_address(self.client_address[0]).is_loopback
+        except ValueError:
+            is_loopback = False
+        if not is_loopback:
+            self._send_json(
+                HTTPStatus.FORBIDDEN,
+                {"error": "agent_hub_remote_access_disabled"},
+            )
             return False
         return True
 
@@ -151,6 +220,15 @@ class BotRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_hub_error(self, error: Exception) -> None:
+        if isinstance(error, LookupError):
+            status = HTTPStatus.NOT_FOUND
+        elif isinstance(error, PermissionError):
+            status = HTTPStatus.CONFLICT
+        else:
+            status = HTTPStatus.BAD_REQUEST
+        self._send_json(status, {"error": str(error)})
 
 
 def build_runtime(settings: Settings) -> BotRuntime:
@@ -195,8 +273,17 @@ def main() -> None:
         raise SystemExit(f"Configuration error: {exc}") from exc
 
     runtime = build_runtime(settings)
+    hub_store = AgentHubStore(settings.state_db)
+    hub_api = AgentHubApi(hub_store)
     runtime.start()
-    server = BotHttpServer((settings.api_host, settings.api_port), runtime, settings.api_token)
+    server = BotHttpServer(
+        (settings.api_host, settings.api_port),
+        runtime,
+        settings.api_token,
+        hub_api,
+        settings.agent_hub_token,
+        settings.agent_hub_allow_remote,
+    )
     logger.info(
         "bot_core_started host=%s port=%s llm_backend=%s",
         settings.api_host,
@@ -217,6 +304,7 @@ def main() -> None:
     finally:
         server.shutdown()
         server.server_close()
+        hub_store.close()
         runtime.stop()
 
 

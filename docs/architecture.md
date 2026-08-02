@@ -12,10 +12,15 @@ Windows 微信设备                       平台无关的 Bot/模型服务器
                                      │          ▼               │
                                      │     ModelProvider        │
                                      │          │               │
-                                     │  远程 API（可选）         │
+                                     │  远程 API（默认）         │
                                      │  本地 RWKV（可选）        │
                                      └──────────────────────────┘
 ```
+
+这条微信链路现在是通用 Agent 平台的一个 Channel Adapter。Core 旁新增的 Coordination Hub
+管理 Principal、Actor、Node、Task、Run 和 Artifact；各开发设备上的 Pi Agent Host 同时
+提供本机用户入口和远程任务入口。详细模型、API 与演进边界见
+[Pi Agent 协作平台](agent-platform.md)。
 
 ## 运行边界
 
@@ -79,7 +84,10 @@ llama.cpp。`LLM_BACKEND` 支持三种路由：
 | 会话历史 | Mac SQLite | PostgreSQL |
 | 微信接入 | Windows Gateway + mock/wxauto 适配器 | 其他合规渠道适配器 |
 | Gateway 消息与发送账本 | 本地 SQLite | SQLite 可继续使用 |
-| 鉴权 | Bearer token | TLS + 设备身份/密钥轮换 |
+| Agent 运行时 | Pi SDK Agent Host | Pi、其他框架及 A2A Adapter 并存 |
+| Agent 工具 | Pi custom tools | MCP Server + 节点策略 |
+| 协作任务 | SQLite Task/Run/Artifact + 租约 | PostgreSQL/对象存储/事件总线 |
+| 鉴权 | Bearer token | TLS + Principal/Node 身份与密钥轮换 |
 
 ## 安全默认值
 
@@ -91,3 +99,4 @@ llama.cpp。`LLM_BACKEND` 支持三种路由：
 - 本地模型启动器只允许绑定 loopback，避免无意暴露到局域网。
 - 模型 HTTP 错误正文不会写入日志或持久化重试数据库，防止服务回显提示词。
 - Gateway 只支持配置中列出的监听会话，不主动遍历或群发联系人。
+- Agent Hub 默认只接受 loopback；远程节点必须显式启用并使用独立 token。

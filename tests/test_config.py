@@ -27,6 +27,21 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.llm_backend, "remote")
         self.assertEqual(settings.remote_llm.model, "remote-model")
         self.assertIsNone(settings.local_llm)
+        self.assertEqual(settings.agent_hub_token, "test-token")
+        self.assertFalse(settings.agent_hub_allow_remote)
+
+    def test_agent_hub_can_use_a_separate_remote_token(self) -> None:
+        settings = self.load(
+            {
+                "BOT_API_TOKEN": "gateway-token",
+                "AGENT_HUB_TOKEN": "agent-token",
+                "AGENT_HUB_ALLOW_REMOTE": "true",
+                "LLM_BASE_URL": "https://provider.example/v1",
+                "LLM_MODEL": "remote-model",
+            }
+        )
+        self.assertEqual(settings.agent_hub_token, "agent-token")
+        self.assertTrue(settings.agent_hub_allow_remote)
 
     def test_local_mode_does_not_require_remote_credentials(self) -> None:
         settings = self.load(
