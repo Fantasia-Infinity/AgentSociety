@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { loadConfig, loadSessionDir } from "./config.js";
+import { runDoctor } from "./doctor.js";
 import { HubClient } from "./hub-client.js";
 import { registerHost } from "./host.js";
 import { runInteractive, runInteractiveChild } from "./interactive.js";
@@ -44,6 +45,10 @@ async function main(): Promise<void> {
 
   if (command === "register") {
     console.log(`Registered ${config.actorId} on ${config.nodeId}`);
+    return;
+  }
+  if (command === "doctor") {
+    await runDoctor(config, hub);
     return;
   }
   if (command === "observe" || command === "attach") {

@@ -1,10 +1,22 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, test } from "node:test";
 
-import { assertRemoteUrl, type AgentHostConfig } from "../src/config.js";
+import {
+  assertRemoteUrl,
+  discoverProjectEnv,
+  type AgentHostConfig,
+} from "../src/config.js";
 import { RunSessionRegistry } from "../src/run-registry.js";
 import type { AgentEngine, HubClaim, HubTask } from "../src/types.js";
 import { resolveTaskWorkspace, TaskWorker } from "../src/worker.js";
@@ -150,6 +162,45 @@ test("remote model endpoint rejects loopback", () => {
     assertRemoteUrl("https://api.example/v1/"),
     "https://api.example/v1",
   );
+});
+
+test("agent-specific environment takes precedence over the legacy project env", () => {
+  const repository = temporaryDirectory();
+  const host = join(repository, "agent-host");
+  mkdirSync(host);
+  writeFileSync(join(repository, ".env"), "SOURCE=legacy\n");
+  writeFileSync(join(repository, ".env.agent"), "SOURCE=agent\n");
+  assert.equal(discoverProjectEnv(host), join(repository, ".env.agent"));
+  rmSync(join(repository, ".env.agent"));
+  assert.equal(discoverProjectEnv(host), join(repository, ".env"));
+});
+
+test("setup writes the five supplied connections and automatic workspace", () => {
+  const workspace = temporaryDirectory();
+  const configPath = join(workspace, ".env.agent");
+  const script = resolve(process.cwd(), "scripts/setup.mjs");
+  const result = spawnSync(process.execPath, [script, "--configure-only"], {
+    cwd: workspace,
+    env: {
+      ...process.env,
+      AGENT_SETUP_CONFIG_PATH: configPath,
+      AGENT_SETUP_WORKSPACE: workspace,
+      AGENT_HUB_URL: "https://hub.test.invalid",
+      AGENT_HUB_TOKEN: "test-hub-token-with-24-characters",
+      AGENT_REMOTE_BASE_URL: "https://model.test.invalid/v1",
+      AGENT_REMOTE_MODEL: "test-model",
+      AGENT_REMOTE_API_KEY: "test-model-key",
+    },
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const contents = readFileSync(configPath, "utf8");
+  assert.match(contents, /AGENT_HUB_URL="https:\/\/hub\.test\.invalid"/u);
+  assert.match(contents, /AGENT_REMOTE_MODEL="test-model"/u);
+  assert.match(contents, new RegExp(`AGENT_WORKSPACE_ROOT="${workspace}"`, "u"));
+  if (process.platform !== "win32") {
+    assert.equal(statSync(configPath).mode & 0o777, 0o600);
+  }
 });
 
 test("run registry resolves run, task, and session identifiers", () => {

@@ -23,6 +23,7 @@ models/
 agent-host/node_modules/
 agent-host/dist/
 agent-host/.agent-sessions/
+agent-host/.setup-complete
 .local/
 
 

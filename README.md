@@ -37,23 +37,30 @@ PYTHONPATH=src python3 -m agent_hub.server
 
 ## Pi Agent Host
 
-Hub 启动后，可安装 Pi Host（需要 Node.js 22.19 或更高版本）：
+新设备只需要 Git、Node.js 22.19+，以及 Hub/远程模型的五项连接信息。clone 后直接运行：
 
 ```bash
-cd agent-host
-npm ci --ignore-scripts
-npm run apply-security-patches
-npm run security-check
-npm run build
-npm run start -- register
-npm run tui          # 本机登录用户使用 Pi 原生完整 TUI
-npm run worker       # 领取 Hub 委派的任务
-npm run sessions     # 离线列出本机持久 session
-# npm run start -- observe <run_id或task_id>  # 只读 TUI 观察任务 session
+git clone <repository-url> ssh
+cd ssh
+./agent
 ```
 
-Host 默认复用项目 `.env` 中的远程 LLM 配置，但使用独立的 `AGENT_HUB_TOKEN`。详细身份、
-workspace、权限策略、远端 session 查看方式及 API 见
+Windows PowerShell 使用 `./agent.ps1`。首次运行只询问 Hub URL/token、OpenAI-compatible
+模型 URL/model ID/API key；随后自动安装锁定依赖、应用安全补丁、构建、生成本机身份、使用
+仓库根目录作为 workspace、注册 Hub、调用一次最小模型连通性检查，并打开 Pi 原生 TUI。
+配置保存在被 Git 忽略且权限为 `0600` 的 `.env.agent`。
+
+后续常用命令：
+
+```bash
+./agent                 # 打开本机 Pi TUI
+./agent worker          # 持续领取 Hub 任务
+./agent doctor          # 复查 Hub、workspace、session 和远端模型
+./agent sessions        # 离线列出本机 session
+./agent observe task_xxx
+```
+
+高级身份覆盖、workspace、权限策略、远端 session 查看方式及 API 见
 [Pi Agent 协作平台](docs/agent-platform.md)。
 
 ## 在 Mac 上启动 Bot Core

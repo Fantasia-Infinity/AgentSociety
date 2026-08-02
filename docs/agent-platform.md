@@ -97,27 +97,40 @@ Keychain 读取 Hub token，避免把凭据写进 plist。
 LLM_BACKEND=remote PYTHONPATH=src python3 -m wechat_bot.api
 ```
 
-安装并构建 Agent Host：
+## 新设备加入 Hub
+
+唯一系统前置条件是 Git 和 Node.js 22.19+。在 macOS/Linux 上：
 
 ```bash
-cd agent-host
-npm ci --ignore-scripts
-npm run apply-security-patches
-npm run security-check
-npm run build
+git clone <repository-url> ssh
+cd ssh
+./agent
 ```
 
+Windows PowerShell 使用 `./agent.ps1`。引导器只要求输入：
+
+1. Hub URL。
+2. Hub token。
+3. OpenAI-compatible 模型 URL。
+4. Model ID。
+5. Model API key。
+
+其余项目自动完成：依赖安装、安全补丁、TypeScript 构建、稳定本机身份、仓库 workspace、
+session 目录、Hub 注册和 doctor 检查。doctor 使用不暴露任何工具的临时 session，发送一次
+不含仓库内容的最小模型请求，确保地址、模型与凭据真实可用；成功后首次 `./agent` 会继续
+打开 Pi 原生 TUI。
+
 Pi 0.83.0 自带 shrinkwrap 固定了存在 OOM DoS 公告的 `brace-expansion 5.0.7`，且 npm
-override 无法越过该 shrinkwrap。因此 Host 直接锁定安全版 5.0.9，并用仓库内脚本只覆盖
-Pi 的这一份嵌套包；`security-check` 会验证实际运行版本。这里刻意禁用第三方安装脚本，补丁
-也不通过隐式 `postinstall` 执行。
+override 无法越过该 shrinkwrap。因此 setup 直接锁定安全版 5.0.9，并用仓库内脚本只覆盖
+Pi 的这一份嵌套包；安全检查会验证实际运行版本。这里刻意禁用第三方安装脚本，补丁也不通过
+隐式 `postinstall` 执行。
 
-Host 默认读取项目根目录 `.env` 中的 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL`，并通过
-`AGENT_HUB_URL`、独立的 `AGENT_HUB_TOKEN` 连接 Hub；可以参照 `.env.agent.example` 覆盖
-Agent 配置。模型地址必须是远程 HTTP(S) 地址，loopback 会被拒绝。也可以用
-`PI_PROVIDER`/`PI_MODEL` 选择已在 Pi 中配置凭证的远程 Provider。
+setup 把配置写入项目根目录 `.env.agent`，Agent Host 会优先自动读取它；旧 `.env` 仅作为
+兼容回退。模型地址必须是远程 HTTP(S) 地址，loopback 会被拒绝。Principal 默认为
+`human-<登录用户名>`，Actor/Node 根据主机名生成；workspace 自动设为 clone 后的仓库根目录。
+可以参照 `.env.agent.example` 覆盖这些高级默认值。
 
-若 Mac 上的远程 API key 已放在 Login Keychain，可避免把密钥写进 `.env`：
+若 Mac 上的远程 API key 已放在 Login Keychain，可避免把密钥写进 `.env.agent`：
 
 ```bash
 AGENT_REMOTE_API_KEY_KEYCHAIN_SERVICE=your-keychain-service
@@ -125,27 +138,26 @@ AGENT_REMOTE_API_KEY_KEYCHAIN_ACCOUNT="your keychain account"
 ```
 
 Agent Host 通过参数数组调用系统 `security` 命令，密钥不会进入命令行、Hub、日志或 SQLite。
+自动 setup 为了跨平台会把两个 token 写入被 Git 忽略的 `.env.agent` 并设置 `0600`；需要更高
+本机密钥保护时，可在 setup 后改用这些 Keychain 配置并删除文件中的明文 token。
 
 ```bash
-# 只登记 Principal / Actor / Node
-npm run start -- register
-
 # 本地用户使用 Pi 原生完整 TUI 直接操作
-npm run tui
+./agent
 
 # 领取一个任务，便于调试
-npm run start -- once
+./agent once
 
 # 持续领取任务
-npm run worker
+./agent worker
 
 # 不连接 Hub/模型，离线列出本机持久 session
-npm run sessions
+./agent sessions
 
 # 按 run_id 或 task_id 打开只读状态 TUI
-npm run start -- observe task_xxx
+./agent observe task_xxx
 # attach 是 observe 的别名
-npm run start -- attach run_xxx
+./agent attach run_xxx
 ```
 
 远程任务的 Pi JSONL session 保存在执行它的设备上。要查看另一台设备领取的任务，应先

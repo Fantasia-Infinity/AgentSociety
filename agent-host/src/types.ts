@@ -95,7 +95,7 @@ export interface AgentConversation {
 export interface AgentEngine {
   createConversation(options: {
     cwd: string;
-    mode: "local" | "remote";
+    mode: "local" | "remote" | "diagnostic";
     persisted: boolean;
   }): Promise<AgentConversation>;
 }

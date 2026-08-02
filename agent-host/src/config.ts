@@ -30,9 +30,10 @@ export interface AgentHostConfig {
   maxOutputTokens: number;
 }
 
-export function loadProjectEnv(path = resolve(process.cwd(), "../.env")): void {
-  if (!existsSync(path)) return;
-  for (const rawLine of readFileSync(path, "utf8").split(/\r?\n/u)) {
+export function loadProjectEnv(path?: string): void {
+  const envPath = path ? resolve(path) : discoverProjectEnv();
+  if (!envPath || !existsSync(envPath)) return;
+  for (const rawLine of readFileSync(envPath, "utf8").split(/\r?\n/u)) {
     const line = rawLine.trim();
     if (!line || line.startsWith("#") || !line.includes("=")) continue;
     const separator = line.indexOf("=");
@@ -46,6 +47,17 @@ export function loadProjectEnv(path = resolve(process.cwd(), "../.env")): void {
     }
     if (key && process.env[key] === undefined) process.env[key] = value;
   }
+}
+
+export function discoverProjectEnv(cwd = process.cwd()): string | undefined {
+  return firstExisting([
+    resolve(cwd, "../.env.agent"),
+    resolve(cwd, "../.env"),
+  ]);
+}
+
+function firstExisting(paths: string[]): string | undefined {
+  return paths.find((path) => existsSync(path));
 }
 
 function required(name: string, fallback?: string): string {

@@ -8,6 +8,7 @@
     "node": ">=22.19.0"
   },
   "scripts": {
+    "setup": "node scripts/setup.mjs",
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "apply-security-patches": "node scripts/patch-pi-brace-expansion.mjs",
@@ -17,6 +18,7 @@
     "interactive": "node dist/src/cli.js interactive",
     "tui": "node dist/src/cli.js tui",
     "sessions": "node dist/src/cli.js sessions",
+    "doctor": "node dist/src/cli.js doctor",
     "worker": "node dist/src/cli.js worker"
   },
   "dependencies": {

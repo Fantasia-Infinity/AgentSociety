@@ -1,0 +1,46 @@
+#!/bin/sh
+set -eu
+
+repository_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+agent_host="$repository_root/agent-host"
+command=${1:-tui}
+if [ "$#" -gt 0 ]; then
+    shift
+fi
+
+if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "Node.js 22.19 or newer and npm are required." >&2
+    exit 1
+fi
+
+if [ "$command" = "setup" ]; then
+    exec npm --prefix "$agent_host" run setup -- "$@"
+fi
+
+did_setup=0
+if [ ! -f "$agent_host/.setup-complete" ] || [ ! -f "$repository_root/.env.agent" ] || [ ! -d "$agent_host/node_modules" ] || [ ! -f "$agent_host/dist/src/cli.js" ]; then
+    npm --prefix "$agent_host" run setup
+    did_setup=1
+fi
+if [ "$command" = "doctor" ] && [ "$did_setup" -eq 1 ]; then
+    exit 0
+fi
+
+case "$command" in
+    tui|interactive)
+        exec npm --prefix "$agent_host" run tui
+        ;;
+    worker)
+        exec npm --prefix "$agent_host" run worker
+        ;;
+    doctor|sessions)
+        exec npm --prefix "$agent_host" run "$command"
+        ;;
+    register|once|observe|attach)
+        exec npm --prefix "$agent_host" run start -- "$command" "$@"
+        ;;
+    *)
+        echo "Usage: ./agent [setup|tui|worker|doctor|sessions|register|once|observe ID|attach ID]" >&2
+        exit 2
+        ;;
+esac

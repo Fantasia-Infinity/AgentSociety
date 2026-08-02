@@ -89,10 +89,11 @@ export class PiAgentEngine implements AgentEngine {
 
   async createConversation(options: {
     cwd: string;
-    mode: "local" | "remote";
+    mode: "local" | "remote" | "diagnostic";
     persisted: boolean;
   }): Promise<AgentConversation> {
-    const customTools = this.createHubTools();
+    const customTools =
+      options.mode === "diagnostic" ? [] : this.createHubTools();
     const tools = this.toolNames(options.mode);
     const sessionManager = options.persisted
       ? SessionManager.create(options.cwd, this.config.sessionDir)
@@ -223,7 +224,8 @@ export class PiAgentEngine implements AgentEngine {
     };
   }
 
-  private toolNames(mode: "local" | "remote"): string[] {
+  private toolNames(mode: "local" | "remote" | "diagnostic"): string[] {
+    if (mode === "diagnostic") return [];
     if (mode === "local") {
       return [
         "read",
