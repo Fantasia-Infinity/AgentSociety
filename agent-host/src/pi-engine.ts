@@ -1,6 +1,11 @@
 import {
   createAgentSession,
+  createAgentSessionFromServices,
+  createAgentSessionRuntime,
+  createAgentSessionServices,
   defineTool,
+  getAgentDir,
+  InteractiveMode,
   ModelRuntime,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
@@ -106,6 +111,8 @@ export class PiAgentEngine implements AgentEngine {
     });
 
     return {
+      sessionId: session.sessionId,
+      ...(session.sessionFile ? { sessionFile: session.sessionFile } : {}),
       prompt: async (text, onText) => {
         const unsubscribe = session.subscribe((event) => {
           if (
@@ -128,6 +135,91 @@ export class PiAgentEngine implements AgentEngine {
         }
       },
       dispose: () => session.dispose(),
+    };
+  }
+
+  async runTui(options: {
+    cwd: string;
+    sessionFile?: string;
+    initialMessage?: string;
+    onSessionReady?: (session: {
+      sessionId: string;
+      sessionFile?: string;
+    }) => void;
+  }): Promise<{ sessionId: string; sessionFile?: string; lastText: string }> {
+    if (!process.stdin.isTTY || !process.stdout.isTTY) {
+      throw new Error("Pi TUI requires an interactive terminal");
+    }
+    const agentDir = getAgentDir();
+    const sessionManager = options.sessionFile
+      ? SessionManager.open(
+          options.sessionFile,
+          this.config.sessionDir,
+          options.cwd,
+        )
+      : SessionManager.create(options.cwd, this.config.sessionDir);
+    const createRuntime = async (runtimeOptions: {
+      cwd: string;
+      agentDir: string;
+      sessionManager: SessionManager;
+      sessionStartEvent?: {
+        type: "session_start";
+        reason: "startup" | "reload" | "new" | "resume" | "fork";
+        previousSessionFile?: string;
+      };
+    }) => {
+      const services = await createAgentSessionServices({
+        cwd: runtimeOptions.cwd,
+        agentDir: runtimeOptions.agentDir,
+        modelRuntime: this.modelRuntime,
+      });
+      const created = await createAgentSessionFromServices({
+        services,
+        sessionManager: runtimeOptions.sessionManager,
+        ...(runtimeOptions.sessionStartEvent
+          ? { sessionStartEvent: runtimeOptions.sessionStartEvent }
+          : {}),
+        model: this.model,
+        tools: this.toolNames("local"),
+        customTools: this.createHubTools(),
+      });
+      return {
+        ...created,
+        services,
+        diagnostics: services.diagnostics,
+      };
+    };
+    const runtime = await createAgentSessionRuntime(createRuntime, {
+      cwd: options.cwd,
+      agentDir,
+      sessionManager,
+      sessionStartEvent: {
+        type: "session_start",
+        reason: options.sessionFile ? "resume" : "startup",
+      },
+    });
+    const errors = runtime.diagnostics.filter((item) => item.type === "error");
+    if (errors.length) {
+      await runtime.dispose();
+      throw new Error(errors.map((item) => item.message).join("; "));
+    }
+    options.onSessionReady?.({
+      sessionId: runtime.session.sessionId,
+      ...(runtime.session.sessionFile
+        ? { sessionFile: runtime.session.sessionFile }
+        : {}),
+    });
+    const tui = new InteractiveMode(runtime, {
+      ...(options.initialMessage ? { initialMessage: options.initialMessage } : {}),
+      verbose: false,
+    });
+    await tui.run();
+    return {
+      sessionId: runtime.session.sessionId,
+      ...(runtime.session.sessionFile
+        ? { sessionFile: runtime.session.sessionFile }
+        : {}),
+      lastText: optionalLastAssistantText(runtime.session.messages),
     };
   }
 
@@ -285,6 +377,14 @@ function lastAssistantResult(messages: unknown[]): Omit<AgentResult, "sessionId"
     };
   }
   throw new Error("Pi returned no assistant message");
+}
+
+function optionalLastAssistantText(messages: unknown[]): string {
+  try {
+    return lastAssistantResult(messages).text;
+  } catch {
+    return "";
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

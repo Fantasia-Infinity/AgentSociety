@@ -3,6 +3,7 @@ import type {
   HubClaim,
   HubRun,
   HubTask,
+  HubTaskEvent,
   NodeRecord,
   Principal,
   TaskStatus,
@@ -93,6 +94,20 @@ export class HubClient {
       `/v1/hub/tasks/${encodeURIComponent(taskId)}`,
     );
     return response.task;
+  }
+
+  async getTaskEvents(taskId: string): Promise<HubTaskEvent[]> {
+    const response = await this.request<{ events: HubTaskEvent[] }>(
+      `/v1/hub/tasks/${encodeURIComponent(taskId)}/events`,
+    );
+    return response.events;
+  }
+
+  async getRun(runId: string): Promise<HubRun> {
+    const response = await this.request<{ run: HubRun }>(
+      `/v1/hub/runs/${encodeURIComponent(runId)}`,
+    );
+    return response.run;
   }
 
   async createTask(item: {

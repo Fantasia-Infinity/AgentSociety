@@ -12,6 +12,9 @@ gateway-state.sqlite3-wal
 core-state.sqlite3
 core-state.sqlite3-shm
 core-state.sqlite3-wal
+hub-state.sqlite3
+hub-state.sqlite3-shm
+hub-state.sqlite3-wal
 wxauto_logs/
 models/
 *.gguf
@@ -25,4 +28,7 @@ agent-host/.agent-sessions/
 
 .env*
 !.env.example
+!.env.agent.example
 !.env.gateway.example
+!.env.hub.example
+!deploy/hub/.env.hub.example

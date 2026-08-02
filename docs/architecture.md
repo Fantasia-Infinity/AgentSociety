@@ -17,16 +17,17 @@ Windows 微信设备                       平台无关的 Bot/模型服务器
                                      └──────────────────────────┘
 ```
 
-这条微信链路现在是通用 Agent 平台的一个 Channel Adapter。Core 旁新增的 Coordination Hub
-管理 Principal、Actor、Node、Task、Run 和 Artifact；各开发设备上的 Pi Agent Host 同时
-提供本机用户入口和远程任务入口。详细模型、API 与演进边界见
+这条微信链路现在是通用 Agent 平台的一个 Channel Adapter。独立部署的 Coordination Hub
+管理 Principal、Actor、Node、Task、Run 和 Artifact；它不在微信 Core 进程中。各开发设备
+上的 Pi Agent Host 同时提供本机用户入口和远程任务入口。详细模型、API 与演进边界见
 [Pi Agent 协作平台](agent-platform.md)。
 
 ## 运行边界
 
 - Windows 设备只运行微信客户端与 `wechat-gateway`，不保存 LLM 密钥。
-- macOS 或服务器运行 `wechat-bot-core`，并选择远程 API 或独立本地推理服务。
-- 两端只共享版本化 JSON 协议和一个设备 Bearer token。
+- macOS 或服务器可分别运行 `wechat-bot-core` 和 `agent-hub`；两者使用独立端口、状态库和
+  Bearer token。
+- 微信 Gateway 与 Core 只共享版本化消息协议；Agent Host 与 Hub 只共享协作任务协议。
 
 ## 为什么采用事件与动作队列
 
@@ -99,4 +100,4 @@ llama.cpp。`LLM_BACKEND` 支持三种路由：
 - 本地模型启动器只允许绑定 loopback，避免无意暴露到局域网。
 - 模型 HTTP 错误正文不会写入日志或持久化重试数据库，防止服务回显提示词。
 - Gateway 只支持配置中列出的监听会话，不主动遍历或群发联系人。
-- Agent Hub 默认只接受 loopback；远程节点必须显式启用并使用独立 token。
+- Agent Hub 默认只绑定 loopback；远程节点通过带 TLS 的反向代理访问并使用独立 token。

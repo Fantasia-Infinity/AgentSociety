@@ -1,8 +1,9 @@
 # WeChat Bot
 
 一个本地优先的 Agent 协作平台及微信通信适配器。Windows Gateway 只负责操作微信客户端；
-平台无关的 Core 负责消息与 Coordination Hub；每台开发设备可运行 Pi Agent Host，既允许
-登录用户直接操作，也能领取其他设备委派的持久任务。所有 Agent 默认调用远程 API。
+微信 Core 只负责消息、回复和模型调用；Coordination Hub 是可独立部署的进程。每台开发设备
+可运行 Pi Agent Host，既允许登录用户直接操作，也能领取其他设备委派的持久任务。所有 Agent
+默认调用远程 API。
 
 ## 已实现
 
@@ -12,17 +13,31 @@
 - `mock` 适配器：可在 macOS 上用 JSON 行模拟微信消息，验证完整链路。
 - `wxauto4` / `wxautox4` 适配边界：Windows 下动态加载，不会成为 Core 的依赖。
 - `ModelProvider`：支持 `remote`、`local_rwkv` 和显式远程回退的 `auto` 模式。
-- `agent_hub`：通用 Principal / Actor / Node / Task / Run / Artifact 模型、租约和事件流。
-- `agent-host`：Pi SDK 本地交互与远程任务 worker；远程任务默认只读工具策略。
+- `agent-hub`：独立的 Principal / Actor / Node / Task / Run / Artifact 服务、租约和事件流。
+- `agent-host`：Pi SDK 原生 TUI 与远程任务 worker；远程任务默认只读工具策略，并持久化
+  每次任务的 Pi session。
 
 完整设计见 [架构文档](docs/architecture.md)，Windows 部署见
 [Windows Gateway 指南](docs/windows-gateway.md)，Agent 平台见
 [Pi Agent 协作平台](docs/agent-platform.md)，Mac 端侧推理见
 [本地 RWKV 指南](docs/local-rwkv.md)。
 
+## 独立 Agent Hub
+
+Hub 和微信 Core 不共享进程、端口、SQLite 或 token：
+
+```bash
+cp .env.hub.example .env.hub
+# 设置一个至少 24 字符的独立 AGENT_HUB_TOKEN
+PYTHONPATH=src python3 -m agent_hub.server
+```
+
+它默认只监听 `127.0.0.1:8090`。公网服务器部署模板见
+[`deploy/hub`](deploy/hub) 和 [Agent 平台文档](docs/agent-platform.md)。
+
 ## Pi Agent Host
 
-Core 启动后，可安装 Pi Host（需要 Node.js 22.19 或更高版本）：
+Hub 启动后，可安装 Pi Host（需要 Node.js 22.19 或更高版本）：
 
 ```bash
 cd agent-host
@@ -31,11 +46,14 @@ npm run apply-security-patches
 npm run security-check
 npm run build
 npm run start -- register
-npm run interactive  # 本机登录用户直接操作
+npm run tui          # 本机登录用户使用 Pi 原生完整 TUI
 npm run worker       # 领取 Hub 委派的任务
+npm run sessions     # 离线列出本机持久 session
+# npm run start -- observe <run_id或task_id>  # 只读 TUI 观察任务 session
 ```
 
-默认复用项目 `.env` 中的远程 LLM 与 Core token；详细身份、workspace、权限策略及 API 见
+Host 默认复用项目 `.env` 中的远程 LLM 配置，但使用独立的 `AGENT_HUB_TOKEN`。详细身份、
+workspace、权限策略、远端 session 查看方式及 API 见
 [Pi Agent 协作平台](docs/agent-platform.md)。
 
 ## 在 Mac 上启动 Bot Core

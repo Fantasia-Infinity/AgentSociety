@@ -59,6 +59,19 @@ export interface HubRun {
   error: string | null;
 }
 
+export interface HubTaskEvent {
+  seq: number;
+  event_id: string;
+  task_id: string;
+  run_id: string | null;
+  type: string;
+  actor_id: string | null;
+  node_id: string | null;
+  message: string | null;
+  payload: Record<string, unknown>;
+  created_at: number;
+}
+
 export interface HubClaim {
   task: HubTask;
   run: HubRun;
@@ -73,6 +86,8 @@ export interface AgentResult {
 }
 
 export interface AgentConversation {
+  readonly sessionId: string;
+  readonly sessionFile?: string;
   prompt(text: string, onText?: (delta: string) => void): Promise<AgentResult>;
   dispose(): void;
 }

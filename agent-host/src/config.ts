@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { homedir, hostname, userInfo } from "node:os";
 import { resolve } from "node:path";
 
@@ -94,6 +95,13 @@ export function loadConfig(): AgentHostConfig {
       "AGENT_REMOTE_TOOL_POLICY must be no_tools, read_only, or full",
     );
   }
+  const hubToken =
+    process.env.AGENT_HUB_TOKEN?.trim() ||
+    readKeychainSecret(
+      process.env.AGENT_HUB_TOKEN_KEYCHAIN_SERVICE?.trim(),
+      process.env.AGENT_HUB_TOKEN_KEYCHAIN_ACCOUNT?.trim(),
+      "Hub",
+    );
 
   const piProvider = process.env.PI_PROVIDER?.trim() || undefined;
   const piModel = process.env.PI_MODEL?.trim() || undefined;
@@ -127,11 +135,11 @@ export function loadConfig(): AgentHostConfig {
     process.env.AGENT_WORKSPACE_ROOT?.trim() || process.cwd(),
   );
   return {
-    hubUrl: required("AGENT_HUB_URL", "http://127.0.0.1:8080").replace(
+    hubUrl: required("AGENT_HUB_URL", "http://127.0.0.1:8090").replace(
       /\/$/u,
       "",
     ),
-    hubToken: required("AGENT_HUB_TOKEN", process.env.BOT_API_TOKEN),
+    hubToken: secureHubToken(required("AGENT_HUB_TOKEN", hubToken)),
     principalId: required("AGENT_PRINCIPAL_ID", `human-${owner}`),
     principalDisplayName: required(
       "AGENT_PRINCIPAL_NAME",
@@ -142,10 +150,7 @@ export function loadConfig(): AgentHostConfig {
     nodeId: required("AGENT_NODE_ID", host),
     nodeDisplayName: required("AGENT_NODE_NAME", hostname()),
     workspaceRoot,
-    sessionDir: resolve(
-      process.env.AGENT_SESSION_DIR?.trim() ||
-        resolve(homedir(), ".pi", "agent", "sessions"),
-    ),
+    sessionDir: loadSessionDir(false),
     pollSeconds: Math.min(30, positiveNumber("AGENT_POLL_SECONDS", 20)),
     leaseSeconds: Math.min(900, positiveNumber("AGENT_LEASE_SECONDS", 300)),
     remoteToolPolicy,
@@ -163,4 +168,41 @@ export function loadConfig(): AgentHostConfig {
     contextWindow: positiveNumber("AGENT_MODEL_CONTEXT_WINDOW", 128_000),
     maxOutputTokens: positiveNumber("AGENT_MODEL_MAX_TOKENS", 8_192),
   };
+}
+
+export function loadSessionDir(loadEnv = true): string {
+  if (loadEnv) loadProjectEnv(process.env.AGENT_ENV_FILE);
+  return resolve(
+    process.env.AGENT_SESSION_DIR?.trim() ||
+      resolve(homedir(), ".pi", "agent", "sessions"),
+  );
+}
+
+function secureHubToken(value: string): string {
+  if (value.length < 24) {
+    throw new Error("AGENT_HUB_TOKEN must contain at least 24 characters");
+  }
+  return value;
+}
+
+function readKeychainSecret(
+  service: string | undefined,
+  account: string | undefined,
+  label: string,
+): string | undefined {
+  if (!service) return undefined;
+  if (process.platform !== "darwin") {
+    throw new Error(`${label} Keychain credentials require macOS`);
+  }
+  const args = ["find-generic-password"];
+  if (account) args.push("-a", account);
+  args.push("-s", service, "-w");
+  try {
+    return execFileSync("/usr/bin/security", args, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    throw new Error(`Could not load the ${label} credential from Keychain`);
+  }
 }

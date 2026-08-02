@@ -3,17 +3,25 @@ import { relative, resolve } from "node:path";
 
 import type { AgentHostConfig } from "./config.js";
 import type { HubClient } from "./hub-client.js";
+import { RunSessionRegistry } from "./run-registry.js";
 import type { AgentEngine, HubClaim, HubTask } from "./types.js";
 
-type WorkerHub = Pick<HubClient, "claimTask" | "updateTask" | "heartbeat">;
+type WorkerHub = Pick<
+  HubClient,
+  "claimTask" | "updateTask" | "updateRun" | "heartbeat"
+>;
 
 export class TaskWorker {
+  private readonly registry: RunSessionRegistry;
+
   constructor(
     private readonly config: AgentHostConfig,
     private readonly hub: WorkerHub,
     private readonly engine: AgentEngine,
     private readonly output: (message: string) => void = console.log,
-  ) {}
+  ) {
+    this.registry = new RunSessionRegistry(config.sessionDir);
+  }
 
   async runOnce(waitSeconds = 0): Promise<boolean> {
     const claim = await this.hub.claimTask({
@@ -78,7 +86,23 @@ export class TaskWorker {
       conversation = await this.engine.createConversation({
         cwd,
         mode: "remote",
-        persisted: false,
+        persisted: true,
+      });
+      if (!conversation.sessionFile) {
+        throw new Error("Remote Pi session did not create a persistent file");
+      }
+      this.registry.upsert({
+        runId: run.run_id,
+        taskId: task.task_id,
+        sessionId: conversation.sessionId,
+        sessionFile: conversation.sessionFile,
+        cwd,
+        origin: "remote_task",
+        status: "active",
+      });
+      await this.hub.updateRun(run.run_id, {
+        status: "active",
+        result: { pi_session_id: conversation.sessionId },
       });
       const result = await conversation.prompt(taskPrompt(task, cwd));
       await this.hub.updateTask(task.task_id, {
@@ -90,12 +114,14 @@ export class TaskWorker {
           text: result.text,
           provider: result.provider,
           model: result.model,
-          session_id: result.sessionId,
+          pi_session_id: result.sessionId,
         },
       });
+      this.registry.updateStatus(run.run_id, "completed");
       this.output(`Completed ${task.task_id}`);
     } catch (error) {
       const message = errorMessage(error);
+      this.registry.updateStatus(run.run_id, "failed");
       try {
         await this.hub.updateTask(task.task_id, {
           run_id: run.run_id,

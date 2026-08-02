@@ -2,9 +2,10 @@
 
 ## 已落地的第一条纵切
 
-项目现在不再把“微信机器人”当成最终架构，而是把微信视为一个通信适配器。Mac/服务器
-上的 Core 同时提供一个持久化 Coordination Hub；每台设备运行独立的 Pi Agent Host。一个
-Host 既可由登录该设备的人直接交互，也可领取其他设备或通信渠道委派的任务。
+项目现在不再把“微信机器人”当成最终架构，而是把微信视为一个通信适配器。Coordination
+Hub 已从微信 Core 中拆出，是一个可单独部署的持久服务；每台设备运行独立的 Pi Agent
+Host。一个 Host 既可由登录该设备的人通过完整 Pi TUI 直接交互，也可领取其他设备或通信
+渠道委派的任务。
 
 第一版运行时采用 [Pi SDK](https://pi.dev/docs/latest/sdk)；跨框架互操作方向采用
 [A2A Task/Artifact 语义](https://github.com/a2aproject/A2A/blob/main/docs/specification.md)，工具
@@ -14,23 +15,23 @@ Host 既可由登录该设备的人直接交互，也可领取其他设备或通
 flowchart LR
     U["本机登录用户"] -->|"终端交互"| H1["Pi Agent Host A"]
     U2["另一台设备的用户"] --> H2["Pi Agent Host B"]
-    W["Windows 微信适配器"] --> C["Mac Core / Coordination Hub"]
-    H1 <-->|"Task / Run / Artifact"| C
+    W["Windows 微信适配器"] --> B["WeChat Core"]
+    H1 <-->|"Task / Run / Artifact"| C["Standalone Coordination Hub"]
     H2 <-->|"Task / Run / Artifact"| C
     H1 --> R["远程模型 API"]
     H2 --> R
-    C --> R
+    B --> R
 ```
 
 当前代码提供：
 
-- `agent_hub`：与模型、通信平台无关的 Principal、Actor、Node、Task、Run、Artifact
-  数据模型及 SQLite 持久化状态机。
+- `agent-hub`：独立 HTTP 进程，承载与模型、通信平台无关的 Principal、Actor、Node、
+  Task、Run、Artifact 数据模型及 SQLite 持久化状态机。
 - `/v1/hub/*`：身份登记、节点心跳、任务创建/查询/领取/更新/取消、Run 和 Artifact API。
 - `agent-host`：基于 `@earendil-works/pi-coding-agent` SDK 的 Node 进程。
-- 本地入口：一个有持久 Pi session 的交互终端，登录设备的人直接控制。
-- 远程入口：worker 长轮询领取任务；每次领取产生单独 Run，使用租约、心跳、幂等任务和
-  终态结果。
+- 本地入口：Pi 0.83.0 原生完整 TUI；登录设备的人可以直接操作，session 会持久化。
+- 远程入口：worker 长轮询领取任务；每次领取产生独立、持久的 Pi session 和 Run，使用
+  租约、心跳、幂等任务和终态结果。
 - Pi Hub 工具：Agent 可列出 Actor/Task、读取 Task、创建子任务。工具定义留在 Pi Adapter，
   核心领域模型不依赖 Pi。
 
@@ -79,7 +80,18 @@ MCP Server，再增加 A2A Agent Card/transport Adapter。这样替换 Pi 或并
 
 ## 启动
 
-Core 默认继续使用远程 OpenAI-compatible API：
+先单独启动 Hub：
+
+```bash
+cp .env.hub.example .env.hub
+# 设置至少 24 字符、且不与微信 Core 共用的 AGENT_HUB_TOKEN
+PYTHONPATH=src python3 -m agent_hub.server
+```
+
+Hub 默认监听 `127.0.0.1:8090`，状态写入 `hub-state.sqlite3`。微信 Core 是否运行不影响 Hub。
+macOS 后台服务模板见 `deploy/macos/com.fantasia.agent-hub.plist.example`；模板从 Login
+Keychain 读取 Hub token，避免把凭据写进 plist。
+微信 Core 默认继续使用远程 OpenAI-compatible API：
 
 ```bash
 LLM_BACKEND=remote PYTHONPATH=src python3 -m wechat_bot.api
@@ -100,10 +112,10 @@ override 无法越过该 shrinkwrap。因此 Host 直接锁定安全版 5.0.9，
 Pi 的这一份嵌套包；`security-check` 会验证实际运行版本。这里刻意禁用第三方安装脚本，补丁
 也不通过隐式 `postinstall` 执行。
 
-Host 默认读取项目根目录 `.env` 中的 `BOT_API_TOKEN`、`LLM_BASE_URL`、`LLM_API_KEY`、
-`LLM_MODEL`；可以参照 `.env.agent.example` 覆盖 Agent 配置。模型地址必须是远程 HTTP(S)
-地址，loopback 会被拒绝。也可以用 `PI_PROVIDER`/`PI_MODEL` 选择已在 Pi 中配置凭证的远程
-Provider。
+Host 默认读取项目根目录 `.env` 中的 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL`，并通过
+`AGENT_HUB_URL`、独立的 `AGENT_HUB_TOKEN` 连接 Hub；可以参照 `.env.agent.example` 覆盖
+Agent 配置。模型地址必须是远程 HTTP(S) 地址，loopback 会被拒绝。也可以用
+`PI_PROVIDER`/`PI_MODEL` 选择已在 Pi 中配置凭证的远程 Provider。
 
 若 Mac 上的远程 API key 已放在 Login Keychain，可避免把密钥写进 `.env`：
 
@@ -118,21 +130,34 @@ Agent Host 通过参数数组调用系统 `security` 命令，密钥不会进入
 # 只登记 Principal / Actor / Node
 npm run start -- register
 
-# 本地用户直接操作
-npm run interactive
+# 本地用户使用 Pi 原生完整 TUI 直接操作
+npm run tui
 
 # 领取一个任务，便于调试
 npm run start -- once
 
 # 持续领取任务
 npm run worker
+
+# 不连接 Hub/模型，离线列出本机持久 session
+npm run sessions
+
+# 按 run_id 或 task_id 打开只读状态 TUI
+npm run start -- observe task_xxx
+# attach 是 observe 的别名
+npm run start -- attach run_xxx
 ```
+
+远程任务的 Pi JSONL session 保存在执行它的设备上。要查看另一台设备领取的任务，应先
+SSH/登录到那台设备，再运行 `observe`；界面会每秒刷新 Hub 状态和本机转录，任务进入终态后
+自动退出。当前 attach 刻意为只读：worker 是 session 文件的唯一写入者，避免两个进程同时
+改写 Pi session。以后增加控制 socket 后，可在不引入多写入者的前提下支持 steer/follow-up。
 
 创建一个任务的最小示例：
 
 ```bash
-curl -X POST http://127.0.0.1:8080/v1/hub/tasks \
-  -H "Authorization: Bearer $BOT_API_TOKEN" \
+curl -X POST http://127.0.0.1:8090/v1/hub/tasks \
+  -H "Authorization: Bearer $AGENT_HUB_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "principal_id":"human-owner",
@@ -163,18 +188,29 @@ curl -X POST http://127.0.0.1:8080/v1/hub/tasks \
 | POST | `/v1/hub/runs/{id}/updates` | 更新 Run |
 | POST | `/v1/hub/artifacts` | 登记 Artifact 元数据 |
 
-Hub 默认只接受 loopback 客户端；即使 `BOT_API_HOST=0.0.0.0`，局域网请求也会被拒绝。
-未设置 `AGENT_HUB_TOKEN` 时它会兼容性复用 Core token；准备可信远程节点时，应先配置独立
-token，再显式设置 `AGENT_HUB_ALLOW_REMOTE=true`。这仍不适合直接暴露到公网。公网 Hub
-阶段必须替换成逐 Principal/Node 凭证（建议 mTLS 或短期 OIDC token）、细粒度 capability
-policy、签名事件、审计保留和密钥轮换。
+Hub 默认只绑定 loopback，且必须设置至少 24 字符的独立 token。原型公网部署可使用
+`deploy/hub/compose.yaml`：容器端口只发布到服务器 loopback，再由 Caddy/Nginx/云负载均衡器
+提供 HTTPS；防火墙不应直接开放 8090。
+
+```bash
+cd deploy/hub
+cp .env.hub.example .env.hub
+# 生成并写入高熵 AGENT_HUB_TOKEN，然后：
+docker compose up -d --build
+```
+
+`Caddyfile.example` 给出了反向代理入口。当前单一共享 Bearer token 只适合受控的两节点验证，
+不应当成多租户公网安全边界。正式公网阶段需要逐 Principal/Node 凭证（建议 mTLS 或短期
+OIDC token）、细粒度 capability policy、签名事件、审计保留、密钥轮换，以及每个 Run 的
+容器/VM 隔离。
 
 ## 后续实施顺序
 
-1. 把 Hub 从 Core 进程中拆成可独立部署的服务，并迁移到 PostgreSQL/对象存储。
+1. 将独立 Hub 的 SQLite 存储替换为 PostgreSQL/对象存储，并完成迁移工具。
 2. 增加逐节点身份、任务授权/审批、撤销、配额以及容器/VM Run Sandbox。
-3. 把 Pi Hub tools 和 Windows 微信动作导出为 MCP Server；让 Windows 继续只做薄适配器。
-4. 增加 A2A Agent Card、Task/Artifact 映射和流式事件 Adapter，使第三方 Agent 可互操作。
-5. 增加公网 relay/消息总线、多 Hub 联邦和离线同步；微信、Slack、自建通信服务都只实现
+3. 为 active Pi session 增加单写入者控制 socket，支持安全的 steer/follow-up TUI。
+4. 把 Pi Hub tools 和 Windows 微信动作导出为 MCP Server；让 Windows 继续只做薄适配器。
+5. 增加 A2A Agent Card、Task/Artifact 映射和流式事件 Adapter，使第三方 Agent 可互操作。
+6. 增加公网 relay/消息总线、多 Hub 联邦和离线同步；微信、Slack、自建通信服务都只实现
    Channel Adapter。
-6. 增加团队任务图、Artifact lineage、人工确认节点、可观测性与策略回放。
+7. 增加团队任务图、Artifact lineage、人工确认节点、可观测性与策略回放。

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, test } from "node:test";
 
 import { assertRemoteUrl, type AgentHostConfig } from "../src/config.js";
+import { RunSessionRegistry } from "../src/run-registry.js";
 import type { AgentEngine, HubClaim, HubTask } from "../src/types.js";
 import { resolveTaskWorkspace, TaskWorker } from "../src/worker.js";
 
@@ -23,7 +24,7 @@ function temporaryDirectory(): string {
 
 function config(workspaceRoot: string): AgentHostConfig {
   return {
-    hubUrl: "http://127.0.0.1:8080",
+    hubUrl: "http://127.0.0.1:8090",
     hubToken: "test-token",
     principalId: "principal-owner",
     principalDisplayName: "Owner",
@@ -90,6 +91,7 @@ test("worker completes a claimed task through the agent engine", async () => {
       updates.push(update);
       return task();
     },
+    updateRun: async () => claim().run,
     heartbeat: async () => {},
   };
   let disposed = false;
@@ -98,6 +100,8 @@ test("worker completes a claimed task through the agent engine", async () => {
       assert.equal(options.cwd, workspace);
       assert.equal(options.mode, "remote");
       return {
+        sessionId: "pi-session",
+        sessionFile: join(workspace, "pi-session.jsonl"),
         prompt: async (prompt) => {
           assert.match(prompt, /Inspect tests/u);
           return {
@@ -124,7 +128,7 @@ test("worker completes a claimed task through the agent engine", async () => {
     text: "All tests pass",
     provider: "remote",
     model: "test-model",
-    session_id: "pi-session",
+    pi_session_id: "pi-session",
   });
   assert.equal(disposed, true);
 });
@@ -146,4 +150,22 @@ test("remote model endpoint rejects loopback", () => {
     assertRemoteUrl("https://api.example/v1/"),
     "https://api.example/v1",
   );
+});
+
+test("run registry resolves run, task, and session identifiers", () => {
+  const workspace = temporaryDirectory();
+  const registry = new RunSessionRegistry(workspace);
+  registry.upsert({
+    runId: "run-1",
+    taskId: "task-1",
+    sessionId: "session-1",
+    sessionFile: join(workspace, "session-1.jsonl"),
+    cwd: workspace,
+    origin: "remote_task",
+    status: "active",
+  });
+  assert.equal(registry.get("run-1")?.sessionId, "session-1");
+  assert.equal(registry.get("task-1")?.runId, "run-1");
+  assert.equal(registry.get("session-1")?.taskId, "task-1");
+  assert.equal(registry.updateStatus("run-1", "completed")?.status, "completed");
 });
