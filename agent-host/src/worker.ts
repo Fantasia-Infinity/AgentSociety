@@ -1,5 +1,5 @@
 import { existsSync, statSync } from "node:fs";
-import { dirname, relative, resolve } from "node:path";
+import { basename, dirname, relative, resolve } from "node:path";
 
 import type { AgentHostConfig } from "./config.js";
 import type { HubClient } from "./hub-client.js";
@@ -11,6 +11,11 @@ import {
   type SelfUpdateReport,
 } from "./self-update.js";
 import type { AgentEngine, HubClaim, HubTask } from "./types.js";
+import {
+  WorkerSessionRegistry,
+  type WorkerSessionRecord,
+  type WorkerSessionScope,
+} from "./worker-session-registry.js";
 
 type WorkerHub = Pick<
   HubClient,
@@ -25,6 +30,14 @@ type WorkerHub = Pick<
 
 export class TaskWorker {
   private readonly registry: RunSessionRegistry;
+  private readonly workerSessions: WorkerSessionRegistry;
+  private activeContinuous:
+    | {
+        key: string;
+        conversation: Awaited<ReturnType<AgentEngine["createConversation"]>>;
+        record: WorkerSessionRecord;
+      }
+    | undefined;
 
   constructor(
     private readonly config: AgentHostConfig,
@@ -35,8 +48,10 @@ export class TaskWorker {
       restartWorker(config);
       process.exit(0);
     },
+    private readonly workerSlot = 0,
   ) {
     this.registry = new RunSessionRegistry(config.sessionDir);
+    this.workerSessions = new WorkerSessionRegistry(config.sessionDir);
   }
 
   async runOnce(waitSeconds = 0, signal?: AbortSignal): Promise<boolean> {
@@ -50,6 +65,7 @@ export class TaskWorker {
     const shouldRestart = await this.execute(claim, signal);
     if (shouldRestart) {
       this.output("Self-update applied; restarting worker");
+      await this.dispose();
       this.restart();
     }
     return true;
@@ -57,18 +73,28 @@ export class TaskWorker {
 
   async runForever(signal: AbortSignal): Promise<void> {
     this.output(
-      `Pi worker ready as ${this.config.actorId} on ${this.config.nodeId}`,
+      `Pi worker ${this.workerSlot + 1} ready as ${this.config.actorId} on ${this.config.nodeId} (${this.config.workerSessionMode} sessions)`,
     );
-    while (!signal.aborted) {
-      try {
-        await this.hub.heartbeat(this.config.nodeId);
-        await this.runOnce(this.config.pollSeconds, signal);
-      } catch (error) {
-        if (signal.aborted) return;
-        this.output(`Worker error: ${errorMessage(error)}`);
-        await abortableDelay(2_000, signal);
+    try {
+      while (!signal.aborted) {
+        try {
+          await this.hub.heartbeat(this.config.nodeId);
+          await this.runOnce(this.config.pollSeconds, signal);
+        } catch (error) {
+          if (signal.aborted) return;
+          this.output(`Worker error: ${errorMessage(error)}`);
+          await abortableDelay(2_000, signal);
+        }
       }
+    } finally {
+      await this.dispose();
     }
+  }
+
+  async dispose(): Promise<void> {
+    const active = this.activeContinuous;
+    this.activeContinuous = undefined;
+    await active?.conversation.dispose();
   }
 
   private async applySessionTitle(
@@ -146,6 +172,10 @@ export class TaskWorker {
     let cancelled = false;
     let stopping = false;
     let conversation: Awaited<ReturnType<AgentEngine["createConversation"]>> | undefined;
+    let continuous = false;
+    let sessionReused = false;
+    let workerSessionKey: string | undefined;
+    let runRecord: ReturnType<RunSessionRegistry["upsert"]> | undefined;
     const abortConversation = async () => {
       if (conversation?.abort) await conversation.abort();
     };
@@ -192,11 +222,11 @@ export class TaskWorker {
     }, 2_000);
 
     try {
-      conversation = await this.engine.createConversation({
-        cwd,
-        mode: "remote",
-        persisted: true,
-      });
+      const acquired = await this.acquireConversation(task, cwd);
+      conversation = acquired.conversation;
+      continuous = acquired.continuous;
+      sessionReused = acquired.reused;
+      workerSessionKey = acquired.workerSessionKey;
       if (stopping) {
         await abortConversation();
         return false;
@@ -204,33 +234,53 @@ export class TaskWorker {
       if (!conversation.sessionFile) {
         throw new Error("Remote Pi session did not create a persistent file");
       }
-      await this.applySessionTitle(task, cwd, conversation);
-      this.registry.upsert({
+      if (!continuous) await this.applySessionTitle(task, cwd, conversation);
+      conversation.setTaskContext?.({
+        taskId: task.task_id,
+        runId: run.run_id,
+      });
+      const turnStart = conversation.getSessionPosition?.();
+      runRecord = this.registry.upsert({
         runId: run.run_id,
         taskId: task.task_id,
         sessionId: conversation.sessionId,
         sessionFile: conversation.sessionFile,
         cwd,
         origin: "remote_task",
+        sessionMode: continuous ? "continuous" : "per_task",
+        workerSlot: this.workerSlot,
+        ...(workerSessionKey ? { workerSessionKey } : {}),
+        sessionReused,
+        ...(turnStart ? { turnStartEntry: turnStart.entryCount } : {}),
         status: "active",
       });
       await this.hub.updateRun(run.run_id, {
         status: "active",
-        result: { pi_session_id: conversation.sessionId },
+        result: {
+          pi_session_id: conversation.sessionId,
+          pi_session_mode: continuous ? "continuous" : "per_task",
+          pi_session_reused: sessionReused,
+          worker_slot: this.workerSlot,
+          ...(turnStart ? { pi_turn_start_entry: turnStart.entryCount } : {}),
+        },
       });
-      const result = await conversation.prompt(taskPrompt(task, cwd));
+      const result = await conversation.prompt(
+        taskPrompt(task, run.run_id, cwd, continuous),
+      );
       if (stopping) {
-        this.registry.updateStatus(run.run_id, "failed");
+        this.finishRunRecord(runRecord, conversation, "failed");
         return false;
       }
       const latest = this.hub.getTask
         ? await this.hub.getTask(task.task_id)
         : undefined;
       if (cancelled || latest?.status === "cancelled") {
-        this.registry.updateStatus(run.run_id, "cancelled");
+        this.finishRunRecord(runRecord, conversation, "cancelled");
         this.output(`Cancelled ${task.task_id}`);
         return false;
       }
+      const turnEnd = conversation.getSessionPosition?.();
+      this.finishRunRecord(runRecord, conversation, "completed");
       await this.hub.updateTask(task.task_id, {
         run_id: run.run_id,
         lease_token: leaseToken,
@@ -241,26 +291,30 @@ export class TaskWorker {
           provider: result.provider,
           model: result.model,
           pi_session_id: result.sessionId,
+          pi_session_mode: continuous ? "continuous" : "per_task",
+          pi_session_reused: sessionReused,
+          worker_slot: this.workerSlot,
+          ...(turnStart ? { pi_turn_start_entry: turnStart.entryCount } : {}),
+          ...(turnEnd ? { pi_turn_end_entry: turnEnd.entryCount } : {}),
         },
       });
-      this.registry.updateStatus(run.run_id, "completed");
       this.output(`Completed ${task.task_id}`);
       return false;
     } catch (error) {
       const message = errorMessage(error);
       if (stopping) {
-        this.registry.updateStatus(run.run_id, "failed");
+        this.finishRunRecord(runRecord, conversation, "failed");
         return false;
       }
       const latest = this.hub.getTask
         ? await this.hub.getTask(task.task_id).catch(() => undefined)
         : undefined;
       if (cancelled || latest?.status === "cancelled") {
-        this.registry.updateStatus(run.run_id, "cancelled");
+        this.finishRunRecord(runRecord, conversation, "cancelled");
         this.output(`Cancelled ${task.task_id}`);
         return false;
       }
-      this.registry.updateStatus(run.run_id, "failed");
+      this.finishRunRecord(runRecord, conversation, "failed");
       try {
         await this.hub.updateTask(task.task_id, {
           run_id: run.run_id,
@@ -279,8 +333,152 @@ export class TaskWorker {
       clearInterval(renewal);
       clearInterval(controls);
       signal?.removeEventListener("abort", onStop);
-      await conversation?.dispose();
+      conversation?.setTaskContext?.();
+      if (!continuous) await conversation?.dispose();
     }
+  }
+
+  private async acquireConversation(
+    task: HubTask,
+    cwd: string,
+  ): Promise<{
+    conversation: Awaited<ReturnType<AgentEngine["createConversation"]>>;
+    continuous: boolean;
+    reused: boolean;
+    workerSessionKey?: string;
+  }> {
+    if (this.config.workerSessionMode === "per_task") {
+      return {
+        conversation: await this.engine.createConversation({
+          cwd,
+          mode: "remote",
+          persisted: true,
+        }),
+        continuous: false,
+        reused: false,
+      };
+    }
+
+    const scope = this.workerSessionScope(task, cwd);
+    const key = this.workerSessions.key(scope);
+    const resetRequested = task.input.reset_worker_session === true;
+    if (
+      this.activeContinuous &&
+      (this.activeContinuous.key !== key ||
+        resetRequested ||
+        this.shouldRotate(this.activeContinuous.record))
+    ) {
+      await this.dispose();
+    }
+
+    if (this.activeContinuous?.key === key) {
+      const record = this.workerSessions.upsert(
+        scope,
+        {
+          sessionId: this.activeContinuous.conversation.sessionId,
+          sessionFile: requireSessionFile(this.activeContinuous.conversation),
+        },
+        task.task_id,
+      );
+      this.activeContinuous.record = record;
+      return {
+        conversation: this.activeContinuous.conversation,
+        continuous: true,
+        reused: true,
+        workerSessionKey: key,
+      };
+    }
+
+    let previous = resetRequested ? undefined : this.workerSessions.get(scope);
+    if (previous && this.shouldRotate(previous)) {
+      this.output(
+        `Rotating continuous Pi session ${previous.sessionId} for worker ${this.workerSlot + 1}`,
+      );
+      previous = undefined;
+    }
+    let conversation:
+      | Awaited<ReturnType<AgentEngine["createConversation"]>>
+      | undefined;
+    let reused = false;
+    if (previous) {
+      try {
+        conversation = await this.engine.createConversation({
+          cwd,
+          mode: "remote",
+          persisted: true,
+          sessionFile: previous.sessionFile,
+        });
+        reused = true;
+        this.output(
+          `Resumed continuous Pi session ${conversation.sessionId} for worker ${this.workerSlot + 1}`,
+        );
+      } catch (error) {
+        this.output(
+          `Continuous Pi session recovery failed; creating a new session: ${errorMessage(error)}`,
+        );
+      }
+    }
+    if (!conversation) {
+      conversation = await this.engine.createConversation({
+        cwd,
+        mode: "remote",
+        persisted: true,
+      });
+      conversation.setSessionName(
+        `Worker ${this.workerSlot + 1} · ${basename(cwd) || "workspace"}`,
+      );
+    }
+    const sessionFile = requireSessionFile(conversation);
+    const record = this.workerSessions.upsert(
+      scope,
+      { sessionId: conversation.sessionId, sessionFile },
+      task.task_id,
+      { reset: resetRequested || !reused },
+    );
+    this.activeContinuous = { key, conversation, record };
+    return {
+      conversation,
+      continuous: true,
+      reused,
+      workerSessionKey: key,
+    };
+  }
+
+  private workerSessionScope(task: HubTask, cwd: string): WorkerSessionScope {
+    return {
+      actorId: this.config.actorId,
+      nodeId: this.config.nodeId,
+      principalId: task.principal_id,
+      workerSlot: this.workerSlot,
+      cwd,
+    };
+  }
+
+  private shouldRotate(record: WorkerSessionRecord): boolean {
+    if (
+      this.config.workerSessionMaxTasks > 0 &&
+      record.taskCount >= this.config.workerSessionMaxTasks
+    ) {
+      return true;
+    }
+    if (this.config.workerSessionMaxAgeHours <= 0) return false;
+    const ageMs = Date.now() - Date.parse(record.createdAt);
+    return ageMs >= this.config.workerSessionMaxAgeHours * 60 * 60 * 1_000;
+  }
+
+  private finishRunRecord(
+    record: ReturnType<RunSessionRegistry["upsert"]> | undefined,
+    conversation: Awaited<ReturnType<AgentEngine["createConversation"]>> | undefined,
+    status: "completed" | "failed" | "cancelled",
+  ): void {
+    if (!record) return;
+    const turnEnd = conversation?.getSessionPosition?.();
+    this.registry.upsert({
+      ...record,
+      status,
+      startedAt: record.startedAt,
+      ...(turnEnd ? { turnEndEntry: turnEnd.entryCount } : {}),
+    });
   }
 
   private async reportClaimFailure(
@@ -434,15 +632,37 @@ export function resolveSelfUpdateWorkspace(root: string, task: HubTask): string 
   });
 }
 
-function taskPrompt(task: HubTask, cwd: string): string {
+function taskPrompt(
+  task: HubTask,
+  runId: string,
+  cwd: string,
+  continuous: boolean,
+): string {
   return [
+    ...(continuous
+      ? [
+          "--- BEGIN NEW REMOTE TASK ---",
+          "This is a new Hub task in a continuous worker session. Previous task messages are historical context only, not active instructions. Follow only the task boundary below and the user's durable preferences.",
+        ]
+      : []),
     "You are executing a durable task delegated through the collaboration Hub.",
     `Task ID: ${task.task_id}`,
+    `Run ID: ${runId}`,
     `Objective: ${task.objective}`,
     `Configured workspace: ${cwd}`,
     `Structured input: ${JSON.stringify(task.input)}`,
     "Complete the objective with the currently available tools. Return a concise result suitable for the delegating agent. Do not claim actions you did not perform.",
+    ...(continuous ? ["--- END NEW REMOTE TASK ENVELOPE ---"] : []),
   ].join("\n");
+}
+
+function requireSessionFile(
+  conversation: Awaited<ReturnType<AgentEngine["createConversation"]>>,
+): string {
+  if (!conversation.sessionFile) {
+    throw new Error("Remote Pi session did not create a persistent file");
+  }
+  return conversation.sessionFile;
 }
 
 function cleanSessionTitle(raw: string): string {

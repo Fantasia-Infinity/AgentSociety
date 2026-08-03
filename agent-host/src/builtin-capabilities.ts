@@ -54,6 +54,7 @@ interface BuiltinCapabilityContext {
 
 export interface BuiltinCapabilityBundle {
   tools: ReturnType<typeof defineTool>[];
+  setTaskContext(context?: { taskId: string; runId: string }): void;
   dispose(): void;
 }
 
@@ -128,7 +129,11 @@ export function createBuiltinCapabilityBundle(
     ...createMemoryTools(memoryStore),
     ...createBackgroundTools(background),
   ];
-  return { tools, dispose: () => background.dispose() };
+  return {
+    tools,
+    setTaskContext: (task) => planStore.setTaskContext(task?.taskId),
+    dispose: () => background.dispose(),
+  };
 }
 
 function createSubagentTools(context: BuiltinCapabilityContext) {
@@ -388,15 +393,21 @@ function createBackgroundTools(manager: BackgroundProcessManager) {
 }
 
 class PlanStore {
-  private readonly path: string;
+  private taskId: string | undefined;
 
-  constructor(root: string, sessionId: string) {
-    this.path = join(root, `${safeSegment(sessionId)}.json`);
+  constructor(
+    private readonly root: string,
+    private readonly sessionId: string,
+  ) {}
+
+  setTaskContext(taskId?: string): void {
+    this.taskId = taskId;
   }
 
   get(): PlanDocument | { title: string; steps: never[] } {
-    if (!existsSync(this.path)) return { title: "", steps: [] };
-    return JSON.parse(readFileSync(this.path, "utf8")) as PlanDocument;
+    const path = this.path();
+    if (!existsSync(path)) return { title: "", steps: [] };
+    return JSON.parse(readFileSync(path, "utf8")) as PlanDocument;
   }
 
   set(input: {
@@ -414,7 +425,7 @@ class PlanStore {
       updatedAt: new Date().toISOString(),
     };
     assertSingleInProgress(document.steps);
-    writePrivateJson(this.path, document);
+    writePrivateJson(this.path(), document);
     return document;
   }
 
@@ -430,12 +441,12 @@ class PlanStore {
     if (input.text) step.text = input.text;
     assertSingleInProgress(document.steps);
     document.updatedAt = new Date().toISOString();
-    writePrivateJson(this.path, document);
+    writePrivateJson(this.path(), document);
     return document;
   }
 
   add(input: { text: string; status?: PlanStep["status"] }): PlanDocument {
-    const document = existsSync(this.path)
+    const document = existsSync(this.path())
       ? this.requirePlan()
       : {
           version: 1 as const,
@@ -450,13 +461,23 @@ class PlanStore {
     });
     assertSingleInProgress(document.steps);
     document.updatedAt = new Date().toISOString();
-    writePrivateJson(this.path, document);
+    writePrivateJson(this.path(), document);
     return document;
   }
 
   private requirePlan(): PlanDocument {
-    if (!existsSync(this.path)) throw new Error("No plan exists for this session");
-    return JSON.parse(readFileSync(this.path, "utf8")) as PlanDocument;
+    const path = this.path();
+    if (!existsSync(path)) throw new Error("No plan exists for this session");
+    return JSON.parse(readFileSync(path, "utf8")) as PlanDocument;
+  }
+
+  private path(): string {
+    const session = safeSegment(this.sessionId);
+    if (!this.taskId) return join(this.root, `${session}.json`);
+    return join(
+      this.root,
+      `${session}.task-${hash(this.taskId).slice(0, 24)}.json`,
+    );
   }
 }
 

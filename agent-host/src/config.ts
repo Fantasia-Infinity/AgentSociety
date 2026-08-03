@@ -9,6 +9,7 @@ import {
 
 export type RemoteToolPolicy = "no_tools" | "read_only" | "full";
 export type WebSearchMode = "auto" | "disabled" | "deepseek";
+export type WorkerSessionMode = "per_task" | "continuous";
 export type RemotePiResourcePolicy =
   | "disabled"
   | "global"
@@ -30,6 +31,9 @@ export interface AgentHostConfig {
   leaseSeconds: number;
   workerConcurrency: number;
   workerSupervised: boolean;
+  workerSessionMode: WorkerSessionMode;
+  workerSessionMaxTasks: number;
+  workerSessionMaxAgeHours: number;
   remoteToolPolicy: RemoteToolPolicy;
   remotePiResourcePolicy: RemotePiResourcePolicy;
   selfUpdateEnabled: boolean;
@@ -95,6 +99,14 @@ function positiveNumber(name: string, fallback: number): number {
   return value;
 }
 
+function nonNegativeNumber(name: string, fallback: number): number {
+  const value = Number(process.env[name] ?? fallback);
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative number`);
+  }
+  return value;
+}
+
 function stableSlug(value: string): string {
   const slug = value.toLowerCase().replace(/[^a-z0-9._-]+/gu, "-");
   return slug.replace(/^-+|-+$/gu, "") || "node";
@@ -140,6 +152,13 @@ export function loadConfig(): AgentHostConfig {
     );
   }
   const selfUpdateEnabled = process.env.AGENT_SELF_UPDATE?.trim() !== "0";
+  const workerSessionMode = (process.env.AGENT_WORKER_SESSION_MODE ??
+    "per_task") as WorkerSessionMode;
+  if (!(["per_task", "continuous"] as const).includes(workerSessionMode)) {
+    throw new Error(
+      "AGENT_WORKER_SESSION_MODE must be per_task or continuous",
+    );
+  }
   const webSearchMode = (process.env.AGENT_WEB_SEARCH ??
     "auto") as WebSearchMode;
   if (!["auto", "disabled", "deepseek"].includes(webSearchMode)) {
@@ -216,6 +235,15 @@ export function loadConfig(): AgentHostConfig {
       Math.floor(positiveNumber("AGENT_WORKER_CONCURRENCY", 1)),
     ),
     workerSupervised: process.env.AGENT_WORKER_SUPERVISED === "1",
+    workerSessionMode,
+    workerSessionMaxTasks: Math.min(
+      10_000,
+      Math.floor(nonNegativeNumber("AGENT_WORKER_SESSION_MAX_TASKS", 0)),
+    ),
+    workerSessionMaxAgeHours: Math.min(
+      24 * 365,
+      nonNegativeNumber("AGENT_WORKER_SESSION_MAX_AGE_HOURS", 0),
+    ),
     remoteToolPolicy,
     remotePiResourcePolicy,
     selfUpdateEnabled,

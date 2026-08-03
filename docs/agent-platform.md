@@ -32,8 +32,9 @@ flowchart LR
 - 本地入口：Pi 0.83.0 原生完整 TUI 和 Resource Loader；登录设备的人可以直接操作，
   session 会持久化，已安装 Package 的 Extension 工具、命令、事件、Skill、Prompt 和 Theme
   按 Pi 语义加载。
-- 远程入口：worker 长轮询领取任务；每次领取产生独立、持久的 Pi session 和 Run，使用
-  租约、心跳、幂等任务和终态结果。
+- 远程入口：worker 长轮询领取任务；支持每 Task 独立 session，也支持每 worker scope 连续、
+  持久且跨重启恢复的 Pi session。每次领取始终产生独立 Run，并使用租约、心跳、幂等任务和
+  终态结果。
 - Pi Hub 工具：Agent 可列出 Actor/Task、读取 Task、创建子任务。工具定义留在 Pi Adapter，
   核心领域模型不依赖 Pi。
 - Channel MCP：按 MCP 2025-06-18 暴露 list/read/send/reply/react/download；Windows 继续只
@@ -93,6 +94,29 @@ Hub worker 还独立使用 `AGENT_REMOTE_PI_RESOURCES` 控制用户安装和项�
 即使选择 `global` 或 `trusted_project`，`read_only`/`no_tools` 仍会过滤 Extension 自定义工具；
 只有 `AGENT_REMOTE_TOOL_POLICY=full`（默认）才向远程模型开放这些工具。用户 Extension 的初始化
 代码和事件 Hook 不受工具名单约束，因此远程加载 Package 必须是设备所有者的显式选择。
+
+### 远程 worker 的 session 生命周期
+
+`AGENT_WORKER_SESSION_MODE` 提供两个明确模式：
+
+- `per_task`（默认）：每个 Hub Task 新建一个持久 Pi session。隔离最强，旧部署行为不变。
+- `continuous`：按 `Actor + Node + Principal + workspace + worker slot` 维护一个连续 session。
+  同一 scope 的顺序任务保留对话上下文；不同 Principal、workspace 或并发 slot 绝不共用。
+
+连续映射保存在 `AGENT_SESSION_DIR/agent-host-worker-sessions.d`，不进入 Hub。Pi 会等首次
+assistant 回复后才创建 JSONL；因此在首个回复前崩溃只会丢弃一个空 session，已有回复的 session
+则会在 worker 重启后恢复。每个新 Task 都向模型注入显式任务信封，并在 JSONL 写入不参与模型
+上下文的 start/end 边界。Hub Task/Run 结果和本机 Run registry 同时记录 session ID、复用标志、
+worker slot 以及 entry 起止位置，因此 session 连续不等于审计合并。
+
+plan/todo 在连续模式下按当前 Task 分文件，避免上个任务的临时计划污染下一个任务；长期 memory
+仍按既定 workspace/principal scope 工作。session-owned 后台进程和模型上下文会随连续 session
+保留，直到 worker 停止、scope 切换或 session 轮换。取消只 abort 当前 turn，不销毁连续 session。
+
+可设置 `AGENT_WORKER_SESSION_MAX_TASKS` 或 `AGENT_WORKER_SESSION_MAX_AGE_HOURS` 自动轮换；`0`
+表示不启用对应限制。单个 Task 可用 `input.reset_worker_session=true` 在执行前强制轮换。并发 worker
+按从 0 开始的 slot 各自持有 session，所以调整 `AGENT_WORKER_CONCURRENCY` 可能改变后续任务命中
+的上下文，要求严格线性连续时应保持并发为 1。
 
 托管能力包默认打开，可用 `AGENT_BUILTIN_CAPABILITIES=0` 整体关闭。Sub-agent 最大深度默认 2、
 单次并发默认 4；子 session 继承 workspace、模型和工具策略，但只接收父 Agent 明确给出的目标，

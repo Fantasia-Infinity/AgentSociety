@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { afterEach, test } from "node:test";
 
 import {
@@ -83,6 +83,9 @@ function config(workspaceRoot: string): AgentHostConfig {
     leaseSeconds: 300,
     workerConcurrency: 1,
     workerSupervised: false,
+    workerSessionMode: "per_task",
+    workerSessionMaxTasks: 0,
+    workerSessionMaxAgeHours: 0,
     remoteToolPolicy: "read_only",
     remotePiResourcePolicy: "disabled",
     selfUpdateEnabled: true,
@@ -204,8 +207,215 @@ test("worker completes a claimed task through the agent engine", async () => {
     provider: "remote",
     model: "test-model",
     pi_session_id: "pi-session",
+    pi_session_mode: "per_task",
+    pi_session_reused: false,
+    worker_slot: 0,
   });
   assert.equal(disposed, true);
+});
+
+test("continuous worker reuses one session and resumes it after restart", async () => {
+  const workspace = temporaryDirectory();
+  const continuousConfig: AgentHostConfig = {
+    ...config(workspace),
+    workerSessionMode: "continuous",
+  };
+  mkdirSync(continuousConfig.sessionDir, { recursive: true });
+  const sessionFile = join(continuousConfig.sessionDir, "continuous.jsonl");
+  writeFileSync(sessionFile, "{}\n");
+  const claims = ["task-1", "task-2", "task-3"].map((taskId, index) => ({
+    ...claim(),
+    task: {
+      ...task(),
+      task_id: taskId,
+      objective: `Objective ${index + 1}`,
+    },
+    run: {
+      ...claim().run,
+      run_id: `run-${index + 1}`,
+      task_id: taskId,
+      objective: `Objective ${index + 1}`,
+    },
+  }));
+  const taskResults: Array<Record<string, unknown>> = [];
+  const hub = {
+    claimTask: async () => claims.shift() ?? null,
+    updateTask: async (_taskId: string, update: Record<string, unknown>) => {
+      if (update.status === "completed") taskResults.push(update.result as Record<string, unknown>);
+      return task();
+    },
+    updateRun: async () => claim().run,
+    heartbeat: async () => {},
+  };
+  const createOptions: Array<{
+    persisted: boolean;
+    sessionFile?: string;
+  }> = [];
+  const taskContexts: Array<string | undefined> = [];
+  const sessionNames: string[] = [];
+  let position = 0;
+  let disposed = 0;
+  const engine: AgentEngine = {
+    createConversation: async (options) => {
+      createOptions.push({
+        persisted: options.persisted,
+        ...(options.sessionFile ? { sessionFile: options.sessionFile } : {}),
+      });
+      return {
+        sessionId: "continuous-session",
+        sessionFile,
+        prompt: async (prompt) => {
+          assert.match(prompt, /BEGIN NEW REMOTE TASK/u);
+          position += 2;
+          return {
+            text: `completed-${position}`,
+            provider: "remote",
+            model: "test-model",
+            sessionId: "continuous-session",
+          };
+        },
+        getSessionPosition: () => ({
+          entryCount: position,
+          messageCount: position,
+        }),
+        setTaskContext: (context) => taskContexts.push(context?.taskId),
+        setSessionName: (name) => sessionNames.push(name),
+        dispose: async () => {
+          disposed += 1;
+        },
+      };
+    },
+  };
+
+  const firstWorker = new TaskWorker(
+    continuousConfig,
+    hub,
+    engine,
+    () => {},
+  );
+  assert.equal(await firstWorker.runOnce(), true);
+  assert.equal(await firstWorker.runOnce(), true);
+  assert.equal(createOptions.length, 1);
+  assert.equal(disposed, 0);
+  await firstWorker.dispose();
+  assert.equal(disposed, 1);
+
+  const restartedWorker = new TaskWorker(
+    continuousConfig,
+    hub,
+    engine,
+    () => {},
+  );
+  assert.equal(await restartedWorker.runOnce(), true);
+  assert.equal(createOptions.length, 2);
+  assert.equal(createOptions[1]?.sessionFile, sessionFile);
+  await restartedWorker.dispose();
+  assert.equal(disposed, 2);
+
+  assert.deepEqual(
+    taskResults.map((result) => result.pi_session_reused),
+    [false, true, true],
+  );
+  assert.deepEqual(
+    taskResults.map((result) => result.pi_session_id),
+    ["continuous-session", "continuous-session", "continuous-session"],
+  );
+  assert.deepEqual(
+    taskResults.map((result) => [
+      result.pi_turn_start_entry,
+      result.pi_turn_end_entry,
+    ]),
+    [
+      [0, 2],
+      [2, 4],
+      [4, 6],
+    ],
+  );
+  assert.deepEqual(taskContexts, [
+    "task-1",
+    undefined,
+    "task-2",
+    undefined,
+    "task-3",
+    undefined,
+  ]);
+  assert.deepEqual(sessionNames, [`Worker 1 · ${basename(workspace)}`]);
+
+  const registry = new RunSessionRegistry(continuousConfig.sessionDir);
+  assert.equal(registry.get("run-1")?.sessionId, "continuous-session");
+  assert.equal(registry.get("run-2")?.turnStartEntry, 2);
+  assert.equal(registry.get("run-3")?.turnEndEntry, 6);
+});
+
+test("continuous worker rotates after its configured task limit", async () => {
+  const workspace = temporaryDirectory();
+  const rotatingConfig: AgentHostConfig = {
+    ...config(workspace),
+    workerSessionMode: "continuous",
+    workerSessionMaxTasks: 1,
+  };
+  mkdirSync(rotatingConfig.sessionDir, { recursive: true });
+  const claims = ["task-1", "task-2"].map((taskId, index) => ({
+    ...claim(),
+    task: { ...task(), task_id: taskId, objective: `Objective ${index + 1}` },
+    run: {
+      ...claim().run,
+      run_id: `run-${index + 1}`,
+      task_id: taskId,
+      objective: `Objective ${index + 1}`,
+    },
+  }));
+  const results: Array<Record<string, unknown>> = [];
+  const hub = {
+    claimTask: async () => claims.shift() ?? null,
+    updateTask: async (_taskId: string, update: Record<string, unknown>) => {
+      if (update.status === "completed") {
+        results.push(update.result as Record<string, unknown>);
+      }
+      return task();
+    },
+    updateRun: async () => claim().run,
+    heartbeat: async () => {},
+  };
+  let created = 0;
+  let disposed = 0;
+  const engine: AgentEngine = {
+    createConversation: async () => {
+      created += 1;
+      const sessionId = `rotated-session-${created}`;
+      const sessionFile = join(rotatingConfig.sessionDir, `${sessionId}.jsonl`);
+      writeFileSync(sessionFile, "{}\n");
+      return {
+        sessionId,
+        sessionFile,
+        prompt: async () => ({
+          text: "complete",
+          provider: "remote",
+          model: "test-model",
+          sessionId,
+        }),
+        setSessionName: () => {},
+        dispose: async () => {
+          disposed += 1;
+        },
+      };
+    },
+  };
+
+  const worker = new TaskWorker(rotatingConfig, hub, engine, () => {});
+  assert.equal(await worker.runOnce(), true);
+  assert.equal(await worker.runOnce(), true);
+  await worker.dispose();
+
+  assert.equal(created, 2);
+  assert.equal(disposed, 2);
+  assert.deepEqual(
+    results.map((result) => [result.pi_session_id, result.pi_session_reused]),
+    [
+      ["rotated-session-1", false],
+      ["rotated-session-2", false],
+    ],
+  );
 });
 
 test("self_update task runs without an LLM session and reports failure", async () => {

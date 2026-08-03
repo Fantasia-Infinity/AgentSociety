@@ -40,6 +40,7 @@ export async function registerHost(
       runtime_version: "0.83.0",
       remote_tool_policy: config.remoteToolPolicy,
       builtin_capabilities: config.builtinCapabilitiesEnabled,
+      worker_session_mode: config.workerSessionMode,
     },
   });
   await hub.registerNode({

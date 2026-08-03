@@ -15,8 +15,8 @@ Pi Agent，通过本机 TUI 由登录用户直接操作；配置 Hub 后才增�
 - `ModelProvider`：支持 `remote`、`local_rwkv` 和显式远程回退的 `auto` 模式。
 - `agent-hub`：独立的 Principal / Actor / Node / Task / Run / Artifact 服务、租约和事件流。
 - `agent-host`：Pi SDK 原生 TUI 与远程任务 worker；本地和远程默认具备 Sub-agent、
-  plan/todo、分域长期记忆、LSP/代码索引、MCP 和 session 后台进程，并持久化每次任务的
-  Pi session。
+  plan/todo、分域长期记忆、LSP/代码索引、MCP 和 session 后台进程。远程 worker 可选择
+  每任务独立 Pi session，或按 principal/workspace/worker slot 复用可跨重启恢复的连续 session。
 - `web_search`：模型无关的 Pi 工具契约；当前 adapter 使用 DeepSeek Responses API 的
   服务端搜索，并返回答案及可用的来源 URL。
 - `agent-channel-mcp`：MCP 2025-06-18 stdio server，统一 list/read/send/reply/react/download
@@ -77,6 +77,13 @@ TUI。配置 Hub 时才会额外登记 Principal/Actor/Node。
 ./agent follow-up task_xxx "完成后再给出性能摘要"
 ./agent cancel task_xxx "目标已变化"
 ```
+
+远程任务默认使用 `AGENT_WORKER_SESSION_MODE=per_task`，每个 Task 都有独立 Pi session。
+改成 `continuous` 后，同一个 principal、workspace 和 worker slot 的顺序任务会复用同一个
+session，从而保留模型上下文；映射在首次模型回复后落盘，worker 重启后自动恢复。可用
+`AGENT_WORKER_SESSION_MAX_TASKS` / `AGENT_WORKER_SESSION_MAX_AGE_HOURS` 自动轮换，或在单个
+Task 的 `input` 中传 `reset_worker_session: true` 立即换新。每个 Run 仍单独审计，并记录
+session ID、是否复用和该任务对应的 JSONL entry 边界。
 
 本地 TUI 使用 Pi 原生资源加载器，兼容 Pi Package 中的 Extension 自定义工具、命令、事件、
 Skill、Prompt 和 Theme。Package 仍用 Pi 自己的入口管理，不额外包装安装命令：

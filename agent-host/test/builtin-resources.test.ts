@@ -12,6 +12,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import { ensureBuiltinResourceDefaults } from "../src/builtin-resources.js";
+import type { AgentHostConfig } from "../src/config.js";
+import { PiAgentEngine } from "../src/pi-engine.js";
 import {
   activateCompatibleTools,
   collectPiDiagnostics,
@@ -89,6 +91,96 @@ test("managed MCP and LSP defaults load in a remote session", async () => {
       assert.ok(tools.includes("channel_send"));
     } finally {
       await runtimeHost.dispose();
+    }
+
+    const config: AgentHostConfig = {
+      hubEnabled: false,
+      principalId: "principal-fixture",
+      principalDisplayName: "Fixture",
+      actorId: "actor-fixture",
+      actorDisplayName: "Fixture Agent",
+      nodeId: "node-fixture",
+      nodeDisplayName: "Fixture Node",
+      workspaceRoot: workspace,
+      sessionDir: join(root, "sessions"),
+      pollSeconds: 1,
+      leaseSeconds: 30,
+      workerConcurrency: 1,
+      workerSupervised: false,
+      workerSessionMode: "continuous",
+      workerSessionMaxTasks: 0,
+      workerSessionMaxAgeHours: 0,
+      remoteToolPolicy: "full",
+      remotePiResourcePolicy: "disabled",
+      selfUpdateEnabled: false,
+      builtinCapabilitiesEnabled: true,
+      subagentMaxDepth: 2,
+      subagentConcurrency: 2,
+      backgroundMaxProcesses: 2,
+      webSearchMode: "disabled",
+      webSearchModel: "deepseek-v4-flash",
+      remoteBaseUrl: "https://models.test.invalid/v1",
+      remoteApiKey: "fixture-key",
+      remoteModel: "fixture-model",
+      contextWindow: 8_192,
+      maxOutputTokens: 1_024,
+      thinkingLevel: "off",
+    };
+    const engine = await PiAgentEngine.create(config);
+    const empty = await engine.createConversation({
+      cwd: workspace,
+      mode: "remote",
+      persisted: true,
+    });
+    const emptySessionFile = empty.sessionFile;
+    assert.ok(emptySessionFile);
+    empty.setTaskContext?.({ taskId: "task-empty", runId: "run-empty" });
+    empty.setTaskContext?.();
+    await empty.dispose();
+    // Pi intentionally leaves a session lazy until an assistant message exists.
+    assert.equal(existsSync(emptySessionFile), false);
+
+    const seeded = SessionManager.create(workspace, config.sessionDir);
+    seeded.appendMessage({
+      role: "user",
+      content: "fixture request",
+      timestamp: Date.now(),
+    });
+    seeded.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: "fixture response" }],
+      api: "openai-completions",
+      provider: "fixture",
+      model: "fixture-model",
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop",
+      timestamp: Date.now(),
+    });
+    const firstSessionId = seeded.getSessionId();
+    const sessionFile = seeded.getSessionFile();
+    assert.ok(sessionFile);
+    assert.ok(existsSync(sessionFile));
+    const resumed = await engine.createConversation({
+      cwd: workspace,
+      mode: "remote",
+      persisted: true,
+      sessionFile,
+    });
+    try {
+      assert.equal(resumed.sessionId, firstSessionId);
+      assert.equal(resumed.sessionFile, sessionFile);
+      resumed.setSessionName("Continuous fixture");
+      resumed.setTaskContext?.({ taskId: "task-fixture", runId: "run-fixture" });
+      resumed.setTaskContext?.();
+    } finally {
+      await resumed.dispose();
     }
   } finally {
     if (previousHome === undefined) delete process.env.HOME;

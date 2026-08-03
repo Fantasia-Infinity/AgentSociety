@@ -100,6 +100,16 @@ export interface AgentResult {
   sessionId: string;
 }
 
+export interface AgentSessionPosition {
+  entryCount: number;
+  messageCount: number;
+}
+
+export interface AgentTaskContext {
+  taskId: string;
+  runId: string;
+}
+
 export interface AgentConversation {
   readonly sessionId: string;
   readonly sessionFile?: string;
@@ -107,6 +117,8 @@ export interface AgentConversation {
   steer?(text: string): Promise<void>;
   followUp?(text: string): Promise<void>;
   abort?(): Promise<void>;
+  getSessionPosition?(): AgentSessionPosition;
+  setTaskContext?(context?: AgentTaskContext): void;
   setSessionName(name: string): void;
   dispose(): Promise<void>;
 }
@@ -116,6 +128,7 @@ export interface AgentEngine {
     cwd: string;
     mode: "local" | "remote" | "diagnostic";
     persisted: boolean;
+    sessionFile?: string;
     subagentDepth?: number;
   }): Promise<AgentConversation>;
 }

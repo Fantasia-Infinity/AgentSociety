@@ -28,6 +28,7 @@ import type {
   AgentConversation,
   AgentEngine,
   AgentResult,
+  AgentTaskContext,
   TaskStatus,
 } from "./types.js";
 import {
@@ -119,11 +120,21 @@ export class PiAgentEngine implements AgentEngine {
     cwd: string;
     mode: "local" | "remote" | "diagnostic";
     persisted: boolean;
+    sessionFile?: string;
     subagentDepth?: number;
   }): Promise<AgentConversation> {
-    const sessionManager = options.persisted
-      ? SessionManager.create(options.cwd, this.config.sessionDir)
-      : SessionManager.inMemory(options.cwd);
+    if (options.sessionFile && !options.persisted) {
+      throw new Error("A resumed Pi session must be persistent");
+    }
+    const sessionManager = options.sessionFile
+      ? SessionManager.open(
+          options.sessionFile,
+          this.config.sessionDir,
+          options.cwd,
+        )
+      : options.persisted
+        ? SessionManager.create(options.cwd, this.config.sessionDir)
+        : SessionManager.inMemory(options.cwd);
     const capabilityBundle = this.createCapabilityBundle({
       cwd: options.cwd,
       mode: options.mode,
@@ -175,7 +186,10 @@ export class PiAgentEngine implements AgentEngine {
         sessionManager,
         sessionStartEvent: {
           type: "session_start",
-          reason: "startup",
+          reason: options.sessionFile ? "resume" : "startup",
+          ...(options.sessionFile
+            ? { previousSessionFile: options.sessionFile }
+            : {}),
         },
       }));
     } catch (error) {
@@ -195,6 +209,7 @@ export class PiAgentEngine implements AgentEngine {
       },
       diagnostics,
     );
+    let activeTaskContext: AgentTaskContext | undefined;
 
     return {
       sessionId: session.sessionId,
@@ -224,6 +239,36 @@ export class PiAgentEngine implements AgentEngine {
       steer: (text) => session.steer(text),
       followUp: (text) => session.followUp(text),
       abort: () => session.abort(),
+      getSessionPosition: () => ({
+        entryCount: session.sessionManager.getEntries().length,
+        messageCount: session.messages.length,
+      }),
+      setTaskContext: (context) => {
+        if (activeTaskContext) {
+          session.sessionManager.appendCustomEntry(
+            "agent-society-task-boundary",
+            {
+              phase: "end",
+              taskId: activeTaskContext.taskId,
+              runId: activeTaskContext.runId,
+              timestamp: new Date().toISOString(),
+            },
+          );
+        }
+        activeTaskContext = context;
+        if (context) {
+          session.sessionManager.appendCustomEntry(
+            "agent-society-task-boundary",
+            {
+              phase: "start",
+              taskId: context.taskId,
+              runId: context.runId,
+              timestamp: new Date().toISOString(),
+            },
+          );
+        }
+        capabilityBundle.setTaskContext(context);
+      },
       dispose: async () => {
         try {
           await runtime.dispose();
@@ -359,7 +404,11 @@ export class PiAgentEngine implements AgentEngine {
     subagentDepth: number;
   }): BuiltinCapabilityBundle {
     if (!this.config.builtinCapabilitiesEnabled) {
-      return { tools: [], dispose: () => undefined };
+      return {
+        tools: [],
+        setTaskContext: () => undefined,
+        dispose: () => undefined,
+      };
     }
     return createBuiltinCapabilityBundle({
       ...options,

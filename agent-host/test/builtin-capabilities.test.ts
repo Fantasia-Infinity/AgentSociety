@@ -92,6 +92,25 @@ test("built-in tools persist plan and scoped memory and run sub-agents", async (
     };
     assert.equal(restored.title, "Ship capability bundle");
 
+    bundle.setTaskContext({ taskId: "task-a", runId: "run-a" });
+    await callTool(bundle.tools, "plan_set", {
+      title: "Task A",
+      steps: [{ text: "A1" }],
+    });
+    bundle.setTaskContext({ taskId: "task-b", runId: "run-b" });
+    const isolated = (await callTool(bundle.tools, "plan_get", {})) as {
+      title: string;
+      steps: unknown[];
+    };
+    assert.equal(isolated.title, "");
+    assert.deepEqual(isolated.steps, []);
+    bundle.setTaskContext({ taskId: "task-a", runId: "run-a" });
+    const taskAPlan = (await callTool(bundle.tools, "plan_get", {})) as {
+      title: string;
+    };
+    assert.equal(taskAPlan.title, "Task A");
+    bundle.setTaskContext();
+
     const memory = (await callTool(bundle.tools, "memory_remember", {
       text: "Channel MCP is the communication boundary",
       tags: ["architecture"],

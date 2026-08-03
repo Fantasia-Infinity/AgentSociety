@@ -50,4 +50,7 @@ export async function runDoctor(
       ? "Agent tools:      ok (subagent, plan/todo, memory, LSP, MCP, background)"
       : "Agent tools:      disabled (AGENT_BUILTIN_CAPABILITIES=0)",
   );
+  console.log(
+    `Worker sessions:  ${config.workerSessionMode}`,
+  );
 }

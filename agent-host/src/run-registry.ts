@@ -18,6 +18,12 @@ export interface RunSessionRecord {
   sessionFile: string;
   cwd: string;
   origin: "local_ui" | "remote_task";
+  sessionMode?: "per_task" | "continuous";
+  workerSlot?: number;
+  workerSessionKey?: string;
+  sessionReused?: boolean;
+  turnStartEntry?: number;
+  turnEndEntry?: number;
   status: LocalRunStatus;
   startedAt: string;
   updatedAt: string;

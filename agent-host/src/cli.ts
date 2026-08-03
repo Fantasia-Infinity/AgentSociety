@@ -132,8 +132,12 @@ async function main(): Promise<void> {
   const engine = await PiAgentEngine.create(config, hub);
   const worker = new TaskWorker(config, hub!, engine);
   if (command === "once") {
-    const worked = await worker.runOnce();
-    console.log(worked ? "Processed one task" : "No matching task");
+    try {
+      const worked = await worker.runOnce();
+      console.log(worked ? "Processed one task" : "No matching task");
+    } finally {
+      await worker.dispose();
+    }
     return;
   }
   if (command === "worker") {
@@ -146,8 +150,14 @@ async function main(): Promise<void> {
       (_, index) =>
         index === 0
           ? worker
-          : new TaskWorker(config, hub!, engine, (message) =>
-              console.log(`[worker ${index + 1}] ${message}`),
+          : new TaskWorker(
+              config,
+              hub!,
+              engine,
+              (message) =>
+                console.log(`[worker ${index + 1}] ${message}`),
+              undefined,
+              index,
             ),
     );
     await Promise.all(
