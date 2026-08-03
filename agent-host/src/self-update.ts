@@ -1,10 +1,15 @@
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   closeSync,
   existsSync,
+  mkdirSync,
   openSync,
+  readFileSync,
   readdirSync,
   statSync,
+  unlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 
@@ -29,11 +34,17 @@ export interface SelfUpdateReport {
   ok: boolean;
   updated: boolean;
   needsRestart: boolean;
+  pendingInstall: boolean;
   steps: string[];
   error?: string;
   before?: string;
   after?: string;
 }
+
+/** Name of the marker file that defers npm ci to the next worker start. */
+export const PENDING_UPDATE_FILE = ".self-update-pending";
+/** File under node_modules recording the lock hash of the last install. */
+export const INSTALLED_LOCK_HASH_FILE = ".installed-lock-hash";
 
 export function isSelfUpdateTask(task: HubTask): boolean {
   return task.input?.action === SELF_UPDATE_ACTION;
@@ -88,8 +99,119 @@ export function runSelfUpdate(
   const updated = after.trim() !== before.trim();
   const stale = needsRebuild(agentHostDir);
 
+  // The security patch rewrites a plain JS file inside node_modules. Unlike
+  // npm ci it does not delete anything, so it is safe while the worker process
+  // is running, even on Windows (where loaded native DLLs cannot be replaced).
+  run(
+    agentHostDir,
+    process.execPath,
+    ["scripts/patch-pi-brace-expansion.mjs"],
+    record,
+    "Apply security patch",
+  );
+  run(
+    agentHostDir,
+    process.execPath,
+    ["scripts/patch-pi-brace-expansion.mjs", "--check"],
+    record,
+    "Verify security patch",
+  );
+
+  // npm ci deletes the whole node_modules tree and would fail on Windows while
+  // this worker process is alive: the keyring native addon is loaded as a DLL
+  // and cannot be replaced. Only run it when the dependency lock changed, and
+  // defer it to the next worker start (see applyPendingUpdate) so the current
+  // process has exited and released all file locks first.
+  const lockHash = currentLockHash(agentHostDir);
+  const lockChanged =
+    lockHash !== undefined && lockHash !== installedLockHash(agentHostDir);
+
   if (updated || stale) {
-    run(agentHostDir, npm.command, [...npm.args, "ci", "--ignore-scripts"], record, "npm ci");
+    if (lockChanged && lockHash) {
+      writePendingUpdate(agentHostDir, lockHash);
+      record(
+        "Dependencies",
+        "lock changed; npm ci deferred to next worker start",
+      );
+    } else {
+      run(
+        agentHostDir,
+        npm.command,
+        [...npm.args, "run", "build"],
+        record,
+        "Build",
+      );
+    }
+  }
+
+  return {
+    ok: true,
+    updated,
+    needsRestart: updated || stale,
+    pendingInstall: lockChanged && (updated || stale),
+    steps,
+    before: before.trim(),
+    after: after.trim(),
+  };
+}
+
+function pendingUpdatePath(agentHostDir: string): string {
+  return resolve(agentHostDir, PENDING_UPDATE_FILE);
+}
+
+function installedLockHashPath(agentHostDir: string): string {
+  return resolve(agentHostDir, "node_modules", INSTALLED_LOCK_HASH_FILE);
+}
+
+/** sha256 of package-lock.json, or undefined when the lock file is missing. */
+export function currentLockHash(agentHostDir: string): string | undefined {
+  const lockFile = resolve(agentHostDir, "package-lock.json");
+  if (!existsSync(lockFile)) return undefined;
+  return createHash("sha256")
+    .update(readFileSync(lockFile))
+    .digest("hex");
+}
+
+/** Hash of the lock the current node_modules was installed from. */
+export function installedLockHash(agentHostDir: string): string | undefined {
+  const marker = installedLockHashPath(agentHostDir);
+  if (!existsSync(marker)) return undefined;
+  return readFileSync(marker, "utf8").trim() || undefined;
+}
+
+function writePendingUpdate(agentHostDir: string, lockHash: string): void {
+  mkdirSync(agentHostDir, { recursive: true });
+  writeFileSync(
+    pendingUpdatePath(agentHostDir),
+    JSON.stringify({ agentHostDir, lockHash }),
+    "utf8",
+  );
+}
+
+/**
+ * Runs before the worker loads any credentials (and thus before the keyring
+ * native addon pins node_modules files on Windows). When a previous update
+ * deferred npm ci, this process has replaced the old worker, so the DLL lock
+ * is gone and the install can proceed. Failures keep the marker so the next
+ * start retries, and never prevent the worker from starting.
+ */
+export function applyPendingUpdate(agentHostDir: string): void {
+  const marker = pendingUpdatePath(agentHostDir);
+  if (!existsSync(marker)) return;
+  const npm = resolveNpm();
+  const steps: string[] = [];
+  const record = (label: string, output: string) => {
+    const trimmed = output.trim();
+    steps.push(trimmed ? `${label}: ${trimmed.slice(0, 800)}` : label);
+  };
+  try {
+    run(
+      agentHostDir,
+      npm.command,
+      [...npm.args, "ci", "--ignore-scripts"],
+      record,
+      "npm ci",
+    );
     run(
       agentHostDir,
       process.execPath,
@@ -99,22 +221,23 @@ export function runSelfUpdate(
     );
     run(
       agentHostDir,
-      process.execPath,
-      ["scripts/patch-pi-brace-expansion.mjs", "--check"],
+      npm.command,
+      [...npm.args, "run", "build"],
       record,
-      "Verify security patch",
+      "Build",
     );
-    run(agentHostDir, npm.command, [...npm.args, "run", "build"], record, "Build");
+    const hash = currentLockHash(agentHostDir);
+    if (hash) {
+      mkdirSync(resolve(agentHostDir, "node_modules"), { recursive: true });
+      writeFileSync(installedLockHashPath(agentHostDir), hash, "utf8");
+    }
+    unlinkSync(marker);
+    console.log(`Pending self-update applied:\n${steps.join("\n")}`);
+  } catch (error) {
+    console.error(
+      `Pending self-update failed (will retry on next start): ${errorMessage(error)}`,
+    );
   }
-
-  return {
-    ok: true,
-    updated,
-    needsRestart: updated || stale,
-    steps,
-    before: before.trim(),
-    after: after.trim(),
-  };
 }
 
 export function restartWorker(config: AgentHostConfig): void {
@@ -226,4 +349,8 @@ function run(
   }
   record(label, output);
   return output;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

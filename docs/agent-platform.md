@@ -217,10 +217,10 @@ curl -X POST http://127.0.0.1:8090/v1/hub/tasks \
 ## 自更新任务模式
 
 `input.action = "self_update"` 是一个保留的任务类型：worker 领取后不经过 LLM，由 worker
-进程自身直接执行 `git fetch` → `git pull --ff-only` → `npm ci` → 安全补丁 → `npm run build`，
-成功后重启 worker 进程使新代码生效，并把 before/after commit hash 写进任务结果。因为 shell
-操作发生在 worker 进程里而不是模型工具里，`AGENT_REMOTE_TOOL_POLICY=read_only` 的设备也能
-自更新。
+进程自身直接执行 `git fetch` → `git pull --ff-only` → 安全补丁 → `npm run build`（依赖未变时）
+或推迟到重启后的 `npm ci`（依赖变化时），成功后重启 worker 进程使新代码生效，并把
+before/after commit hash 写进任务结果。因为 shell 操作发生在 worker 进程里而不是模型工具里，
+`AGENT_REMOTE_TOOL_POLICY=read_only` 的设备也能自更新。
 
 ```bash
 curl -X POST http://127.0.0.1:8090/v1/hub/tasks \
@@ -242,6 +242,12 @@ curl -X POST http://127.0.0.1:8090/v1/hub/tasks \
 - 只有 `input.action === "self_update"` 才触发；普通任务不受影响。`branch` 缺省为 `main`。
 - 使用 `git pull --ff-only`，本地有未提交改动且远端已更新时会失败并标记任务失败，不破坏现场。
 - 只有当远端确实有新提交时才重建并重启；`Already up to date` 时只报告完成，不重启。
+- **两阶段依赖更新**：`npm ci` 会删除整个 `node_modules`，而 Windows 上正在运行的 worker
+  进程会锁住 `@napi-rs/keyring` 原生 DLL，导致 EPERM。因此仅在 `package-lock.json` 的
+  sha256 与上次安装记录（`node_modules/.installed-lock-hash`）不一致时才执行 `npm ci`，且
+  推迟到重启后的新进程启动时（`applyPendingUpdate`，在加载凭据之前）执行；失败会保留
+  `.self-update-pending` 标记并在下次启动重试，且不阻塞 worker 启动。依赖未变的普通更新只
+  做 build + 重启，完全避开文件锁。
 - 任务结果先写入 Hub（completed/failed）才重启，结果不会丢失。重启的新进程会把日志追加到
   `agent-host/worker-restart.log`。
 - 设备所有者可用 `AGENT_SELF_UPDATE=0` 关闭；`setup` 不会改写该开关。

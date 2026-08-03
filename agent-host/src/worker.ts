@@ -248,6 +248,9 @@ export class TaskWorker {
         after: report.after,
         updated: report.updated,
         needs_restart: report.needsRestart,
+        ...(report.pendingInstall
+          ? { pending_install: true }
+          : {}),
       },
     });
     return report.needsRestart;

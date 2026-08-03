@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { loadConfig, loadSessionDir } from "./config.js";
 import { runDoctor } from "./doctor.js";
 import { HubClient } from "./hub-client.js";
@@ -8,10 +11,22 @@ import { runInteractive, runInteractiveChild } from "./interactive.js";
 import { observeRun } from "./observer.js";
 import { PiAgentEngine } from "./pi-engine.js";
 import { RunSessionRegistry } from "./run-registry.js";
+import { applyPendingUpdate } from "./self-update.js";
 import { TaskWorker } from "./worker.js";
 
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "interactive";
+  // A self-update that deferred npm ci (because the previous worker process
+  // held Windows DLL locks on node_modules) is applied here, before any
+  // credentials load: the keyring native addon is not loaded yet, so npm ci
+  // can replace the tree. Failures keep the marker for the next start.
+  const agentHostDir = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "..",
+    "..",
+  );
+  applyPendingUpdate(agentHostDir);
   if (command === "local") process.env.AGENT_HUB_RUNTIME_DISABLED = "1";
   if (command === "sessions") {
     const records = new RunSessionRegistry(loadSessionDir()).list();
