@@ -128,6 +128,24 @@ export function runSelfUpdate(
 
   if (updated || stale) {
     if (lockChanged && lockHash) {
+      // Dependencies changed: npm ci must wait for the next worker start
+      // (this process holds Windows DLL locks on node_modules). Still build
+      // now so dist always reflects the newest source: npm ci will only
+      // replace the tree, never the build, and the next start applies the
+      // pending install from the freshly built cli.js (whose marker lookup
+      // is correct). If the build fails because the new code needs packages
+      // that are not installed yet, the pending install will rebuild it.
+      try {
+        run(
+          agentHostDir,
+          npm.command,
+          [...npm.args, "run", "build"],
+          record,
+          "Build",
+        );
+      } catch (error) {
+        record("Build", `deferred: ${errorMessage(error)}`);
+      }
       writePendingUpdate(agentHostDir, lockHash);
       record(
         "Dependencies",
