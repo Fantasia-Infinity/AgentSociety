@@ -24,7 +24,6 @@ async function main(): Promise<void> {
     dirname(fileURLToPath(import.meta.url)),
     "..",
     "..",
-    "..",
   );
   applyPendingUpdate(agentHostDir);
   if (command === "local") process.env.AGENT_HUB_RUNTIME_DISABLED = "1";
