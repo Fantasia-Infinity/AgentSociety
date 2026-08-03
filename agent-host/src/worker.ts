@@ -232,12 +232,14 @@ export class TaskWorker {
       return false;
     }
     const summary = report.steps.join("\n");
-    this.output(`Self-update ${report.updated ? "updated" : "already up to date"}`);
+    this.output(
+      `Self-update ${report.needsRestart ? "applied" : "already up to date"}`,
+    );
     await this.hub.updateTask(task.task_id, {
       run_id: runId,
       lease_token: leaseToken,
       status: "completed",
-      message: report.updated
+      message: report.needsRestart
         ? "Self-update applied; worker restarting"
         : "Self-update: already up to date",
       result: {
@@ -245,9 +247,10 @@ export class TaskWorker {
         before: report.before,
         after: report.after,
         updated: report.updated,
+        needs_restart: report.needsRestart,
       },
     });
-    return report.updated;
+    return report.needsRestart;
   }
 }
 
