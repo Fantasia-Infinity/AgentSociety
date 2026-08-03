@@ -68,9 +68,10 @@ Extension 首次加载前必须在 TUI 中明确授信，决定记录在 Pi 的 
 使用全局资源和普通上下文文件。session 保存在 `AGENT_SESSION_DIR`，同时在 Hub 记录一个
 `origin=local_ui` 的 Run。
 
-远程路径的授权根是 Hub 中的 Task。默认 `AGENT_REMOTE_TOOL_POLICY=read_only`，只向 Pi
-开放 `read/grep/find/ls` 和 Hub 协作工具。把它改成 `full` 是显式提升权限，会加入
-`bash/edit/write`；设为 `no_tools` 则只保留 Hub 工具。Task 请求的 workspace 必须是
+远程路径的授权根是 Hub 中的 Task。默认 `AGENT_REMOTE_TOOL_POLICY=full`，向 Pi 开放
+`read/bash/edit/write/grep/find/ls` 和 Hub 协作工具；改成 `read_only` 只开放
+`read/grep/find/ls` 和 Hub 工具（适合只做检查的 worker）；设为 `no_tools` 则只保留
+Hub 工具。Task 请求的 workspace 必须是
 `AGENT_WORKSPACE_ROOT` 的现有子目录，路径逃逸会被拒绝。
 
 Hub worker 还独立使用 `AGENT_REMOTE_PI_RESOURCES` 控制 Package：
@@ -81,11 +82,11 @@ Hub worker 还独立使用 `AGENT_REMOTE_PI_RESOURCES` 控制 Package：
   不会在无人值守状态弹出信任确认。
 
 即使选择 `global` 或 `trusted_project`，`read_only`/`no_tools` 仍会过滤 Extension 自定义工具；
-只有 `AGENT_REMOTE_TOOL_POLICY=full` 才向远程模型开放这些工具。Extension 的初始化代码和事件
+只有 `AGENT_REMOTE_TOOL_POLICY=full`（默认）才向远程模型开放这些工具。Extension 的初始化代码和事件
 Hook 不受工具名单约束，因此远程加载 Package 必须是设备所有者的显式选择。
 
-注意：Pi 本身不是 OS 沙箱。`read_only` 是工具暴露策略，不应被当成敌对代码隔离。公网
-接收不可信任务前，还需要容器/虚拟机、每节点身份和审批策略。第三方 Package 还可能自行
+注意：Pi 本身不是 OS 沙箱。工具策略是暴露策略，不应被当成敌对代码隔离。`full` 是设备所有者的
+默认授权，公网接收不可信任务前，还需要容器/虚拟机、每节点身份和审批策略。第三方 Package 还可能自行
 保存凭据；AgentSociety 的系统凭据库保证只覆盖自身 setup 管理的模型 Key 和 Hub token。
 
 ## 任务语义

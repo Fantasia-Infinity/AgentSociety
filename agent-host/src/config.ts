@@ -110,7 +110,7 @@ export function loadConfig(): AgentHostConfig {
   const host = stableSlug(hostname());
   const owner = stableSlug(userInfo().username);
   const remoteToolPolicy = (process.env.AGENT_REMOTE_TOOL_POLICY ??
-    "read_only") as RemoteToolPolicy;
+    "full") as RemoteToolPolicy;
   if (!["no_tools", "read_only", "full"].includes(remoteToolPolicy)) {
     throw new Error(
       "AGENT_REMOTE_TOOL_POLICY must be no_tools, read_only, or full",
