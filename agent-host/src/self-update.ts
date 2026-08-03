@@ -241,17 +241,21 @@ export function applyPendingUpdate(agentHostDir: string): void {
 }
 
 export function restartWorker(config: AgentHostConfig): void {
-  const cli = resolve(
-    config.workspaceRoot,
-    "agent-host",
-    "dist",
-    "src",
-    "cli.js",
-  );
+  // Derive the agent-host directory from the entrypoint that is currently
+  // running (dist/src/cli.js -> agent-host). config.workspaceRoot is NOT
+  // reliable here: a task workspace may be a subdirectory of the root (for
+  // example a git worktree), so resolving from the root could point at a
+  // path where no cli.js exists and silently prevent the restart.
+  const currentCli = process.argv[1] ? resolve(process.argv[1]) : "";
+  const agentHostDir =
+    currentCli && existsSync(currentCli)
+      ? resolve(dirname(currentCli), "..", "..")
+      : resolve(config.workspaceRoot, "agent-host");
+  const cli = resolve(agentHostDir, "dist", "src", "cli.js");
   if (!existsSync(cli)) {
     throw new Error(`Worker entrypoint missing: ${cli}`);
   }
-  const logPath = resolve(config.workspaceRoot, "agent-host", "worker-restart.log");
+  const logPath = resolve(agentHostDir, "worker-restart.log");
   const logFd = openSync(logPath, "a");
   const child = spawn(process.execPath, [cli, "worker"], {
     detached: true,
