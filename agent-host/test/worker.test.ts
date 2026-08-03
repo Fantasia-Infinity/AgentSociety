@@ -78,6 +78,7 @@ function config(workspaceRoot: string): AgentHostConfig {
     leaseSeconds: 300,
     remoteToolPolicy: "read_only",
     remotePiResourcePolicy: "disabled",
+    selfUpdateEnabled: true,
     remoteBaseUrl: "https://models.example/v1",
     remoteApiKey: "key",
     remoteModel: "model",
@@ -191,6 +192,58 @@ test("worker completes a claimed task through the agent engine", async () => {
     pi_session_id: "pi-session",
   });
   assert.equal(disposed, true);
+});
+
+test("self_update task runs without an LLM session and reports failure", async () => {
+  const workspace = temporaryDirectory();
+  const updates: Array<Record<string, unknown>> = [];
+  const hub = {
+    claimTask: async () => ({
+      ...claim(),
+      task: {
+        ...task(),
+        objective: "Self-update this agent",
+        input: { workspace: ".", action: "self_update" },
+      },
+    }),
+    updateTask: async (_taskId: string, update: Record<string, unknown>) => {
+      updates.push(update);
+      return task();
+    },
+    updateRun: async () => claim().run,
+    heartbeat: async () => {},
+  };
+  let sessionsCreated = 0;
+  const engine: AgentEngine = {
+    createConversation: async () => {
+      sessionsCreated += 1;
+      throw new Error("self_update must not create a Pi session");
+    },
+  };
+  let restarted = false;
+  const worker = new TaskWorker(
+    config(workspace),
+    hub,
+    engine,
+    () => {},
+    () => {
+      restarted = true;
+    },
+  );
+
+  // The temporary workspace is not a git repository, so the update fails
+  // cleanly: task reported as failed, no restart, no LLM session.
+  assert.equal(await worker.runOnce(), true);
+  assert.equal(sessionsCreated, 0);
+  assert.equal(restarted, false);
+  assert.deepEqual(
+    updates.map((update) => update.status),
+    ["working", "failed"],
+  );
+  assert.match(
+    String((updates[1]?.result as Record<string, unknown>)?.text ?? ""),
+    /Self-update failed/u,
+  );
 });
 
 test("task workspace cannot escape the configured root", () => {

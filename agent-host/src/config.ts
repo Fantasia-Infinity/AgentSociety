@@ -29,6 +29,7 @@ export interface AgentHostConfig {
   leaseSeconds: number;
   remoteToolPolicy: RemoteToolPolicy;
   remotePiResourcePolicy: RemotePiResourcePolicy;
+  selfUpdateEnabled: boolean;
   piProvider?: string;
   piModel?: string;
   remoteBaseUrl?: string;
@@ -126,6 +127,7 @@ export function loadConfig(): AgentHostConfig {
       "AGENT_REMOTE_PI_RESOURCES must be disabled, global, or trusted_project",
     );
   }
+  const selfUpdateEnabled = process.env.AGENT_SELF_UPDATE?.trim() !== "0";
   const hubRuntimeDisabled = process.env.AGENT_HUB_RUNTIME_DISABLED === "1";
   const hubUrl = hubRuntimeDisabled
     ? undefined
@@ -192,6 +194,7 @@ export function loadConfig(): AgentHostConfig {
     leaseSeconds: Math.min(900, positiveNumber("AGENT_LEASE_SECONDS", 300)),
     remoteToolPolicy,
     remotePiResourcePolicy,
+    selfUpdateEnabled,
     ...(piProvider ? { piProvider } : {}),
     ...(piModel ? { piModel } : {}),
     ...(remoteBaseUrl ? { remoteBaseUrl } : {}),

@@ -4,6 +4,12 @@ import { relative, resolve } from "node:path";
 import type { AgentHostConfig } from "./config.js";
 import type { HubClient } from "./hub-client.js";
 import { RunSessionRegistry } from "./run-registry.js";
+import {
+  isSelfUpdateTask,
+  restartWorker,
+  runSelfUpdate,
+  type SelfUpdateReport,
+} from "./self-update.js";
 import type { AgentEngine, HubClaim, HubTask } from "./types.js";
 
 type WorkerHub = Pick<
@@ -19,6 +25,10 @@ export class TaskWorker {
     private readonly hub: WorkerHub,
     private readonly engine: AgentEngine,
     private readonly output: (message: string) => void = console.log,
+    private readonly restart: () => void = () => {
+      restartWorker(config);
+      process.exit(0);
+    },
   ) {
     this.registry = new RunSessionRegistry(config.sessionDir);
   }
@@ -31,7 +41,11 @@ export class TaskWorker {
       lease_seconds: this.config.leaseSeconds,
     });
     if (!claim) return false;
-    await this.execute(claim);
+    const shouldRestart = await this.execute(claim);
+    if (shouldRestart) {
+      this.output("Self-update applied; restarting worker");
+      this.restart();
+    }
     return true;
   }
 
@@ -88,9 +102,12 @@ export class TaskWorker {
     }
   }
 
-  private async execute(claim: HubClaim): Promise<void> {
+  private async execute(claim: HubClaim): Promise<boolean> {
     const { task, run, lease_token: leaseToken } = claim;
     const cwd = resolveTaskWorkspace(this.config.workspaceRoot, task);
+    if (isSelfUpdateTask(task)) {
+      return this.executeSelfUpdate(task, run.run_id, leaseToken, cwd);
+    }
     this.output(`Claimed ${task.task_id}: ${task.objective}`);
     await this.hub.updateTask(task.task_id, {
       run_id: run.run_id,
@@ -157,6 +174,7 @@ export class TaskWorker {
       });
       this.registry.updateStatus(run.run_id, "completed");
       this.output(`Completed ${task.task_id}`);
+      return false;
     } catch (error) {
       const message = errorMessage(error);
       this.registry.updateStatus(run.run_id, "failed");
@@ -178,6 +196,58 @@ export class TaskWorker {
       clearInterval(renewal);
       conversation?.dispose();
     }
+  }
+
+  /**
+   * Handle a self_update task without an LLM session: pull, reinstall, patch,
+   * rebuild, then signal a worker restart. The Hub task is completed before
+   * the restart so its result is never lost.
+   */
+  private async executeSelfUpdate(
+    task: HubTask,
+    runId: string,
+    leaseToken: string,
+    cwd: string,
+  ): Promise<boolean> {
+    this.output(`Self-update claimed ${task.task_id}: ${task.objective}`);
+    await this.hub.updateTask(task.task_id, {
+      run_id: runId,
+      lease_token: leaseToken,
+      status: "working",
+      message: "Self-update starting",
+    });
+    let report: SelfUpdateReport;
+    try {
+      report = runSelfUpdate(this.config, task, cwd);
+    } catch (error) {
+      const message = errorMessage(error);
+      this.output(`Self-update failed: ${message}`);
+      await this.hub.updateTask(task.task_id, {
+        run_id: runId,
+        lease_token: leaseToken,
+        status: "failed",
+        message: "Self-update failed",
+        result: { text: `Self-update failed: ${message}` },
+      });
+      return false;
+    }
+    const summary = report.steps.join("\n");
+    this.output(`Self-update ${report.updated ? "updated" : "already up to date"}`);
+    await this.hub.updateTask(task.task_id, {
+      run_id: runId,
+      lease_token: leaseToken,
+      status: "completed",
+      message: report.updated
+        ? "Self-update applied; worker restarting"
+        : "Self-update: already up to date",
+      result: {
+        text: summary,
+        before: report.before,
+        after: report.after,
+        updated: report.updated,
+      },
+    });
+    return report.updated;
   }
 }
 

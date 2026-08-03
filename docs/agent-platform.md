@@ -213,6 +213,41 @@ curl -X POST http://127.0.0.1:8090/v1/hub/tasks \
   }'
 ```
 
+## 自更新任务模式
+
+`input.action = "self_update"` 是一个保留的任务类型：worker 领取后不经过 LLM，由 worker
+进程自身直接执行 `git fetch` → `git pull --ff-only` → `npm ci` → 安全补丁 → `npm run build`，
+成功后重启 worker 进程使新代码生效，并把 before/after commit hash 写进任务结果。因为 shell
+操作发生在 worker 进程里而不是模型工具里，`AGENT_REMOTE_TOOL_POLICY=read_only` 的设备也能
+自更新。
+
+```bash
+curl -X POST http://127.0.0.1:8090/v1/hub/tasks \
+  -H "Authorization: Bearer $AGENT_HUB_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "principal_id":"human-owner",
+    "delegator_actor_id":"pi-macbook",
+    "assignee_actor_id":"pi-server",
+    "objective":"更新这个 agent 到最新代码",
+    "input":{"workspace":".","action":"self_update","branch":"main"},
+    "required_capabilities":["code"],
+    "idempotency_key":"self-update-2026-08-03-1"
+  }'
+```
+
+行为与边界：
+
+- 只有 `input.action === "self_update"` 才触发；普通任务不受影响。`branch` 缺省为 `main`。
+- 使用 `git pull --ff-only`，本地有未提交改动且远端已更新时会失败并标记任务失败，不破坏现场。
+- 只有当远端确实有新提交时才重建并重启；`Already up to date` 时只报告完成，不重启。
+- 任务结果先写入 Hub（completed/failed）才重启，结果不会丢失。重启的新进程会把日志追加到
+  `agent-host/worker-restart.log`。
+- 设备所有者可用 `AGENT_SELF_UPDATE=0` 关闭；`setup` 不会改写该开关。
+
+安全提示：自更新会拉取并执行仓库中的代码，等效于代码部署。它应只在本机可信 Hub 配置下使用，
+并配合逐节点身份/审批策略（见下文“后续实施顺序”）；对公网不可信任务应保持关闭。
+
 ## Hub API
 
 | 方法 | 路径 | 作用 |
