@@ -37,6 +37,7 @@ export interface AgentHostConfig {
   remoteModel?: string;
   contextWindow: number;
   maxOutputTokens: number;
+  thinkingLevel: string;
 }
 
 export function loadProjectEnv(path?: string): void {
@@ -202,6 +203,8 @@ export function loadConfig(): AgentHostConfig {
     ...(remoteModel ? { remoteModel } : {}),
     contextWindow: positiveNumber("AGENT_MODEL_CONTEXT_WINDOW", 128_000),
     maxOutputTokens: positiveNumber("AGENT_MODEL_MAX_TOKENS", 8_192),
+    thinkingLevel:
+      process.env.AGENT_THINKING_LEVEL?.trim() || "off",
   };
 }
 

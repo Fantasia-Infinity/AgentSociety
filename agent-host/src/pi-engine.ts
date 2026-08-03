@@ -66,11 +66,18 @@ export class PiAgentEngine implements AgentEngine {
             id: modelId,
             name: modelId,
             api: "openai-completions",
-            reasoning: false,
+            reasoning: true,
             input: ["text"],
             cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
             contextWindow: config.contextWindow,
             maxTokens: config.maxOutputTokens,
+            thinkingLevelMap: {
+              minimal: null,
+              low: null,
+              medium: null,
+              high: "high",
+              max: "max",
+            },
           },
         ],
       });
@@ -111,6 +118,7 @@ export class PiAgentEngine implements AgentEngine {
     const { session } = await createAgentSessionFromServices({
       services,
       model,
+      thinkingLevel: this.config.thinkingLevel as never,
       ...(selectedTools === undefined ? {} : { tools: selectedTools }),
       customTools,
       sessionManager,
@@ -203,6 +211,7 @@ export class PiAgentEngine implements AgentEngine {
           ? { sessionStartEvent: runtimeOptions.sessionStartEvent }
           : {}),
         model,
+        thinkingLevel: this.config.thinkingLevel as never,
         customTools: this.createHubTools(),
       });
       activateCompatibleTools(created.session, "local", "full");

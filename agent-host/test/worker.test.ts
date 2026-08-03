@@ -84,6 +84,7 @@ function config(workspaceRoot: string): AgentHostConfig {
     remoteModel: "model",
     contextWindow: 100_000,
     maxOutputTokens: 4_096,
+    thinkingLevel: "off",
   };
 }
 
