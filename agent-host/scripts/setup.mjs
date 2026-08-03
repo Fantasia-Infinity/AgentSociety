@@ -383,7 +383,12 @@ function npmCommand() {
 
 function run(command, args) {
   console.log(`\n> ${command} ${args.join(" ")}`);
-  const result = spawnSync(command, args, {
+  const windowsNpm = process.platform === "win32" && command === "npm.cmd";
+  const executable = windowsNpm ? process.env.ComSpec || "cmd.exe" : command;
+  const executableArgs = windowsNpm
+    ? ["/d", "/c", "npm.cmd", ...args]
+    : args;
+  const result = spawnSync(executable, executableArgs, {
     cwd: agentHostDir,
     env: process.env,
     stdio: "inherit",

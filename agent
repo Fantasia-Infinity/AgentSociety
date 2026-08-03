@@ -33,7 +33,11 @@ install_global_command() {
     mkdir -p "$global_bin"
     if [ -e "$global_command" ] || [ -L "$global_command" ]; then
         existing_target=$(readlink "$global_command" 2>/dev/null || true)
-        if [ "$existing_target" != "$repository_root/agent" ]; then
+        if [ "$existing_target" = "$repository_root/agent" ]; then
+            : # already installed as a symlink to this repository
+        elif [ -f "$global_command" ] && cmp -s "$global_command" "$repository_root/agent"; then
+            : # installed copy produced by the Git Bash/MSYS ln -s fallback
+        else
             echo "Refusing to overwrite existing command: $global_command" >&2
             return 1
         fi
