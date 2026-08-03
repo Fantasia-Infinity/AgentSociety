@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -74,8 +75,15 @@ function ensureChannelMcpDefaults(diagnostics: string[]): void {
   const pythonPath = process.env.PYTHONPATH
     ? `${srcRoot}${delimiter}${process.env.PYTHONPATH}`
     : srcRoot;
+  let pythonCommand: string;
+  try {
+    pythonCommand = resolveCompatiblePython();
+  } catch (error) {
+    diagnostics.push(`Could not configure managed Channel MCP: ${message(error)}`);
+    return;
+  }
   servers["agent-society-channel"] = {
-    command: process.env.AGENT_PYTHON_COMMAND?.trim() || "python3",
+    command: pythonCommand,
     args: ["-m", "agent_channel.mcp_server"],
     cwd: repositoryRoot,
     env: {
@@ -98,6 +106,55 @@ function ensureChannelMcpDefaults(diagnostics: string[]): void {
   } catch (error) {
     diagnostics.push(`Could not create managed Channel MCP entry: ${message(error)}`);
   }
+}
+
+function resolveCompatiblePython(): string {
+  const override = process.env.AGENT_PYTHON_COMMAND?.trim();
+  if (override) {
+    const resolved = probePython(override);
+    if (!resolved) {
+      throw new Error(
+        `AGENT_PYTHON_COMMAND=${override} is not a working Python 3.11+ executable`,
+      );
+    }
+    return resolved;
+  }
+
+  const candidates = [
+    "/opt/homebrew/bin/python3",
+    "/usr/local/bin/python3",
+    "python3.14",
+    "python3.13",
+    "python3.12",
+    "python3.11",
+    "python3",
+    "python",
+  ];
+  for (const candidate of candidates) {
+    const resolved = probePython(candidate);
+    if (resolved) return resolved;
+  }
+  throw new Error(
+    "Channel tools require Python 3.11+; install a compatible runtime or set AGENT_PYTHON_COMMAND",
+  );
+}
+
+function probePython(command: string): string | undefined {
+  const result = spawnSync(
+    command,
+    [
+      "-c",
+      "import os, sys; from enum import StrEnum; print(os.path.realpath(sys.executable))",
+    ],
+    {
+      encoding: "utf8",
+      timeout: 5_000,
+      windowsHide: true,
+    },
+  );
+  if (result.status !== 0) return undefined;
+  const executable = result.stdout.trim();
+  return executable || undefined;
 }
 
 function isManagedChannelEntry(value: Record<string, unknown>): boolean {

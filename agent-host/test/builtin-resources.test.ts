@@ -34,14 +34,20 @@ test("managed MCP and LSP defaults load in a remote session", async () => {
     assert.ok(existsSync(mcpConfigPath));
     assert.ok(existsSync(lspConfigPath));
     const mcpConfig = JSON.parse(readFileSync(mcpConfigPath, "utf8")) as {
-      mcpServers: Record<string, { directTools: boolean; lifecycle: string }>;
+      mcpServers: Record<
+        string,
+        { command: string; directTools: boolean; lifecycle: string }
+      >;
     };
+    const channel = mcpConfig.mcpServers["agent-society-channel"];
+    assert.ok(channel);
+    assert.ok(channel.command.startsWith("/"));
     assert.equal(
-      mcpConfig.mcpServers["agent-society-channel"]?.directTools,
+      channel.directTools,
       true,
     );
     assert.equal(
-      mcpConfig.mcpServers["agent-society-channel"]?.lifecycle,
+      channel.lifecycle,
       "eager",
     );
 

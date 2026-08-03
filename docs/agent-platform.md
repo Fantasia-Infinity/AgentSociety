@@ -316,7 +316,9 @@ Agent Host 固定 `pi-mcp-adapter`，首次 setup/doctor 会在 `~/.pi/agent/mcp
 `agent-society-channel` 托管 entry，并将 Channel 工具直接开放给本地和默认远程 session；已有
 同名非托管 entry 不会被覆盖。server 会协商 MCP 2025-03-26 与 2025-06-18，其他原生 MCP 客户端
 也可直接连接。react/download 已有稳定工具名，但 wxauto 当前会返回 capability error，而不会
-伪造成功。其他 `~/.config/mcp`、`~/.agents`、Pi 全局和受信项目 MCP 配置仍由 adapter 正常发现。
+伪造成功。托管 entry 会探测并保存 Python 3.11+ 的绝对路径，避免 Conda 或 TUI 的 PATH 把它切回
+不兼容的旧 Python；自动探测失败时可设置 `AGENT_PYTHON_COMMAND`。其他 `~/.config/mcp`、
+`~/.agents`、Pi 全局和受信项目 MCP 配置仍由 adapter 正常发现。
 
 LSP 使用固定的 `pi-lsp-adapter`，提供 diagnostics、hover、definition、references、document/
 workspace symbols 与分页结果工具；workspace symbols 即当前的代码索引入口。新用户会得到
