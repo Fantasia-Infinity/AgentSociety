@@ -8,14 +8,20 @@ Pi Agent，通过本机 TUI 由登录用户直接操作；配置 Hub 后才增�
 ## 已实现
 
 - `wechat-bot-core`：HTTP 接入、显式 allowlist、持久化收件箱、去重、会话、回复 Outbox
-  和 LLM 调用。
+  和 LLM 调用；模型结果的历史、去重、Outbox、Inbox 完成使用同一个事务提交。
 - `wechat-gateway`：消息采集、历史游标与 SQLite Inbox、回复长轮询、租约与 ACK、本地发送账本。
 - `mock` 适配器：可在 macOS 上用 JSON 行模拟微信消息，验证完整链路。
 - `wxauto4` / `wxautox4` 适配边界：Windows 下动态加载，不会成为 Core 的依赖。
 - `ModelProvider`：支持 `remote`、`local_rwkv` 和显式远程回退的 `auto` 模式。
 - `agent-hub`：独立的 Principal / Actor / Node / Task / Run / Artifact 服务、租约和事件流。
-- `agent-host`：Pi SDK 原生 TUI 与远程任务 worker；远程任务默认只读工具策略，并持久化
-  每次任务的 Pi session。
+- `agent-host`：Pi SDK 原生 TUI 与远程任务 worker；本地和远程默认具备 Sub-agent、
+  plan/todo、分域长期记忆、LSP/代码索引、MCP 和 session 后台进程，并持久化每次任务的
+  Pi session。
+- `web_search`：模型无关的 Pi 工具契约；当前 adapter 使用 DeepSeek Responses API 的
+  服务端搜索，并返回答案及可用的来源 URL。
+- `agent-channel-mcp`：MCP 2025-06-18 stdio server，统一 list/read/send/reply/react/download
+  通道工具；微信适配器当前实现前四项并显式声明其余能力不可用。
+- A2A 1.0 JSON-RPC Adapter：标准 Agent Card 和 Send/Get/List/Cancel Task 映射。
 
 完整设计见 [架构文档](docs/architecture.md)，Windows 部署见
 [Windows Gateway 指南](docs/windows-gateway.md)，Agent 平台见
@@ -66,6 +72,10 @@ TUI。配置 Hub 时才会额外登记 Principal/Actor/Node。
 ./agent doctor          # 复查 Hub、workspace、session 和远端模型
 ./agent sessions        # 离线列出本机 session
 ./agent observe task_xxx
+./agent control task_xxx  # 交互式 steer/follow-up/status/cancel
+./agent steer task_xxx "立即先运行单元测试"
+./agent follow-up task_xxx "完成后再给出性能摘要"
+./agent cancel task_xxx "目标已变化"
 ```
 
 本地 TUI 使用 Pi 原生资源加载器，兼容 Pi Package 中的 Extension 自定义工具、命令、事件、
@@ -79,6 +89,23 @@ npm --prefix agent-host exec -- pi list
 项目内 `.pi` 资源首次加载前会要求信任；Hub worker 默认不执行 Pi Package。远程插件策略见
 [Pi Agent 协作平台](docs/agent-platform.md)。第三方 Extension 与普通本地程序权限相同，安装前
 应审查来源和代码。
+
+AgentSociety 固定并加载 `pi-mcp-adapter` 与 `pi-lsp-adapter`，新安装会自动为 Channel MCP
+写入一个不含 secret 的托管配置，并让 LSP 在首次使用某种语言时自动安装固定版本的语言服务。
+其他 Pi MCP 配置和社区 Package 仍按 Pi 原生方式工作。Hub custom tools 继续直接注入 Pi，
+二者共享领域契约而不要求统一插件安装入口。
+
+内建能力对本地 TUI 和 `full`（默认）远程 worker 使用同一实现：`subagent` 创建隔离子 session；
+plan/todo 按 session 持久化；memory 分 workspace 与 principal 保存且不会记录模型凭据；后台进程
+只属于当前 session，session 结束会清理。`AGENT_BUILTIN_CAPABILITIES=0` 可整体关闭；显式的
+`read_only`/`no_tools` 远程策略仍优先限制可执行工具。
+
+当模型地址是 `https://api.deepseek.com` 时，`AGENT_WEB_SEARCH=auto`（默认）会复用系统
+凭据库中的模型 key，并用 `deepseek-v4-flash` 调用 Responses API 的服务端 `web_search`。
+普通 Chat Completions 仍负责主 session；搜索作为独立、可替换的工具调用返回结果。可设置
+`AGENT_WEB_SEARCH=disabled` 完全关闭，或设置 `deepseek` 为兼容代理强制启用。当前 DeepSeek
+adapter 只接收通用 `query`，将来可在不改变 Pi 工具名的情况下替换其他搜索 provider。返回值以
+`citationsProvided` 明示提供商是否给出了结构化 URL 引用；未提供时不会把搜索动作 URL 冒充引用。
 
 高级身份覆盖、workspace、权限策略、远端 session 查看方式及 API 见
 [Pi Agent 协作平台](docs/agent-platform.md)。

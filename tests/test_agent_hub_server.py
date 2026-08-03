@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Thread
@@ -84,6 +85,44 @@ class HubHttpServerTests(unittest.TestCase):
                 )
                 with urlopen(request, timeout=2) as response:
                     self.assertEqual(response.status, 200)
+                with urlopen(
+                    f"http://127.0.0.1:{port}/.well-known/agent-card.json",
+                    timeout=2,
+                ) as response:
+                    card = json.load(response)
+                    self.assertEqual(
+                        card["supportedInterfaces"][0]["protocolVersion"], "1.0"
+                    )
+                    self.assertFalse(card["capabilities"]["streaming"])
+                a2a = Request(
+                    f"http://127.0.0.1:{port}/a2a",
+                    data=json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "method": "SendMessage",
+                            "params": {
+                                "message": {
+                                    "messageId": "http-a2a-1",
+                                    "role": "ROLE_USER",
+                                    "parts": [{"text": "Run tests"}],
+                                }
+                            },
+                        }
+                    ).encode(),
+                    headers={
+                        "Authorization": "Bearer standalone-hub-token-123456789",
+                        "Content-Type": "application/json",
+                        "A2A-Version": "1.0",
+                    },
+                    method="POST",
+                )
+                with urlopen(a2a, timeout=2) as response:
+                    result = json.load(response)
+                    self.assertEqual(
+                        result["result"]["task"]["status"]["state"],
+                        "TASK_STATE_SUBMITTED",
+                    )
             finally:
                 server.shutdown()
                 server.server_close()

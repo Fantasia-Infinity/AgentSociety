@@ -7,6 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 # A pi TUI session exports these; a worker must never inherit them.
+$env:AGENT_WORKER_SUPERVISED = "1"
 Remove-Item Env:PI_PROVIDER -ErrorAction SilentlyContinue
 Remove-Item Env:PI_MODEL -ErrorAction SilentlyContinue
 Remove-Item Env:AGENT_HUB_RUNTIME_DISABLED -ErrorAction SilentlyContinue

@@ -9,11 +9,17 @@ description = "AgentSociety local-first agents, optional collaboration hub, and 
 requires-python = ">=3.11"
 dependencies = []
 
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.2,<4"]
+s3 = ["boto3>=1.35,<2"]
+
 [project.scripts]
 agent-hub = "agent_hub.server:main"
 wechat-bot-core = "wechat_bot.api:main"
 wechat-bot-local-llm = "wechat_bot.local_model:main"
 wechat-gateway = "wechat_gateway.main:main"
+agent-channel-mcp = "agent_channel.mcp_server:main"
+agent-hub-migrate-postgres = "agent_hub.migrate:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

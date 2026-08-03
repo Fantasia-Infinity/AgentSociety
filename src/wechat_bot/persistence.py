@@ -22,9 +22,10 @@ def _connect(path: Path) -> sqlite3.Connection:
 class CoreInboxStore:
     """Durable Core inbox; accepted HTTP events survive Core restarts."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, lease_seconds: float = 300) -> None:
         self._connection = _connect(path)
         self._lock = Lock()
+        self._lease_seconds = min(max(lease_seconds, 10), 3600)
         with self._connection:
             self._connection.execute(
                 """
@@ -49,9 +50,25 @@ class CoreInboxStore:
                 """
             )
 
-    def insert(self, message: IncomingMessage) -> bool:
+    @property
+    def lease_seconds(self) -> float:
+        return self._lease_seconds
+
+    def insert(self, message: IncomingMessage, *, max_pending: int | None = None) -> bool:
         payload = json.dumps(message_to_dict(message), ensure_ascii=False, sort_keys=True)
         with self._lock, self._connection:
+            existing = self._connection.execute(
+                "SELECT 1 FROM core_inbox WHERE message_id=?",
+                (message.message_id,),
+            ).fetchone()
+            if existing is not None:
+                return False
+            if max_pending is not None:
+                row = self._connection.execute(
+                    "SELECT COUNT(*) FROM core_inbox WHERE status IN ('pending', 'processing')"
+                ).fetchone()
+                if row is not None and int(row[0]) >= max_pending:
+                    raise OverflowError("core inbox is full")
             cursor = self._connection.execute(
                 """
                 INSERT OR IGNORE INTO core_inbox(message_id, payload_json, received_at)
@@ -62,9 +79,10 @@ class CoreInboxStore:
         return cursor.rowcount == 1
 
     def claim_pending(
-        self, *, limit: int = 1, lease_seconds: float = 120
+        self, *, limit: int = 1, lease_seconds: float | None = None
     ) -> list[tuple[IncomingMessage, int]]:
         now = time.time()
+        effective_lease = self._lease_seconds if lease_seconds is None else lease_seconds
         claimed: list[tuple[IncomingMessage, int]] = []
         with self._lock, self._connection:
             rows = self._connection.execute(
@@ -89,12 +107,24 @@ class CoreInboxStore:
                     SET status='processing', attempts=?, lease_until=?, last_error=NULL
                     WHERE message_id=?
                     """,
-                    (next_attempt, now + lease_seconds, message_id),
+                    (next_attempt, now + effective_lease, message_id),
                 )
                 claimed.append(
                     (IncomingMessage.from_dict(json.loads(payload_json)), next_attempt)
                 )
         return claimed
+
+    def renew(self, message_id: str, *, lease_seconds: float | None = None) -> bool:
+        effective_lease = self._lease_seconds if lease_seconds is None else lease_seconds
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE core_inbox SET lease_until=?
+                WHERE message_id=? AND status='processing'
+                """,
+                (time.time() + effective_lease, message_id),
+            )
+            return cursor.rowcount == 1
 
     def mark_completed(self, message_id: str, reason: str) -> None:
         with self._lock, self._connection:
@@ -301,6 +331,18 @@ class SqliteMessageDeduplicator:
                 (time.time(), message_id),
             )
 
+    def renew(self, message_id: str) -> bool:
+        now = time.time()
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE processed_messages SET lease_until=?, updated_at=?
+                WHERE message_id=? AND status='processing'
+                """,
+                (now + self._lease_seconds, now, message_id),
+            )
+            return cursor.rowcount == 1
+
     def release(self, message_id: str) -> None:
         with self._lock, self._connection:
             self._connection.execute(
@@ -351,6 +393,10 @@ class SqliteActionOutbox:
                 """,
                 (action.action_id, action.account_id, payload, time.time()),
             )
+            self._condition.notify_all()
+
+    def wake(self) -> None:
+        with self._condition:
             self._condition.notify_all()
 
     def poll(
@@ -405,6 +451,98 @@ class SqliteActionOutbox:
 
     def close(self) -> None:
         with self._condition:
+            try:
+                self._connection.close()
+            except sqlite3.ProgrammingError:
+                pass
+
+
+class SqliteProcessingCoordinator:
+    """Atomically commits every durable consequence of one inbound message."""
+
+    def __init__(self, path: Path) -> None:
+        self._connection = _connect(path)
+        self._lock = Lock()
+
+    def commit(
+        self,
+        message: IncomingMessage,
+        *,
+        assistant_content: str,
+        action: OutgoingAction | None,
+        reason: str,
+        expected_attempt: int | None = None,
+    ) -> None:
+        now = time.time()
+        payload = (
+            json.dumps(action.to_dict(), ensure_ascii=False, sort_keys=True)
+            if action is not None
+            else None
+        )
+        with self._lock, self._connection:
+            # All statements below are one SQLite transaction. A crash before
+            # COMMIT leaves the Inbox eligible for retry; a crash afterwards
+            # leaves the reply durably visible in the Outbox.
+            inbox = self._connection.execute(
+                """
+                SELECT status, attempts, lease_until FROM core_inbox
+                WHERE message_id=?
+                """,
+                (message.message_id,),
+            ).fetchone()
+            if inbox is None or str(inbox[0]) != "processing":
+                raise RuntimeError("inbox processing lease was lost")
+            if expected_attempt is not None and int(inbox[1]) != expected_attempt:
+                raise RuntimeError("inbox processing generation changed")
+            if float(inbox[2]) < now:
+                raise RuntimeError("inbox processing lease expired")
+            if action is not None:
+                self._connection.execute(
+                    """
+                    INSERT OR IGNORE INTO conversation_turns(
+                        message_id, conversation_id, user_content,
+                        assistant_content, created_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        message.message_id,
+                        message.conversation_id,
+                        message.content.strip(),
+                        assistant_content,
+                        now,
+                    ),
+                )
+            self._connection.execute(
+                """
+                INSERT INTO processed_messages(message_id, status, lease_until, updated_at)
+                VALUES (?, 'completed', 0, ?)
+                ON CONFLICT(message_id) DO UPDATE SET
+                    status='completed', lease_until=0, updated_at=excluded.updated_at
+                """,
+                (message.message_id, now),
+            )
+            if action is not None and payload is not None:
+                self._connection.execute(
+                    """
+                    INSERT OR IGNORE INTO core_actions(
+                        action_id, account_id, payload_json, created_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (action.action_id, action.account_id, payload, now),
+                )
+            completed = self._connection.execute(
+                """
+                UPDATE core_inbox
+                SET status='completed', lease_until=0, completed_at=?, reason=?
+                WHERE message_id=? AND status='processing'
+                """,
+                (now, reason[:200], message.message_id),
+            )
+            if completed.rowcount != 1:
+                raise RuntimeError("inbox processing lease was lost")
+
+    def close(self) -> None:
+        with self._lock:
             try:
                 self._connection.close()
             except sqlite3.ProgrammingError:

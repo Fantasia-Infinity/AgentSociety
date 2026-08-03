@@ -36,7 +36,8 @@ Windows 微信设备                       平台无关的 Bot/模型服务器
 持续收消息。
 
 Gateway 和 Core 现在都采用本地 SQLite 持久化：Gateway 先把消息写入 Inbox，再上传
-Core；Core 把收到的事件、会话、去重状态和回复 Outbox 写入自己的数据库。服务器化时
+Core；模型返回后，Core 在单个事务中写入会话、去重完成、回复 Outbox 和 Inbox 完成。
+处理租约会在长推理期间续期，进程崩溃只能留下“全部提交”或“全部重试”。服务器化时
 保持 HTTP 协议不变，可把两端 SQLite 分别替换为 Redis Streams、PostgreSQL 或其他持久
 队列/数据库。
 
@@ -86,8 +87,8 @@ llama.cpp。`LLM_BACKEND` 支持三种路由：
 | 微信接入 | Windows Gateway + mock/wxauto 适配器 | 其他合规渠道适配器 |
 | Gateway 消息与发送账本 | 本地 SQLite | SQLite 可继续使用 |
 | Agent 运行时 | Pi SDK Agent Host | Pi、其他框架及 A2A Adapter 并存 |
-| Agent 工具 | Pi custom tools | MCP Server + 节点策略 |
-| 协作任务 | SQLite Task/Run/Artifact + 租约 | PostgreSQL/对象存储/事件总线 |
+| Agent 工具 | 托管 Sub-agent/plan/memory/background + Pi LSP/MCP + Channel MCP | 更多 MCP 客户端与节点策略 |
+| 协作任务 | SQLite 或可选 PostgreSQL；Artifact URI 或 file/S3 对象存储 | 事件总线与 Hub 联邦 |
 | 鉴权 | Bearer token | TLS + Principal/Node 身份与密钥轮换 |
 
 ## 安全默认值

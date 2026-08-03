@@ -9,7 +9,11 @@ import time
 
 from .domain import IncomingMessage, OutgoingAction
 from .model_provider import ModelProvider, provider_health
-from .persistence import CoreInboxStore, SqliteActionOutbox
+from .persistence import (
+    CoreInboxStore,
+    SqliteActionOutbox,
+    SqliteProcessingCoordinator,
+)
 from .service import BotService
 
 
@@ -102,6 +106,7 @@ class BotRuntime:
         queue_size: int,
         inbox: CoreInboxStore | None = None,
         action_outbox: SqliteActionOutbox | None = None,
+        processing_coordinator: SqliteProcessingCoordinator | None = None,
         model_provider: ModelProvider | None = None,
         closeables: tuple[object, ...] = (),
     ) -> None:
@@ -109,6 +114,8 @@ class BotRuntime:
         self._queue: Queue[IncomingMessage] = Queue(maxsize=queue_size)
         self._inbox = inbox
         self._outbox = action_outbox or ActionOutbox()
+        self._processing_coordinator = processing_coordinator
+        self._queue_size = queue_size
         self._model_provider = model_provider
         self._closeables = closeables
         self._stop = Event()
@@ -123,7 +130,10 @@ class BotRuntime:
 
     def submit(self, message: IncomingMessage) -> SubmitResult:
         if self._inbox is not None:
-            inserted = self._inbox.insert(message)
+            try:
+                inserted = self._inbox.insert(message, max_pending=self._queue_size)
+            except OverflowError:
+                return SubmitResult(accepted=False, reason="queue_full")
             return SubmitResult(
                 accepted=True,
                 reason="queued" if inserted else "duplicate",
@@ -168,8 +178,22 @@ class BotRuntime:
         self._stop.set()
         for thread in self._threads:
             thread.join(timeout=2)
+        alive = [thread for thread in self._threads if thread.is_alive()]
         if self._inbox is not None:
             self._inbox.release_leases()
+        if alive:
+            for thread in alive:
+                thread.join(timeout=2)
+            alive = [thread for thread in alive if thread.is_alive()]
+        if alive:
+            # A provider call cannot always be interrupted. Do not close its
+            # SQLite handles underneath the worker; the released Inbox lease
+            # makes any late transactional commit fail and another process can
+            # safely retry after this process exits.
+            logger.warning(
+                "runtime_stop_deferred active_workers=%s", len(alive)
+            )
+            return
         for closeable in self._closeables:
             close = getattr(closeable, "close", None)
             if callable(close):
@@ -197,8 +221,16 @@ class BotRuntime:
                 self._stop.wait(0.1)
                 continue
             message, attempt = claimed[0]
+            lease_stop = Event()
+            lease_thread = Thread(
+                target=self._renew_inbox_lease,
+                args=(message.message_id, lease_stop),
+                name=f"inbox-lease-{message.message_id[:12]}",
+                daemon=True,
+            )
+            lease_thread.start()
             try:
-                self._process_message(message)
+                self._process_message(message, attempt=attempt)
             except Exception as exc:
                 delay = min(max(0.25, 2 ** min(attempt - 1, 6)), 30)
                 self._inbox.retry(message.message_id, str(exc), delay)
@@ -207,13 +239,45 @@ class BotRuntime:
                     message.message_id,
                     delay,
                 )
+            finally:
+                lease_stop.set()
+                lease_thread.join(timeout=1)
 
-    def _process_message(self, message: IncomingMessage) -> None:
-        result = self._service.handle(message)
-        if result.action is not None:
-            self._outbox.push(result.action)
-        if self._inbox is not None:
-            self._inbox.mark_completed(message.message_id, result.reason)
+    def _renew_inbox_lease(self, message_id: str, stop: Event) -> None:
+        assert self._inbox is not None
+        interval = max(1, self._inbox.lease_seconds / 3)
+        while not stop.wait(interval):
+            if not self._inbox.renew(message_id):
+                return
+
+    def _process_message(
+        self, message: IncomingMessage, *, attempt: int | None = None
+    ) -> None:
+        if self._processing_coordinator is not None:
+            def commit(
+                current: IncomingMessage,
+                assistant: str,
+                action: OutgoingAction | None,
+                reason: str,
+            ) -> None:
+                self._processing_coordinator.commit(
+                    current,
+                    assistant_content=assistant,
+                    action=action,
+                    reason=reason,
+                    expected_attempt=attempt,
+                )
+
+            result = self._service.handle_transactional(message, commit)
+            wake = getattr(self._outbox, "wake", None)
+            if callable(wake):
+                wake()
+        else:
+            result = self._service.handle(message)
+            if result.action is not None:
+                self._outbox.push(result.action)
+            if self._inbox is not None:
+                self._inbox.mark_completed(message.message_id, result.reason)
         logger.info(
             "message_processed message_id=%s accepted=%s reason=%s",
             message.message_id,

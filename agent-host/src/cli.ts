@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadConfig, loadSessionDir } from "./config.js";
+import { controlTask } from "./controller.js";
 import { runDoctor } from "./doctor.js";
 import { HubClient } from "./hub-client.js";
 import { registerHost } from "./host.js";
@@ -59,7 +60,17 @@ async function main(): Promise<void> {
     return;
   }
 
-  const hubCommands = new Set(["register", "observe", "attach", "once", "worker"]);
+  const hubCommands = new Set([
+    "register",
+    "observe",
+    "attach",
+    "steer",
+    "follow-up",
+    "cancel",
+    "control",
+    "once",
+    "worker",
+  ]);
   if (hubCommands.has(command) && !hub) {
     throw new Error(
       `The ${command} command requires Hub configuration. Run ./agent setup to add one.`,
@@ -81,6 +92,37 @@ async function main(): Promise<void> {
     await observeRun(config, hub!, id);
     return;
   }
+  if (command === "steer" || command === "follow-up") {
+    const taskId = process.argv[3]?.trim();
+    const message = process.argv.slice(4).join(" ").trim();
+    if (!taskId || !message) {
+      throw new Error(`${command} requires a task_id and message`);
+    }
+    const control = await hub!.createTaskControl(taskId, {
+      actor_id: config.actorId,
+      kind: command === "steer" ? "steer" : "follow_up",
+      message,
+    });
+    console.log(`Queued ${control.kind} control ${control.control_id}`);
+    return;
+  }
+  if (command === "control") {
+    const taskId = process.argv[3]?.trim();
+    if (!taskId) throw new Error("control requires a task_id");
+    await controlTask(config, hub!, taskId);
+    return;
+  }
+  if (command === "cancel") {
+    const taskId = process.argv[3]?.trim();
+    if (!taskId) throw new Error("cancel requires a task_id");
+    const reason = process.argv.slice(4).join(" ").trim();
+    const task = await hub!.cancelTask(taskId, {
+      actor_id: config.actorId,
+      ...(reason ? { reason } : {}),
+    });
+    console.log(`Task ${task.task_id} is ${task.status}`);
+    return;
+  }
 
   if (command === "interactive" || command === "tui" || command === "local") {
     await runInteractive(config, hub);
@@ -99,7 +141,18 @@ async function main(): Promise<void> {
     const stop = () => controller.abort();
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
-    await worker.runForever(controller.signal);
+    const workers = Array.from(
+      { length: config.workerConcurrency },
+      (_, index) =>
+        index === 0
+          ? worker
+          : new TaskWorker(config, hub!, engine, (message) =>
+              console.log(`[worker ${index + 1}] ${message}`),
+            ),
+    );
+    await Promise.all(
+      workers.map((current) => current.runForever(controller.signal)),
+    );
     return;
   }
   throw new Error(`Unknown command: ${command}`);

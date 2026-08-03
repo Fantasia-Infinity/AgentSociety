@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from http import HTTPStatus
 from typing import Any
+import base64
+import binascii
 from urllib.parse import parse_qs
 
 from .domain import (
@@ -18,6 +20,7 @@ from .domain import (
     required_text,
 )
 from .store import AgentHubStore
+from .object_store import ObjectStore
 
 
 class AgentHubApi:
@@ -25,8 +28,11 @@ class AgentHubApi:
 
     prefix = "/v1/hub"
 
-    def __init__(self, store: AgentHubStore) -> None:
+    def __init__(
+        self, store: AgentHubStore, object_store: ObjectStore | None = None
+    ) -> None:
         self.store = store
+        self.object_store = object_store
 
     @classmethod
     def matches(cls, path: str) -> bool:
@@ -58,8 +64,16 @@ class AgentHubApi:
         if len(parts) == 2 and parts[0] == "tasks":
             return HTTPStatus.OK, {"task": self.store.get_task(parts[1])}
         if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "events":
+            query = parse_qs(query_string)
+            try:
+                after_seq = int((query.get("after_seq") or ["0"])[0])
+                limit = int((query.get("limit") or ["500"])[0])
+            except ValueError as exc:
+                raise ValueError("after_seq and limit must be integers") from exc
             return HTTPStatus.OK, {
-                "events": self.store.list_task_events(parts[1])
+                "events": self.store.list_task_events(
+                    parts[1], after_seq=after_seq, limit=limit
+                )
             }
         if len(parts) == 2 and parts[0] == "runs":
             return HTTPStatus.OK, {"run": self.store.get_run(parts[1])}
@@ -109,7 +123,30 @@ class AgentHubApi:
             run = self.store.start_run(RunSubmission.from_dict(payload))
             return HTTPStatus.CREATED, {"run": run}
         if path == f"{self.prefix}/artifacts":
-            artifact = self.store.add_artifact(ArtifactSubmission.from_dict(payload))
+            artifact_payload = dict(payload)
+            encoded = artifact_payload.pop("content_base64", None)
+            if encoded is not None:
+                if self.object_store is None:
+                    raise ValueError("Hub object storage is not configured")
+                if not isinstance(encoded, str):
+                    raise ValueError("content_base64 must be a string")
+                try:
+                    content = base64.b64decode(encoded, validate=True)
+                except (binascii.Error, ValueError) as exc:
+                    raise ValueError("content_base64 is invalid") from exc
+                stored = self.object_store.put(
+                    content,
+                    name=required_text(artifact_payload, "name", maximum=500),
+                    media_type=required_text(
+                        artifact_payload, "media_type", maximum=200
+                    ),
+                )
+                artifact_payload["uri"] = stored.uri
+                artifact_payload["sha256"] = stored.sha256
+                artifact_payload["size_bytes"] = stored.size_bytes
+            artifact = self.store.add_artifact(
+                ArtifactSubmission.from_dict(artifact_payload)
+            )
             return HTTPStatus.CREATED, {"artifact": artifact}
 
         parts = self._parts(path)
@@ -123,6 +160,40 @@ class AgentHubApi:
                 reason=optional_text(payload, "reason", maximum=10_000),
             )
             return HTTPStatus.OK, {"task": task}
+        if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "controls":
+            control = self.store.create_task_control(
+                parts[1],
+                actor_id=required_text(payload, "actor_id", maximum=200),
+                kind=required_text(payload, "kind", maximum=40),
+                message=required_text(payload, "message", maximum=50_000),
+            )
+            return HTTPStatus.CREATED, {"control": control}
+        if (
+            len(parts) == 4
+            and parts[0] == "tasks"
+            and parts[2] == "controls"
+            and parts[3] == "claim"
+        ):
+            controls = self.store.claim_task_controls(
+                parts[1],
+                run_id=required_text(payload, "run_id", maximum=200),
+                lease_token=required_text(payload, "lease_token", maximum=200),
+                limit=int(payload.get("limit", 20)),
+            )
+            return HTTPStatus.OK, {"controls": controls}
+        if (
+            len(parts) == 5
+            and parts[0] == "tasks"
+            and parts[2] == "controls"
+            and parts[4] == "ack"
+        ):
+            control = self.store.acknowledge_task_control(
+                parts[1],
+                parts[3],
+                run_id=required_text(payload, "run_id", maximum=200),
+                lease_token=required_text(payload, "lease_token", maximum=200),
+            )
+            return HTTPStatus.OK, {"control": control}
         if len(parts) == 3 and parts[0] == "runs" and parts[2] == "updates":
             raw_status = required_text(payload, "status", maximum=40)
             try:

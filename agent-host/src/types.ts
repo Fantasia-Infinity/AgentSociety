@@ -36,6 +36,8 @@ export interface HubTask {
   principal_id: string;
   delegator_actor_id: string;
   assignee_actor_id: string | null;
+  executor_actor_id?: string | null;
+  executor_node_id?: string | null;
   objective: string;
   required_capabilities: string[];
   input: Record<string, unknown>;
@@ -44,6 +46,19 @@ export interface HubTask {
   status: TaskStatus;
   result: Record<string, unknown>;
   error: string | null;
+  lease_until?: number;
+  lease_seconds?: number;
+}
+
+export interface HubTaskControl {
+  control_id: string;
+  task_id: string;
+  run_id: string | null;
+  kind: "steer" | "follow_up";
+  message: string;
+  actor_id: string;
+  status: "pending" | "leased" | "delivered";
+  lease_token: string;
 }
 
 export interface HubRun {
@@ -89,8 +104,11 @@ export interface AgentConversation {
   readonly sessionId: string;
   readonly sessionFile?: string;
   prompt(text: string, onText?: (delta: string) => void): Promise<AgentResult>;
+  steer?(text: string): Promise<void>;
+  followUp?(text: string): Promise<void>;
+  abort?(): Promise<void>;
   setSessionName(name: string): void;
-  dispose(): void;
+  dispose(): Promise<void>;
 }
 
 export interface AgentEngine {
@@ -98,5 +116,6 @@ export interface AgentEngine {
     cwd: string;
     mode: "local" | "remote" | "diagnostic";
     persisted: boolean;
+    subagentDepth?: number;
   }): Promise<AgentConversation>;
 }

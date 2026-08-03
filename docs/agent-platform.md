@@ -26,7 +26,7 @@ flowchart LR
 当前代码提供：
 
 - `agent-hub`：独立 HTTP 进程，承载与模型、通信平台无关的 Principal、Actor、Node、
-  Task、Run、Artifact 数据模型及 SQLite 持久化状态机。
+  Task、Run、Artifact 数据模型；默认 SQLite，也可选 PostgreSQL。
 - `/v1/hub/*`：身份登记、节点心跳、任务创建/查询/领取/更新/取消、Run 和 Artifact API。
 - `agent-host`：基于 `@earendil-works/pi-coding-agent` SDK 的 Node 进程。
 - 本地入口：Pi 0.83.0 原生完整 TUI 和 Resource Loader；登录设备的人可以直接操作，
@@ -36,6 +36,14 @@ flowchart LR
   租约、心跳、幂等任务和终态结果。
 - Pi Hub 工具：Agent 可列出 Actor/Task、读取 Task、创建子任务。工具定义留在 Pi Adapter，
   核心领域模型不依赖 Pi。
+- Channel MCP：按 MCP 2025-06-18 暴露 list/read/send/reply/react/download；Windows 继续只
+  执行 Core 下发的动作。
+- A2A Adapter：`/.well-known/agent-card.json` 与 `/a2a` 提供 A2A 1.0 JSON-RPC 的
+  SendMessage、GetTask、ListTasks、CancelTask。
+- 通用 Web Search：Pi 始终看到稳定的 `web_search(query)`；当前 provider adapter 通过
+  DeepSeek Responses API 强制执行服务端 `web_search`，以后可替换独立搜索后端。
+- 托管能力包：所有本地 session 与默认 `full` 远程 worker 都加载相同的 Sub-agent、
+  plan/todo、分域长期记忆、LSP/代码索引、MCP 和 session 后台进程工具。
 
 ## 通用身份与执行模型
 
@@ -74,16 +82,23 @@ Extension 首次加载前必须在 TUI 中明确授信，决定记录在 Pi 的 
 Hub 工具。Task 请求的 workspace 必须是
 `AGENT_WORKSPACE_ROOT` 的现有子目录，路径逃逸会被拒绝。
 
-Hub worker 还独立使用 `AGENT_REMOTE_PI_RESOURCES` 控制 Package：
+Hub worker 还独立使用 `AGENT_REMOTE_PI_RESOURCES` 控制用户安装和项目 Package：
 
-- `disabled`（默认）：不加载 Extension、Skill、Prompt 或 Theme。
+- `disabled`（默认）：不加载用户/项目 Extension、Skill、Prompt 或 Theme；AgentSociety 固定版本
+  的 MCP/LSP 托管扩展仍会加载。
 - `global`：只加载登录用户安装在 `~/.pi/agent` 的资源，不加载任务 workspace 中的 `.pi`。
 - `trusted_project`：在 `global` 基础上，仅加载之前由本地 TUI 明确授信的项目资源；worker
   不会在无人值守状态弹出信任确认。
 
 即使选择 `global` 或 `trusted_project`，`read_only`/`no_tools` 仍会过滤 Extension 自定义工具；
-只有 `AGENT_REMOTE_TOOL_POLICY=full`（默认）才向远程模型开放这些工具。Extension 的初始化代码和事件
-Hook 不受工具名单约束，因此远程加载 Package 必须是设备所有者的显式选择。
+只有 `AGENT_REMOTE_TOOL_POLICY=full`（默认）才向远程模型开放这些工具。用户 Extension 的初始化
+代码和事件 Hook 不受工具名单约束，因此远程加载 Package 必须是设备所有者的显式选择。
+
+托管能力包默认打开，可用 `AGENT_BUILTIN_CAPABILITIES=0` 整体关闭。Sub-agent 最大深度默认 2、
+单次并发默认 4；子 session 继承 workspace、模型和工具策略，但只接收父 Agent 明确给出的目标，
+不会隐式复制整段聊天。plan/todo 保存在 session 目录；memory 分 workspace 与 principal 两个
+scope 保存，删除采用可恢复归档，且工具提示明确禁止写入 token/key。后台进程限制数量、记录私有
+日志，并在 owning session 结束时停止，避免远程任务遗留孤儿进程。
 
 注意：Pi 本身不是 OS 沙箱。工具策略是暴露策略，不应被当成敌对代码隔离。`full` 是设备所有者的
 默认授权，公网接收不可信任务前，还需要容器/虚拟机、每节点身份和审批策略。第三方 Package 还可能自行
@@ -98,10 +113,9 @@ Hook 不受工具名单约束，因此远程加载 Package 必须是设备所有
 4. `completed`、`failed`、`cancelled` 是终态；结果写入 Task 和 Run，事件流保留状态历史。
 5. 大产物放文件系统或对象存储，Hub 只保存 URI、媒体类型、大小和 SHA-256 等元数据。
 
-该形状与 A2A 的 Task/Message/Artifact 和任务生命周期兼容，但当前 API 是项目内部最小协议，
-尚未宣称为完整 A2A 实现。Pi custom tools 是第一版运行时适配；后续会把同一工具契约导出为
-MCP Server，再增加 A2A Agent Card/transport Adapter。这样替换 Pi 或并存其他开源 Agent
-框架时不需要迁移 Hub 数据模型。
+内部 `/v1/hub/*` API 仍是 AgentSociety worker 的高效协议；A2A Adapter 把同一状态映射为
+Task/Message/Artifact，并明确声明不支持 streaming/push notification。Channel 工具由独立 MCP
+stdio server 导出。这样替换 Pi 或并存其他开源 Agent 框架时不需要迁移 Hub 数据模型。
 
 ## 启动
 
@@ -190,12 +204,21 @@ SQLite。系统凭据库不可用或锁定时 setup 会失败，不提供明文�
 ./agent observe task_xxx
 # attach 是 observe 的别名
 ./agent attach run_xxx
+
+# 进入跨设备控制 TUI；普通文本为 steer，也可用 /follow、/status、/cancel
+./agent control task_xxx
+
+# 非交互控制
+./agent steer task_xxx "先停止重构，运行现有测试"
+./agent follow-up task_xxx "测试后补充变更摘要"
+./agent cancel task_xxx "不再需要"
 ```
 
 远程任务的 Pi JSONL session 保存在执行它的设备上。要查看另一台设备领取的任务，应先
 SSH/登录到那台设备，再运行 `observe`；界面会每秒刷新 Hub 状态和本机转录，任务进入终态后
-自动退出。当前 attach 刻意为只读：worker 是 session 文件的唯一写入者，避免两个进程同时
-改写 Pi session。以后增加控制 socket 后，可在不引入多写入者的前提下支持 steer/follow-up。
+自动退出。attach 仍刻意为只读：worker 是 session 文件的唯一写入者。`control`/`steer`/
+`follow-up` 不打开或改写远端 JSONL，而是写入 Hub 的带租约控制队列，由 session 所有者调用
+Pi 原生 steer/followUp；取消会传播为 Pi abort。因此跨设备控制仍保持单写入者。
 
 创建一个任务的最小示例：
 
@@ -269,9 +292,44 @@ curl -X POST http://127.0.0.1:8090/v1/hub/tasks \
 | POST | `/v1/hub/tasks/claim` | 按 Actor 能力领取并创建 Run |
 | POST | `/v1/hub/tasks/{id}/updates` | 续租、完成或失败 |
 | POST | `/v1/hub/tasks/{id}/cancel` | 取消 Task |
+| POST | `/v1/hub/tasks/{id}/controls` | 排队 steer/follow-up |
+| POST | `/v1/hub/tasks/{id}/controls/claim` | session 所有者领取控制消息 |
 | POST | `/v1/hub/runs` | 记录本地/渠道 Run |
 | POST | `/v1/hub/runs/{id}/updates` | 更新 Run |
 | POST | `/v1/hub/artifacts` | 登记 Artifact 元数据 |
+| GET | `/.well-known/agent-card.json` | A2A 1.0 Agent Card |
+| POST | `/a2a` | A2A 1.0 JSON-RPC（复用 Hub Bearer token） |
+
+默认存储不变。需要 PostgreSQL 时安装 `.[postgres]`，设置
+`AGENT_HUB_DATABASE_URL=postgresql://...`；既有 SQLite 可用
+`agent-hub-migrate-postgres --source hub-state.sqlite3 --database-url ...` 复制。需要 Hub 托管
+Artifact 内容时设置 `AGENT_HUB_OBJECT_STORE_URL=file:///...` 或安装 `.[s3]` 后使用
+`s3://bucket/prefix`，并在 Artifact 请求中传 `content_base64`。未配置时仍只保存 URI 元数据。
+
+Channel MCP 默认读取 `BOT_STATE_DB`，也可用 `AGENT_CHANNEL_STATE_DB` 单独指定：
+
+```bash
+PYTHONPATH=src python3 -m agent_channel.mcp_server
+```
+
+Agent Host 固定 `pi-mcp-adapter`，首次 setup/doctor 会在 `~/.pi/agent/mcp.json` 合并一个
+`agent-society-channel` 托管 entry，并将 Channel 工具直接开放给本地和默认远程 session；已有
+同名非托管 entry 不会被覆盖。server 会协商 MCP 2025-03-26 与 2025-06-18，其他原生 MCP 客户端
+也可直接连接。react/download 已有稳定工具名，但 wxauto 当前会返回 capability error，而不会
+伪造成功。其他 `~/.config/mcp`、`~/.agents`、Pi 全局和受信项目 MCP 配置仍由 adapter 正常发现。
+
+LSP 使用固定的 `pi-lsp-adapter`，提供 diagnostics、hover、definition、references、document/
+workspace symbols 与分页结果工具；workspace symbols 即当前的代码索引入口。新用户会得到
+`~/.pi/agent/lsp.json` 的 `installMode=auto` 默认值，语言服务按需安装到 `~/.pi/agent/lsp`；已有
+LSP 配置不会被覆盖。
+
+联网搜索默认是 `AGENT_WEB_SEARCH=auto`：仅当远端模型地址为 `api.deepseek.com` 时启用，
+复用模型 key，不新增明文 secret。搜索 adapter 固定使用 `deepseek-v4-flash` 的 Responses API；
+主 Pi session 仍使用既有 OpenAI-compatible Chat Completions，因此搜索实现不会进入 session、
+Task 或 Hub 的领域模型。`web_search` 返回 provider/model、grounded answer、URL citations 和
+search call ID，并用 `citationsProvided` 表明结构化 URL 引用是否存在。DeepSeek 的实际返回有时
+包含搜索调用但不包含 citation annotations；此时 sources 为空，不能把 open-page 动作 URL 冒充
+最终引用。DeepSeek 未返回 `web_search_call` 时工具会失败，不能把普通模型回答误报为搜索。
 
 Hub 默认只绑定 loopback，且必须设置至少 24 字符的独立 token。原型公网部署可使用
 `deploy/hub/compose.yaml`：容器端口只发布到服务器 loopback，再由 Caddy/Nginx/云负载均衡器
@@ -291,11 +349,8 @@ OIDC token）、细粒度 capability policy、签名事件、审计保留、密�
 
 ## 后续实施顺序
 
-1. 将独立 Hub 的 SQLite 存储替换为 PostgreSQL/对象存储，并完成迁移工具。
-2. 增加逐节点身份、任务授权/审批、撤销、配额以及容器/VM Run Sandbox。
-3. 为 active Pi session 增加单写入者控制 socket，支持安全的 steer/follow-up TUI。
-4. 把 Pi Hub tools 和 Windows 微信动作导出为 MCP Server；让 Windows 继续只做薄适配器。
-5. 增加 A2A Agent Card、Task/Artifact 映射和流式事件 Adapter，使第三方 Agent 可互操作。
-6. 增加公网 relay/消息总线、多 Hub 联邦和离线同步；微信、Slack、自建通信服务都只实现
+1. 增加逐节点身份、任务授权/审批、撤销、配额以及容器/VM Run Sandbox。
+2. 为 A2A 增加 SSE streaming/push notification，并为 Channel MCP 增加更多适配器能力。
+3. 增加公网 relay/消息总线、多 Hub 联邦和离线同步；微信、Slack、自建通信服务都只实现
    Channel Adapter。
-7. 增加团队任务图、Artifact lineage、人工确认节点、可观测性与策略回放。
+4. 增加团队任务图、Artifact lineage、人工确认节点、可观测性与策略回放。

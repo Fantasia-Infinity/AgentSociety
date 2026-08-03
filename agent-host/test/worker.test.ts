@@ -21,7 +21,12 @@ import {
   type AgentHostConfig,
 } from "../src/config.js";
 import { RunSessionRegistry } from "../src/run-registry.js";
-import type { AgentEngine, HubClaim, HubTask } from "../src/types.js";
+import type {
+  AgentConversation,
+  AgentEngine,
+  HubClaim,
+  HubTask,
+} from "../src/types.js";
 import { resolveTaskWorkspace, TaskWorker } from "../src/worker.js";
 
 const temporaryDirectories: string[] = [];
@@ -76,9 +81,17 @@ function config(workspaceRoot: string): AgentHostConfig {
     sessionDir: join(workspaceRoot, ".sessions"),
     pollSeconds: 1,
     leaseSeconds: 300,
+    workerConcurrency: 1,
+    workerSupervised: false,
     remoteToolPolicy: "read_only",
     remotePiResourcePolicy: "disabled",
     selfUpdateEnabled: true,
+    builtinCapabilitiesEnabled: true,
+    subagentMaxDepth: 2,
+    subagentConcurrency: 4,
+    backgroundMaxProcesses: 8,
+    webSearchMode: "disabled",
+    webSearchModel: "deepseek-v4-flash",
     remoteBaseUrl: "https://models.example/v1",
     remoteApiKey: "key",
     remoteModel: "model",
@@ -154,7 +167,7 @@ test("worker completes a claimed task through the agent engine", async () => {
             sessionId: "title-session",
           }),
           setSessionName: () => {},
-          dispose: () => {},
+          dispose: async () => {},
         };
       }
       return {
@@ -172,7 +185,7 @@ test("worker completes a claimed task through the agent engine", async () => {
         setSessionName: (name) => {
           sessionNames.push(name);
         },
-        dispose: () => {
+        dispose: async () => {
           disposed = true;
         },
       };
@@ -255,6 +268,120 @@ test("task workspace cannot escape the configured root", () => {
   );
 });
 
+test("worker fails an invalid workspace once instead of poisoning the queue", async () => {
+  const workspace = temporaryDirectory();
+  const updates: Array<Record<string, unknown>> = [];
+  const invalidClaim = {
+    ...claim(),
+    task: task("missing-directory"),
+  };
+  const hub = {
+    claimTask: async () => invalidClaim,
+    updateTask: async (_taskId: string, update: Record<string, unknown>) => {
+      updates.push(update);
+      return task();
+    },
+    updateRun: async () => invalidClaim.run,
+    heartbeat: async () => {},
+  };
+  let sessions = 0;
+  const engine: AgentEngine = {
+    createConversation: async () => {
+      sessions += 1;
+      throw new Error("invalid workspace must fail before creating a session");
+    },
+  };
+  const worker = new TaskWorker(config(workspace), hub, engine, () => {});
+  assert.equal(await worker.runOnce(), true);
+  assert.equal(sessions, 0);
+  assert.deepEqual(updates.map((update) => update.status), ["failed"]);
+  assert.match(String(updates[0]?.message), /does not exist/u);
+});
+
+test("worker injects durable controls into the owning Pi session before ACK", async () => {
+  const workspace = temporaryDirectory();
+  const applied: string[] = [];
+  const acknowledged: string[] = [];
+  const hub = {
+    claimTask: async () => null,
+    updateTask: async () => task(),
+    updateRun: async () => claim().run,
+    heartbeat: async () => {},
+    getTask: async () => task(),
+    claimTaskControls: async () => [
+      {
+        seq: 1,
+        control_id: "control-steer",
+        task_id: "task-1",
+        run_id: "run-1",
+        kind: "steer" as const,
+        message: "focus on tests",
+        actor_id: "actor-owner",
+        status: "leased" as const,
+        lease_token: "control-lease-1",
+        lease_until: Date.now() / 1_000 + 30,
+        created_at: Date.now() / 1_000,
+        delivered_at: null,
+      },
+      {
+        seq: 2,
+        control_id: "control-follow-up",
+        task_id: "task-1",
+        run_id: "run-1",
+        kind: "follow_up" as const,
+        message: "then summarize",
+        actor_id: "actor-owner",
+        status: "leased" as const,
+        lease_token: "control-lease-2",
+        lease_until: Date.now() / 1_000 + 30,
+        created_at: Date.now() / 1_000,
+        delivered_at: null,
+      },
+    ],
+    acknowledgeTaskControl: async (_taskId: string, controlId: string) => {
+      acknowledged.push(controlId);
+    },
+  };
+  const engine: AgentEngine = {
+    createConversation: async () => {
+      throw new Error("not used");
+    },
+  };
+  const conversation: AgentConversation = {
+    sessionId: "pi-session",
+    prompt: async () => {
+      throw new Error("not used");
+    },
+    setSessionName: () => {},
+    steer: async (message) => {
+      applied.push(`steer:${message}`);
+    },
+    followUp: async (message) => {
+      applied.push(`follow_up:${message}`);
+    },
+    dispose: async () => {},
+  };
+  const worker = new TaskWorker(config(workspace), hub, engine, () => {});
+  const poll = worker as unknown as {
+    pollTaskControls(
+      taskId: string,
+      runId: string,
+      taskLeaseToken: string,
+      current: AgentConversation,
+    ): Promise<"active" | "cancelled">;
+  };
+
+  assert.equal(
+    await poll.pollTaskControls("task-1", "run-1", "task-lease", conversation),
+    "active",
+  );
+  assert.deepEqual(applied, [
+    "steer:focus on tests",
+    "follow_up:then summarize",
+  ]);
+  assert.deepEqual(acknowledged, ["control-steer", "control-follow-up"]);
+});
+
 test("remote model endpoint rejects loopback", () => {
   assert.throws(
     () => assertRemoteUrl("http://127.0.0.1:18080/v1"),
@@ -291,8 +418,10 @@ test("agent-specific environment takes precedence over the legacy project env", 
   mkdirSync(host);
   writeFileSync(join(repository, ".env"), "SOURCE=legacy\n");
   writeFileSync(join(repository, ".env.agent"), "SOURCE=agent\n");
+  assert.equal(discoverProjectEnv(repository), join(repository, ".env.agent"));
   assert.equal(discoverProjectEnv(host), join(repository, ".env.agent"));
   rmSync(join(repository, ".env.agent"));
+  assert.equal(discoverProjectEnv(repository), join(repository, ".env"));
   assert.equal(discoverProjectEnv(host), join(repository, ".env"));
 });
 

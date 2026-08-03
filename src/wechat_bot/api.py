@@ -15,6 +15,7 @@ from .persistence import (
     SqliteActionOutbox,
     SqliteConversationStore,
     SqliteMessageDeduplicator,
+    SqliteProcessingCoordinator,
 )
 from .runtime import BotRuntime
 from .provider_routing import build_model_provider
@@ -165,6 +166,7 @@ def build_runtime(settings: Settings) -> BotRuntime:
     )
     deduplicator = SqliteMessageDeduplicator(settings.state_db)
     action_outbox = SqliteActionOutbox(settings.state_db)
+    processing_coordinator = SqliteProcessingCoordinator(settings.state_db)
     policy = AccessPolicy(
         allowed_users=settings.allowed_users,
         allowed_groups=settings.allowed_groups,
@@ -183,8 +185,15 @@ def build_runtime(settings: Settings) -> BotRuntime:
         queue_size=settings.queue_size,
         inbox=inbox,
         action_outbox=action_outbox,
+        processing_coordinator=processing_coordinator,
         model_provider=provider,
-        closeables=(inbox, conversations, deduplicator, action_outbox),
+        closeables=(
+            inbox,
+            conversations,
+            deduplicator,
+            action_outbox,
+            processing_coordinator,
+        ),
     )
 
 

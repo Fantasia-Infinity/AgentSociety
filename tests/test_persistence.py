@@ -149,7 +149,6 @@ class PersistenceTests(unittest.TestCase):
             from wechat_bot.domain import OutgoingAction
 
             outbox = SqliteActionOutbox(path)
-            inbox = CoreInboxStore(path)
             outbox.push(
                 OutgoingAction(
                     account_id="account-1",

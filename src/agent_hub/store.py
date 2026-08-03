@@ -31,6 +31,47 @@ def _decode(value: str) -> Any:
     return json.loads(value)
 
 
+class _PostgresConnection:
+    """Small DB-API compatibility layer used by the existing store queries."""
+
+    def __init__(self, url: str) -> None:
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:
+            raise RuntimeError(
+                "PostgreSQL requires the 'postgres' optional dependency"
+            ) from exc
+        self._connection = psycopg.connect(
+            url, row_factory=dict_row, autocommit=True
+        )
+        self._transactions: list[Any] = []
+
+    def execute(self, sql: str, parameters: tuple[Any, ...] = ()):
+        return self._connection.execute(sql.replace("?", "%s"), parameters)
+
+    def executescript(self, sql: str) -> None:
+        postgres_sql = sql.replace(
+            "INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY"
+        )
+        for statement in postgres_sql.split(";"):
+            if statement.strip():
+                self._connection.execute(statement)
+
+    def __enter__(self) -> "_PostgresConnection":
+        transaction = self._connection.transaction()
+        transaction.__enter__()
+        self._transactions.append(transaction)
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> Any:
+        transaction = self._transactions.pop()
+        return transaction.__exit__(exc_type, exc, traceback)
+
+    def close(self) -> None:
+        self._connection.close()
+
+
 class AgentHubStore:
     """Durable local-first coordination state shared by Agent Hosts.
 
@@ -38,17 +79,26 @@ class AgentHubStore:
     runtime adapter, while actors, tasks, runs, and artifacts remain portable.
     """
 
-    def __init__(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(
-            str(path), check_same_thread=False, timeout=30
-        )
-        self._connection.row_factory = sqlite3.Row
-        self._connection.execute("PRAGMA busy_timeout=30000")
-        self._connection.execute("PRAGMA journal_mode=WAL")
-        self._connection.execute("PRAGMA foreign_keys=ON")
+    def __init__(
+        self, path: Path | str, *, node_stale_seconds: float = 90
+    ) -> None:
+        raw_path = str(path)
+        self._postgres = raw_path.startswith(("postgres://", "postgresql://"))
+        if self._postgres:
+            self._connection: Any = _PostgresConnection(raw_path)
+        else:
+            sqlite_path = Path(path)
+            sqlite_path.parent.mkdir(parents=True, exist_ok=True)
+            self._connection = sqlite3.connect(
+                str(sqlite_path), check_same_thread=False, timeout=30
+            )
+            self._connection.row_factory = sqlite3.Row
+            self._connection.execute("PRAGMA busy_timeout=30000")
+            self._connection.execute("PRAGMA journal_mode=WAL")
+            self._connection.execute("PRAGMA foreign_keys=ON")
         self._lock = RLock()
         self._condition = Condition(self._lock)
+        self._node_stale_seconds = min(max(node_stale_seconds, 15), 3600)
         self._create_schema()
 
     def _create_schema(self) -> None:
@@ -105,6 +155,7 @@ class AgentHubStore:
                     error TEXT,
                     lease_token TEXT,
                     lease_until REAL NOT NULL DEFAULT 0,
+                    lease_seconds REAL NOT NULL DEFAULT 120,
                     attempts INTEGER NOT NULL DEFAULT 0,
                     idempotency_key TEXT,
                     created_at REAL NOT NULL,
@@ -168,7 +219,57 @@ class AgentHubStore:
 
                 CREATE INDEX IF NOT EXISTS idx_hub_artifacts_task
                 ON hub_artifacts(task_id, created_at);
+
+                CREATE TABLE IF NOT EXISTS hub_task_controls (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    control_id TEXT UNIQUE NOT NULL,
+                    task_id TEXT NOT NULL REFERENCES hub_tasks(task_id),
+                    run_id TEXT REFERENCES hub_runs(run_id),
+                    kind TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    actor_id TEXT NOT NULL REFERENCES hub_actors(actor_id),
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    lease_token TEXT,
+                    lease_until REAL NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL,
+                    delivered_at REAL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_hub_task_controls_claim
+                ON hub_task_controls(task_id, status, lease_until, seq);
+
+                CREATE TABLE IF NOT EXISTS hub_schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at REAL NOT NULL
+                );
                 """
+            )
+            # Databases created by pre-migration versions do not receive new
+            # columns from CREATE TABLE IF NOT EXISTS. Keep the migration
+            # deliberately additive so existing LAN deployments can upgrade
+            # in place without exporting their SQLite state.
+            if self._postgres:
+                self._connection.execute(
+                    "ALTER TABLE hub_tasks ADD COLUMN IF NOT EXISTS lease_seconds REAL NOT NULL DEFAULT 120"
+                )
+            else:
+                columns = {
+                    str(row[1])
+                    for row in self._connection.execute("PRAGMA table_info(hub_tasks)")
+                }
+                if "lease_seconds" not in columns:
+                    self._connection.execute(
+                        "ALTER TABLE hub_tasks ADD COLUMN lease_seconds REAL NOT NULL DEFAULT 120"
+                    )
+                self._connection.execute("PRAGMA user_version=2")
+            self._connection.execute(
+                """
+                INSERT INTO hub_schema_migrations(version, name, applied_at)
+                VALUES (2, 'task_leases_controls_storage', ?)
+                ON CONFLICT(version) DO NOTHING
+                """,
+                (time.time(),),
             )
 
     def register_principal(self, item: PrincipalRegistration) -> dict[str, Any]:
@@ -280,21 +381,22 @@ class AgentHubStore:
             rows = self._connection.execute(
                 "SELECT principal_id FROM hub_principals ORDER BY principal_id"
             ).fetchall()
-            return [self._principal(str(row[0])) for row in rows]
+            return [self._principal(str(row["principal_id"])) for row in rows]
 
     def list_actors(self) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._connection.execute(
                 "SELECT actor_id FROM hub_actors ORDER BY actor_id"
             ).fetchall()
-            return [self._actor(str(row[0])) for row in rows]
+            return [self._actor(str(row["actor_id"])) for row in rows]
 
     def list_nodes(self) -> list[dict[str, Any]]:
-        with self._lock:
+        with self._lock, self._connection:
+            self._mark_stale_nodes_offline()
             rows = self._connection.execute(
                 "SELECT node_id FROM hub_nodes ORDER BY node_id"
             ).fetchall()
-            return [self._node(str(row[0])) for row in rows]
+            return [self._node(str(row["node_id"])) for row in rows]
 
     def create_task(self, item: TaskSubmission) -> tuple[dict[str, Any], bool]:
         now = time.time()
@@ -312,7 +414,7 @@ class AgentHubStore:
                     (item.principal_id, item.idempotency_key),
                 ).fetchone()
                 if existing is not None:
-                    return self._task(str(existing[0])), False
+                    return self._task(str(existing["task_id"])), False
 
             task_id = f"task_{uuid.uuid4().hex}"
             self._connection.execute(
@@ -374,7 +476,7 @@ class AgentHubStore:
                     """,
                     (status, limit),
                 ).fetchall()
-            return [self._task(str(row[0])) for row in rows]
+            return [self._task(str(row["task_id"])) for row in rows]
 
     def claim_task(
         self,
@@ -388,9 +490,22 @@ class AgentHubStore:
         lease_seconds = min(max(lease_seconds, 10), 900)
         deadline = time.monotonic() + wait_seconds
         with self._condition:
+            with self._connection:
+                self._mark_stale_nodes_offline()
             self._validate_executor(actor_id, node_id)
             while True:
-                claimed = self._claim_available(actor_id, node_id, lease_seconds)
+                if self._postgres:
+                    with self._connection:
+                        self._connection.execute(
+                            "SELECT pg_advisory_xact_lock(hashtext('agent_society_task_claim'))"
+                        )
+                        claimed = self._claim_available(
+                            actor_id, node_id, lease_seconds
+                        )
+                else:
+                    claimed = self._claim_available(
+                        actor_id, node_id, lease_seconds
+                    )
                 if claimed is not None:
                     return claimed
                 remaining = deadline - time.monotonic()
@@ -421,7 +536,7 @@ class AgentHubStore:
                 actor_id,
             ),
         ).fetchall()
-        selected: sqlite3.Row | None = None
+        selected: Any | None = None
         for row in rows:
             required = set(_decode(str(row["required_capabilities_json"])))
             if required.issubset(actor_capabilities):
@@ -454,18 +569,18 @@ class AgentHubStore:
             self._connection.execute(
                 """
                 UPDATE hub_tasks
-                SET status=?, assignee_actor_id=COALESCE(assignee_actor_id, ?),
-                    executor_actor_id=?, executor_node_id=?, lease_token=?,
-                    lease_until=?, attempts=attempts+1, error=NULL, updated_at=?
+                SET status=?, executor_actor_id=?, executor_node_id=?, lease_token=?,
+                    lease_until=?, lease_seconds=?, attempts=attempts+1,
+                    error=NULL, updated_at=?
                 WHERE task_id=?
                 """,
                 (
                     TaskStatus.WORKING.value,
                     actor_id,
-                    actor_id,
                     node_id,
                     lease_token,
                     now + lease_seconds,
+                    lease_seconds,
                     now,
                     task_id,
                 ),
@@ -509,8 +624,8 @@ class AgentHubStore:
         with self._condition, self._connection:
             row = self._connection.execute(
                 """
-                SELECT status, lease_token, lease_until, executor_actor_id,
-                       executor_node_id
+                SELECT status, lease_token, lease_until, lease_seconds,
+                       executor_actor_id, executor_node_id
                 FROM hub_tasks WHERE task_id=?
                 """,
                 (task_id,),
@@ -529,7 +644,9 @@ class AgentHubStore:
                 raise ValueError("run is not active for this task")
 
             completed_at = now if item.status in TERMINAL_TASK_STATUSES else None
-            lease_until = 0 if completed_at is not None else now + 120
+            lease_until = (
+                0 if completed_at is not None else now + float(row["lease_seconds"])
+            )
             error = item.message if item.status == TaskStatus.FAILED else None
             self._connection.execute(
                 """
@@ -619,17 +736,149 @@ class AgentHubStore:
             self._condition.notify_all()
             return self._task(task_id)
 
-    def list_task_events(self, task_id: str) -> list[dict[str, Any]]:
+    def list_task_events(
+        self, task_id: str, *, after_seq: int = 0, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        after_seq = max(after_seq, 0)
+        limit = min(max(limit, 1), 500)
         with self._lock:
             self._task(task_id)
             rows = self._connection.execute(
                 """
                 SELECT * FROM hub_task_events
-                WHERE task_id=? ORDER BY seq
+                WHERE task_id=? AND seq>? ORDER BY seq LIMIT ?
                 """,
-                (task_id,),
+                (task_id, after_seq, limit),
             ).fetchall()
             return [self._event_dict(row) for row in rows]
+
+    def create_task_control(
+        self, task_id: str, *, actor_id: str, kind: str, message: str
+    ) -> dict[str, Any]:
+        if kind not in {"steer", "follow_up"}:
+            raise ValueError("control kind must be steer or follow_up")
+        message = message.strip()
+        if not message:
+            raise ValueError("control message is required")
+        if len(message) > 50_000:
+            raise ValueError("control message exceeds 50000 characters")
+        now = time.time()
+        control_id = f"control_{uuid.uuid4().hex}"
+        with self._condition, self._connection:
+            task = self._task(task_id)
+            if TaskStatus(task["status"]) in TERMINAL_TASK_STATUSES:
+                raise ValueError("task is already terminal")
+            self._require("hub_actors", "actor_id", actor_id)
+            self._connection.execute(
+                """
+                INSERT INTO hub_task_controls(
+                    control_id, task_id, kind, message, actor_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (control_id, task_id, kind, message, actor_id, now),
+            )
+            self._event(
+                task_id,
+                f"task.control.{kind}",
+                actor_id=actor_id,
+                message=message,
+                payload={"control_id": control_id},
+                now=now,
+            )
+            self._condition.notify_all()
+            return self._control(control_id)
+
+    def claim_task_controls(
+        self,
+        task_id: str,
+        *,
+        run_id: str,
+        lease_token: str,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        limit = min(max(limit, 1), 100)
+        now = time.time()
+        with self._condition, self._connection:
+            task = self._task(task_id)
+            if task["status"] != TaskStatus.WORKING.value:
+                return []
+            row = self._connection.execute(
+                "SELECT lease_token, lease_until FROM hub_tasks WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            if row is None or str(row["lease_token"] or "") != lease_token:
+                raise PermissionError("invalid task lease")
+            if float(row["lease_until"]) < now:
+                raise PermissionError("task lease expired")
+            run = self._run(run_id)
+            if run["task_id"] != task_id or run["status"] != RunStatus.ACTIVE.value:
+                raise ValueError("run is not active for this task")
+            rows = self._connection.execute(
+                """
+                SELECT control_id FROM hub_task_controls
+                WHERE task_id=? AND (
+                    status='pending' OR (status='leased' AND lease_until<=?)
+                ) ORDER BY seq LIMIT ?
+                """,
+                (task_id, now, limit),
+            ).fetchall()
+            controls: list[dict[str, Any]] = []
+            for row in rows:
+                control_id = str(row["control_id"])
+                control_lease = uuid.uuid4().hex + uuid.uuid4().hex
+                self._connection.execute(
+                    """
+                    UPDATE hub_task_controls
+                    SET status='leased', run_id=?, lease_token=?, lease_until=?
+                    WHERE control_id=?
+                    """,
+                    (run_id, control_lease, now + 30, control_id),
+                )
+                control = self._control(control_id)
+                control["lease_token"] = control_lease
+                controls.append(control)
+            return controls
+
+    def acknowledge_task_control(
+        self,
+        task_id: str,
+        control_id: str,
+        *,
+        run_id: str,
+        lease_token: str,
+    ) -> dict[str, Any]:
+        now = time.time()
+        with self._condition, self._connection:
+            row = self._connection.execute(
+                "SELECT * FROM hub_task_controls WHERE control_id=? AND task_id=?",
+                (control_id, task_id),
+            ).fetchone()
+            if row is None:
+                raise LookupError("task control not found")
+            if str(row["run_id"] or "") != run_id:
+                raise PermissionError("task control belongs to another run")
+            if str(row["lease_token"] or "") != lease_token:
+                raise PermissionError("invalid task control lease")
+            if str(row["status"]) == "delivered":
+                return self._control(control_id)
+            if str(row["status"]) != "leased" or float(row["lease_until"]) < now:
+                raise PermissionError("task control lease expired")
+            self._connection.execute(
+                """
+                UPDATE hub_task_controls
+                SET status='delivered', lease_until=0, delivered_at=?
+                WHERE control_id=?
+                """,
+                (now, control_id),
+            )
+            self._event(
+                task_id,
+                "task.control.delivered",
+                run_id=run_id,
+                payload={"control_id": control_id, "kind": str(row["kind"])},
+                now=now,
+            )
+            return self._control(control_id)
 
     def start_run(self, item: RunSubmission) -> dict[str, Any]:
         now = time.time()
@@ -740,7 +989,8 @@ class AgentHubStore:
             return self._artifact(artifact_id)
 
     def stats(self) -> dict[str, int]:
-        with self._lock:
+        with self._lock, self._connection:
+            self._mark_stale_nodes_offline()
             result: dict[str, int] = {}
             for name, table in (
                 ("principals", "hub_principals"),
@@ -750,8 +1000,10 @@ class AgentHubStore:
                 ("runs", "hub_runs"),
                 ("artifacts", "hub_artifacts"),
             ):
-                row = self._connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
-                result[name] = int(row[0]) if row is not None else 0
+                row = self._connection.execute(
+                    f"SELECT COUNT(*) AS count FROM {table}"
+                ).fetchone()
+                result[name] = int(row["count"]) if row is not None else 0
             return result
 
     def close(self) -> None:
@@ -768,6 +1020,19 @@ class AgentHubStore:
             raise ValueError("only agent actors can claim tasks")
         if node["actor_id"] != actor_id:
             raise ValueError("node does not belong to actor")
+        if node["status"] != "online":
+            raise ValueError("node is offline; heartbeat before claiming tasks")
+
+    def _mark_stale_nodes_offline(self) -> None:
+        now = time.time()
+        self._connection.execute(
+            """
+            UPDATE hub_nodes
+            SET status='offline', updated_at=?
+            WHERE status='online' AND last_seen_at<?
+            """,
+            (now, now - self._node_stale_seconds),
+        )
 
     def _require(self, table: str, key: str, value: str) -> None:
         row = self._connection.execute(
@@ -859,11 +1124,34 @@ class AgentHubStore:
             "result": _decode(str(row["result_json"])),
             "error": row["error"],
             "lease_until": float(row["lease_until"]),
+            "lease_seconds": float(row["lease_seconds"]),
             "attempts": int(row["attempts"]),
             "created_at": float(row["created_at"]),
             "updated_at": float(row["updated_at"]),
             "completed_at": row["completed_at"],
-            "artifacts": [self._artifact(str(item[0])) for item in artifacts],
+            "artifacts": [
+                self._artifact(str(item["artifact_id"])) for item in artifacts
+            ],
+        }
+
+    def _control(self, control_id: str) -> dict[str, Any]:
+        row = self._connection.execute(
+            "SELECT * FROM hub_task_controls WHERE control_id=?", (control_id,)
+        ).fetchone()
+        if row is None:
+            raise LookupError("task control not found")
+        return {
+            "seq": int(row["seq"]),
+            "control_id": str(row["control_id"]),
+            "task_id": str(row["task_id"]),
+            "run_id": row["run_id"],
+            "kind": str(row["kind"]),
+            "message": str(row["message"]),
+            "actor_id": str(row["actor_id"]),
+            "status": str(row["status"]),
+            "lease_until": float(row["lease_until"]),
+            "created_at": float(row["created_at"]),
+            "delivered_at": row["delivered_at"],
         }
 
     def _run(self, run_id: str) -> dict[str, Any]:
@@ -942,7 +1230,7 @@ class AgentHubStore:
         )
 
     @staticmethod
-    def _event_dict(row: sqlite3.Row) -> dict[str, Any]:
+    def _event_dict(row: Any) -> dict[str, Any]:
         return {
             "seq": int(row["seq"]),
             "event_id": str(row["event_id"]),

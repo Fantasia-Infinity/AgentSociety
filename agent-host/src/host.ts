@@ -22,12 +22,24 @@ export async function registerHost(
       "pi",
       "code",
       "hub-task",
+      ...(config.builtinCapabilitiesEnabled
+        ? [
+            "subagent",
+            "plan-todo",
+            "long-term-memory",
+            "lsp",
+            "mcp",
+            "background-process",
+          ]
+        : []),
+      ...(config.webSearchMode !== "disabled" ? ["web-search"] : []),
       ...(config.remoteToolPolicy === "full" ? ["workspace-write"] : []),
     ],
     metadata: {
       runtime: "pi",
       runtime_version: "0.83.0",
       remote_tool_policy: config.remoteToolPolicy,
+      builtin_capabilities: config.builtinCapabilitiesEnabled,
     },
   });
   await hub.registerNode({

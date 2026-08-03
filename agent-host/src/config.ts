@@ -8,6 +8,7 @@ import {
 } from "./credential-store.js";
 
 export type RemoteToolPolicy = "no_tools" | "read_only" | "full";
+export type WebSearchMode = "auto" | "disabled" | "deepseek";
 export type RemotePiResourcePolicy =
   | "disabled"
   | "global"
@@ -27,9 +28,17 @@ export interface AgentHostConfig {
   sessionDir: string;
   pollSeconds: number;
   leaseSeconds: number;
+  workerConcurrency: number;
+  workerSupervised: boolean;
   remoteToolPolicy: RemoteToolPolicy;
   remotePiResourcePolicy: RemotePiResourcePolicy;
   selfUpdateEnabled: boolean;
+  builtinCapabilitiesEnabled: boolean;
+  subagentMaxDepth: number;
+  subagentConcurrency: number;
+  backgroundMaxProcesses: number;
+  webSearchMode: WebSearchMode;
+  webSearchModel: string;
   piProvider?: string;
   piModel?: string;
   remoteBaseUrl?: string;
@@ -61,7 +70,9 @@ export function loadProjectEnv(path?: string): void {
 
 export function discoverProjectEnv(cwd = process.cwd()): string | undefined {
   return firstExisting([
+    resolve(cwd, ".env.agent"),
     resolve(cwd, "../.env.agent"),
+    resolve(cwd, ".env"),
     resolve(cwd, "../.env"),
   ]);
 }
@@ -129,6 +140,13 @@ export function loadConfig(): AgentHostConfig {
     );
   }
   const selfUpdateEnabled = process.env.AGENT_SELF_UPDATE?.trim() !== "0";
+  const webSearchMode = (process.env.AGENT_WEB_SEARCH ??
+    "auto") as WebSearchMode;
+  if (!["auto", "disabled", "deepseek"].includes(webSearchMode)) {
+    throw new Error(
+      "AGENT_WEB_SEARCH must be auto, disabled, or deepseek",
+    );
+  }
   const hubRuntimeDisabled = process.env.AGENT_HUB_RUNTIME_DISABLED === "1";
   const hubUrl = hubRuntimeDisabled
     ? undefined
@@ -193,9 +211,31 @@ export function loadConfig(): AgentHostConfig {
     sessionDir: loadSessionDir(false),
     pollSeconds: Math.min(30, positiveNumber("AGENT_POLL_SECONDS", 20)),
     leaseSeconds: Math.min(900, positiveNumber("AGENT_LEASE_SECONDS", 300)),
+    workerConcurrency: Math.min(
+      16,
+      Math.floor(positiveNumber("AGENT_WORKER_CONCURRENCY", 1)),
+    ),
+    workerSupervised: process.env.AGENT_WORKER_SUPERVISED === "1",
     remoteToolPolicy,
     remotePiResourcePolicy,
     selfUpdateEnabled,
+    builtinCapabilitiesEnabled:
+      process.env.AGENT_BUILTIN_CAPABILITIES?.trim() !== "0",
+    subagentMaxDepth: Math.min(
+      4,
+      Math.floor(positiveNumber("AGENT_SUBAGENT_MAX_DEPTH", 2)),
+    ),
+    subagentConcurrency: Math.min(
+      8,
+      Math.floor(positiveNumber("AGENT_SUBAGENT_CONCURRENCY", 4)),
+    ),
+    backgroundMaxProcesses: Math.min(
+      32,
+      Math.floor(positiveNumber("AGENT_BACKGROUND_MAX_PROCESSES", 8)),
+    ),
+    webSearchMode,
+    webSearchModel:
+      process.env.AGENT_WEB_SEARCH_MODEL?.trim() || "deepseek-v4-flash",
     ...(piProvider ? { piProvider } : {}),
     ...(piModel ? { piModel } : {}),
     ...(remoteBaseUrl ? { remoteBaseUrl } : {}),

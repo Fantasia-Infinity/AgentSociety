@@ -2,11 +2,12 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 export type LocalRunStatus = "active" | "completed" | "failed" | "cancelled";
 
@@ -24,9 +25,11 @@ export interface RunSessionRecord {
 
 export class RunSessionRegistry {
   private readonly path: string;
+  private readonly recordsDir: string;
 
   constructor(sessionDir: string) {
     this.path = join(sessionDir, "agent-host-runs.json");
+    this.recordsDir = join(sessionDir, "agent-host-runs.d");
   }
 
   upsert(
@@ -34,17 +37,14 @@ export class RunSessionRegistry {
       startedAt?: string;
     },
   ): RunSessionRecord {
-    const records = this.readAll();
     const now = new Date().toISOString();
-    const existing = records.find((record) => record.runId === item.runId);
+    const existing = this.get(item.runId);
     const record: RunSessionRecord = {
       ...item,
       startedAt: item.startedAt ?? existing?.startedAt ?? now,
       updatedAt: now,
     };
-    const next = records.filter((entry) => entry.runId !== item.runId);
-    next.push(record);
-    this.writeAll(next);
+    this.writeOne(record);
     return record;
   }
 
@@ -68,21 +68,48 @@ export class RunSessionRegistry {
   }
 
   private readAll(): RunSessionRecord[] {
-    if (!existsSync(this.path)) return [];
-    const value = JSON.parse(readFileSync(this.path, "utf8")) as unknown;
-    if (!Array.isArray(value)) throw new Error("Agent run registry is corrupted");
-    return value.filter(isRunSessionRecord);
+    const records = new Map<string, RunSessionRecord>();
+    if (existsSync(this.path)) {
+      const value = JSON.parse(readFileSync(this.path, "utf8")) as unknown;
+      if (!Array.isArray(value)) throw new Error("Agent run registry is corrupted");
+      for (const record of value.filter(isRunSessionRecord)) {
+        records.set(record.runId, record);
+      }
+    }
+    if (existsSync(this.recordsDir)) {
+      for (const name of readdirSync(this.recordsDir)) {
+        if (!name.endsWith(".json")) continue;
+        try {
+          const value = JSON.parse(
+            readFileSync(join(this.recordsDir, name), "utf8"),
+          ) as unknown;
+          if (!isRunSessionRecord(value)) continue;
+          const existing = records.get(value.runId);
+          if (!existing || value.updatedAt >= existing.updatedAt) {
+            records.set(value.runId, value);
+          }
+        } catch {
+          // A single interrupted or externally edited record must not hide
+          // every other observable session.
+        }
+      }
+    }
+    return [...records.values()];
   }
 
-  private writeAll(records: RunSessionRecord[]): void {
-    mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
-    const temporary = `${this.path}.${process.pid}.tmp`;
-    writeFileSync(temporary, `${JSON.stringify(records, null, 2)}\n`, {
+  private writeOne(record: RunSessionRecord): void {
+    mkdirSync(this.recordsDir, { recursive: true, mode: 0o700 });
+    const target = join(
+      this.recordsDir,
+      `${encodeURIComponent(record.runId)}.json`,
+    );
+    const temporary = `${target}.${process.pid}.tmp`;
+    writeFileSync(temporary, `${JSON.stringify(record, null, 2)}\n`, {
       encoding: "utf8",
       mode: 0o600,
     });
     chmodSync(temporary, 0o600);
-    renameSync(temporary, this.path);
+    renameSync(temporary, target);
   }
 }
 

@@ -259,6 +259,10 @@ export function applyPendingUpdate(agentHostDir: string): void {
 }
 
 export function restartWorker(config: AgentHostConfig): void {
+  // launchd/systemd/Task Scheduler supervisors own process replacement. A
+  // supervised worker only exits; self-spawning as well would create two
+  // workers racing over pending-update markers and task leases.
+  if (config.workerSupervised) return;
   // Derive the agent-host directory from the entrypoint that is currently
   // running (dist/src/cli.js -> agent-host). config.workspaceRoot is NOT
   // reliable here: a task workspace may be a subdirectory of the root (for

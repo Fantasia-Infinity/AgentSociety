@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from .conversations import InMemoryConversationStore, MessageDeduplicator
@@ -96,3 +97,44 @@ class BotService:
         except Exception:
             self._deduplicator.release(message.message_id)
             raise
+
+    def handle_transactional(
+        self,
+        message: IncomingMessage,
+        commit: Callable[[IncomingMessage, str, OutgoingAction | None, str], None],
+    ) -> HandleResult:
+        """Generate and commit a reply through a caller-owned transaction.
+
+        The durable Inbox already serializes a message ID, so this path does
+        not independently complete the dedup row before the Outbox write.
+        """
+
+        allowed, reason = self._policy.allows(message)
+        if not allowed:
+            # Rejected messages still need an atomic Inbox completion, but do
+            # not create a conversation turn or an outgoing action.
+            commit(message, "", None, reason)
+            return HandleResult(accepted=False, reason=reason)
+
+        with self._conversations.conversation_lock(message.conversation_id):
+            history = self._conversations.get(message.conversation_id)
+            request = ModelRequest(
+                conversation_id=message.conversation_id,
+                messages=(
+                    ModelMessage(role="system", content=self._system_prompt),
+                    *history,
+                    ModelMessage(role="user", content=message.content.strip()),
+                ),
+            )
+            response = self._provider.complete(request)
+            action = OutgoingAction(
+                account_id=message.account_id,
+                chat_id=message.chat_id,
+                chat_type=message.chat_type,
+                content_type=ContentType.TEXT,
+                content=response.text,
+                reply_to_message_id=message.message_id,
+                action_id=f"reply:{message.message_id}",
+            )
+            commit(message, response.text, action, "completed")
+        return HandleResult(accepted=True, reason="completed", action=action)

@@ -55,6 +55,9 @@ class HubSettings:
     api_port: int
     api_token: str
     state_db: Path
+    database_url: str | None
+    object_store_url: str | None
+    public_url: str | None
     allow_non_loopback_bind: bool
 
     @classmethod
@@ -69,6 +72,14 @@ class HubSettings:
             state_db=Path(
                 os.environ.get("AGENT_HUB_STATE_DB", "hub-state.sqlite3")
             ).expanduser(),
+            database_url=os.environ.get("AGENT_HUB_DATABASE_URL", "").strip()
+            or None,
+            object_store_url=os.environ.get(
+                "AGENT_HUB_OBJECT_STORE_URL", ""
+            ).strip()
+            or None,
+            public_url=os.environ.get("AGENT_HUB_PUBLIC_URL", "").strip()
+            or None,
             allow_non_loopback_bind=_bool(
                 "AGENT_HUB_ALLOW_NON_LOOPBACK_BIND", False
             ),
@@ -88,3 +99,17 @@ class HubSettings:
                 "AGENT_HUB_HOST must be loopback unless "
                 "AGENT_HUB_ALLOW_NON_LOOPBACK_BIND=true"
             )
+        if self.database_url is not None and not self.database_url.startswith(
+            ("postgres://", "postgresql://")
+        ):
+            raise ValueError("AGENT_HUB_DATABASE_URL must be a PostgreSQL URL")
+        if self.object_store_url is not None and not self.object_store_url.startswith(
+            ("file://", "s3://")
+        ):
+            raise ValueError(
+                "AGENT_HUB_OBJECT_STORE_URL must use file:// or s3://"
+            )
+        if self.public_url is not None and not self.public_url.startswith(
+            ("http://", "https://")
+        ):
+            raise ValueError("AGENT_HUB_PUBLIC_URL must use HTTP or HTTPS")

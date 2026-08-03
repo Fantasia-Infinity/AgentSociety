@@ -3,6 +3,7 @@ import { accessSync, constants, mkdirSync, statSync } from "node:fs";
 import type { AgentHostConfig } from "./config.js";
 import type { HubClient } from "./hub-client.js";
 import { PiAgentEngine } from "./pi-engine.js";
+import { createWebSearchProvider, webSearchStatus } from "./web-search.js";
 
 export async function runDoctor(
   config: AgentHostConfig,
@@ -29,7 +30,7 @@ export async function runDoctor(
       throw new Error("The remote model returned an empty response");
     }
   } finally {
-    conversation.dispose();
+    await conversation.dispose();
   }
 
   console.log(
@@ -41,4 +42,12 @@ export async function runDoctor(
   console.log(`Workspace:        ok (${config.workspaceRoot})`);
   console.log(`Session storage:  ok (${config.sessionDir})`);
   console.log(`Remote model:     ok (${config.remoteModel ?? config.piModel})`);
+  console.log(
+    `Web search:       ${webSearchStatus(config.webSearchMode, createWebSearchProvider(config))}`,
+  );
+  console.log(
+    config.builtinCapabilitiesEnabled
+      ? "Agent tools:      ok (subagent, plan/todo, memory, LSP, MCP, background)"
+      : "Agent tools:      disabled (AGENT_BUILTIN_CAPABILITIES=0)",
+  );
 }

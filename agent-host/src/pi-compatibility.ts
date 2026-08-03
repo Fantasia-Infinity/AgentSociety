@@ -28,6 +28,7 @@ interface CreatePiServicesOptions {
   modelRuntime: ModelRuntime;
   mode: PiConversationMode;
   remotePiResourcePolicy: RemotePiResourcePolicy;
+  builtinExtensionPaths?: string[];
   projectTrustContext?: ProjectTrustContext;
 }
 
@@ -44,13 +45,20 @@ export async function createPiServices(
     agentDir: options.agentDir,
     modelRuntime: options.modelRuntime,
     settingsManager,
-    ...(resourcesDisabled
+    ...((resourcesDisabled || options.builtinExtensionPaths?.length)
       ? {
           resourceLoaderOptions: {
-            noExtensions: true,
-            noSkills: true,
-            noPromptTemplates: true,
-            noThemes: true,
+            ...(options.builtinExtensionPaths?.length
+              ? { additionalExtensionPaths: options.builtinExtensionPaths }
+              : {}),
+            ...(resourcesDisabled
+              ? {
+                  noExtensions: true,
+                  noSkills: true,
+                  noPromptTemplates: true,
+                  noThemes: true,
+                }
+              : {}),
           },
         }
       : {}),

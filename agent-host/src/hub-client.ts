@@ -3,6 +3,7 @@ import type {
   HubClaim,
   HubRun,
   HubTask,
+  HubTaskControl,
   HubTaskEvent,
   NodeRecord,
   Principal,
@@ -134,10 +135,15 @@ export class HubClient {
     node_id: string;
     wait_seconds: number;
     lease_seconds: number;
-  }): Promise<HubClaim | null> {
+  }, signal?: AbortSignal): Promise<HubClaim | null> {
     const response = await this.request<{ claim: HubClaim | null }>(
       "/v1/hub/tasks/claim",
-      { method: "POST", body: item, timeoutMs: (item.wait_seconds + 10) * 1000 },
+      {
+        method: "POST",
+        body: item,
+        timeoutMs: (item.wait_seconds + 10) * 1000,
+        ...(signal ? { signal } : {}),
+      },
     );
     return response.claim;
   }
@@ -157,6 +163,50 @@ export class HubClient {
       { method: "POST", body: item },
     );
     return response.task;
+  }
+
+  async createTaskControl(
+    taskId: string,
+    item: { actor_id: string; kind: "steer" | "follow_up"; message: string },
+  ): Promise<HubTaskControl> {
+    const response = await this.request<{ control: HubTaskControl }>(
+      `/v1/hub/tasks/${encodeURIComponent(taskId)}/controls`,
+      { method: "POST", body: item },
+    );
+    return response.control;
+  }
+
+  async cancelTask(
+    taskId: string,
+    item: { actor_id: string; reason?: string },
+  ): Promise<HubTask> {
+    const response = await this.request<{ task: HubTask }>(
+      `/v1/hub/tasks/${encodeURIComponent(taskId)}/cancel`,
+      { method: "POST", body: item },
+    );
+    return response.task;
+  }
+
+  async claimTaskControls(
+    taskId: string,
+    item: { run_id: string; lease_token: string; limit?: number },
+  ): Promise<HubTaskControl[]> {
+    const response = await this.request<{ controls: HubTaskControl[] }>(
+      `/v1/hub/tasks/${encodeURIComponent(taskId)}/controls/claim`,
+      { method: "POST", body: item },
+    );
+    return response.controls;
+  }
+
+  async acknowledgeTaskControl(
+    taskId: string,
+    controlId: string,
+    item: { run_id: string; lease_token: string },
+  ): Promise<void> {
+    await this.request(
+      `/v1/hub/tasks/${encodeURIComponent(taskId)}/controls/${encodeURIComponent(controlId)}/ack`,
+      { method: "POST", body: item },
+    );
   }
 
   async startRun(item: {
@@ -196,6 +246,7 @@ export class HubClient {
       method?: "GET" | "POST";
       body?: object;
       timeoutMs?: number;
+      signal?: AbortSignal;
     } = {},
   ): Promise<T> {
     const controller = new AbortController();
@@ -203,6 +254,9 @@ export class HubClient {
       () => controller.abort(),
       options.timeoutMs ?? 30_000,
     );
+    const abort = () => controller.abort();
+    options.signal?.addEventListener("abort", abort, { once: true });
+    if (options.signal?.aborted) controller.abort();
     try {
       const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
         method: options.method ?? "GET",
@@ -223,6 +277,7 @@ export class HubClient {
       return payload as T;
     } finally {
       clearTimeout(timeout);
+      options.signal?.removeEventListener("abort", abort);
     }
   }
 }
