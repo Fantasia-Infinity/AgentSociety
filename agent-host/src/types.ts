@@ -89,6 +89,7 @@ export interface AgentConversation {
   readonly sessionId: string;
   readonly sessionFile?: string;
   prompt(text: string, onText?: (delta: string) => void): Promise<AgentResult>;
+  setSessionName(name: string): void;
   dispose(): void;
 }
 

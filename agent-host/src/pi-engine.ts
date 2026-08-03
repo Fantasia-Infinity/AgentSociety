@@ -128,6 +128,7 @@ export class PiAgentEngine implements AgentEngine {
     return {
       sessionId: session.sessionId,
       ...(session.sessionFile ? { sessionFile: session.sessionFile } : {}),
+      setSessionName: (name) => session.setSessionName(name),
       prompt: async (text, onText) => {
         const unsubscribe = session.subscribe((event) => {
           if (

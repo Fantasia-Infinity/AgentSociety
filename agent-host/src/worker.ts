@@ -51,6 +51,43 @@ export class TaskWorker {
     }
   }
 
+  private async applySessionTitle(
+    task: HubTask,
+    cwd: string,
+    conversation: Awaited<ReturnType<AgentEngine["createConversation"]>>,
+  ): Promise<void> {
+    // Ask a throwaway in-memory Pi session to summarize the objective into a
+    // short session title. This keeps the summarizing exchange out of the
+    // durable task session, and a failure never blocks the task itself.
+    let titleSession: Awaited<ReturnType<AgentEngine["createConversation"]>> | undefined;
+    try {
+      titleSession = await this.engine.createConversation({
+        cwd,
+        mode: "remote",
+        persisted: false,
+      });
+      const result = await titleSession.prompt(
+        [
+          "Summarize the following task objective into a short session title.",
+          "Rules:",
+          "- Use the same language as the objective",
+          "- At most 40 characters",
+          "- Output only the title, no quotes, no explanation",
+          `Objective: ${task.objective}`,
+        ].join("\n"),
+      );
+      const title = cleanSessionTitle(result.text);
+      if (title) {
+        conversation.setSessionName(title);
+        this.output(`Session title: ${title}`);
+      }
+    } catch (error) {
+      this.output(`Session title generation skipped: ${errorMessage(error)}`);
+    } finally {
+      titleSession?.dispose();
+    }
+  }
+
   private async execute(claim: HubClaim): Promise<void> {
     const { task, run, lease_token: leaseToken } = claim;
     const cwd = resolveTaskWorkspace(this.config.workspaceRoot, task);
@@ -91,6 +128,7 @@ export class TaskWorker {
       if (!conversation.sessionFile) {
         throw new Error("Remote Pi session did not create a persistent file");
       }
+      await this.applySessionTitle(task, cwd, conversation);
       this.registry.upsert({
         runId: run.run_id,
         taskId: task.task_id,
@@ -169,6 +207,13 @@ function taskPrompt(task: HubTask, cwd: string): string {
     `Structured input: ${JSON.stringify(task.input)}`,
     "Complete the objective with the currently available tools. Return a concise result suitable for the delegating agent. Do not claim actions you did not perform.",
   ].join("\n");
+}
+
+function cleanSessionTitle(raw: string): string {
+  const singleLine = raw.replace(/\r\n|\r|\n/g, " ").trim();
+  // Strip common wrapping like quotes, backticks, or a leading dash/colon.
+  const unquoted = singleLine.replace(/^[\s"'`\-*]+|[\s"'`\-*]+$/g, "");
+  return unquoted.length > 60 ? `${unquoted.slice(0, 60)}…` : unquoted;
 }
 
 function errorMessage(error: unknown): string {

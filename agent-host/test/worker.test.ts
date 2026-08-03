@@ -136,10 +136,25 @@ test("worker completes a claimed task through the agent engine", async () => {
     heartbeat: async () => {},
   };
   let disposed = false;
+  const sessionNames: string[] = [];
   const engine: AgentEngine = {
     createConversation: async (options) => {
       assert.equal(options.cwd, workspace);
       assert.equal(options.mode, "remote");
+      if (!options.persisted) {
+        // Throwaway session used to summarize the task title.
+        return {
+          sessionId: "title-session",
+          prompt: async () => ({
+            text: "Inspect tests",
+            provider: "remote",
+            model: "test-model",
+            sessionId: "title-session",
+          }),
+          setSessionName: () => {},
+          dispose: () => {},
+        };
+      }
       return {
         sessionId: "pi-session",
         sessionFile: join(workspace, "pi-session.jsonl"),
@@ -152,6 +167,9 @@ test("worker completes a claimed task through the agent engine", async () => {
             sessionId: "pi-session",
           };
         },
+        setSessionName: (name) => {
+          sessionNames.push(name);
+        },
         dispose: () => {
           disposed = true;
         },
@@ -161,6 +179,7 @@ test("worker completes a claimed task through the agent engine", async () => {
 
   const worker = new TaskWorker(config(workspace), hub, engine, () => {});
   assert.equal(await worker.runOnce(), true);
+  assert.deepEqual(sessionNames, ["Inspect tests"]);
   assert.deepEqual(
     updates.map((update) => update.status),
     ["working", "completed"],
