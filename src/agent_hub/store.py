@@ -1,18 +1,23 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
+import secrets
 import sqlite3
 from threading import Condition, RLock
 import time
 import uuid
 from typing import Any
 
+from .auth import AuthenticatedContext
 from .domain import (
     ActorRegistration,
     ArtifactSubmission,
+    AuthTokenCreation,
     NodeRegistration,
     PrincipalRegistration,
+    TenantRegistration,
     RunStatus,
     RunSubmission,
     TERMINAL_RUN_STATUSES,
@@ -20,6 +25,17 @@ from .domain import (
     TaskStatus,
     TaskSubmission,
     TaskUpdate,
+)
+
+TENANT_TABLES = (
+    "hub_principals",
+    "hub_actors",
+    "hub_nodes",
+    "hub_tasks",
+    "hub_runs",
+    "hub_task_events",
+    "hub_artifacts",
+    "hub_task_controls",
 )
 
 
@@ -110,6 +126,7 @@ class AgentHubStore:
                     kind TEXT NOT NULL,
                     display_name TEXT NOT NULL,
                     metadata_json TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
                 );
@@ -121,6 +138,7 @@ class AgentHubStore:
                     display_name TEXT NOT NULL,
                     capabilities_json TEXT NOT NULL,
                     metadata_json TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
                 );
@@ -131,6 +149,7 @@ class AgentHubStore:
                     display_name TEXT NOT NULL,
                     capabilities_json TEXT NOT NULL,
                     metadata_json TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
                     status TEXT NOT NULL DEFAULT 'online',
                     last_seen_at REAL NOT NULL,
                     created_at REAL NOT NULL,
@@ -158,6 +177,7 @@ class AgentHubStore:
                     lease_seconds REAL NOT NULL DEFAULT 120,
                     attempts INTEGER NOT NULL DEFAULT 0,
                     idempotency_key TEXT,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
                     completed_at REAL
@@ -182,6 +202,7 @@ class AgentHubStore:
                     metadata_json TEXT NOT NULL,
                     result_json TEXT NOT NULL DEFAULT '{}',
                     error TEXT,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
                     started_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
                     completed_at REAL
@@ -200,6 +221,7 @@ class AgentHubStore:
                     node_id TEXT REFERENCES hub_nodes(node_id),
                     message TEXT,
                     payload_json TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
                     created_at REAL NOT NULL
                 );
 
@@ -214,6 +236,7 @@ class AgentHubStore:
                     size_bytes INTEGER,
                     created_by_actor_id TEXT NOT NULL REFERENCES hub_actors(actor_id),
                     metadata_json TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
                     created_at REAL NOT NULL
                 );
 
@@ -231,6 +254,7 @@ class AgentHubStore:
                     status TEXT NOT NULL DEFAULT 'pending',
                     lease_token TEXT,
                     lease_until REAL NOT NULL DEFAULT 0,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
                     created_at REAL NOT NULL,
                     delivered_at REAL
                 );
@@ -242,6 +266,38 @@ class AgentHubStore:
                     version INTEGER PRIMARY KEY,
                     name TEXT NOT NULL,
                     applied_at REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS hub_tenants (
+                    tenant_id TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS hub_auth_tokens (
+                    token_id TEXT PRIMARY KEY,
+                    token_hash TEXT UNIQUE NOT NULL,
+                    tenant_id TEXT NOT NULL REFERENCES hub_tenants(tenant_id),
+                    role TEXT NOT NULL,
+                    principal_id TEXT,
+                    actor_id TEXT,
+                    node_id TEXT,
+                    label TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    expires_at REAL,
+                    revoked_at REAL
+                );
+
+                CREATE TABLE IF NOT EXISTS hub_oidc_identities (
+                    provider TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL REFERENCES hub_tenants(tenant_id),
+                    principal_id TEXT NOT NULL REFERENCES hub_principals(principal_id),
+                    role TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (provider, subject)
                 );
                 """
             )
@@ -263,23 +319,65 @@ class AgentHubStore:
                         "ALTER TABLE hub_tasks ADD COLUMN lease_seconds REAL NOT NULL DEFAULT 120"
                     )
                 self._connection.execute("PRAGMA user_version=2")
+            now = time.time()
+            if self._postgres:
+                for table in TENANT_TABLES:
+                    self._connection.execute(
+                        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS tenant_id TEXT NOT NULL DEFAULT 'default'"
+                    )
+            else:
+                for table in TENANT_TABLES:
+                    columns = {
+                        str(row[1])
+                        for row in self._connection.execute(
+                            f"PRAGMA table_info({table})"
+                        )
+                    }
+                    if "tenant_id" not in columns:
+                        self._connection.execute(
+                            f"ALTER TABLE {table} ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'"
+                        )
+                self._connection.execute("PRAGMA user_version=3")
+            self._connection.execute(
+                """
+                INSERT INTO hub_tenants(tenant_id, display_name, metadata_json, created_at, updated_at)
+                VALUES ('default', 'Default', '{}', ?, ?)
+                ON CONFLICT(tenant_id) DO NOTHING
+                """,
+                (now, now),
+            )
+            for table in TENANT_TABLES:
+                self._connection.execute(
+                    f"CREATE INDEX IF NOT EXISTS idx_{table}_tenant ON {table}(tenant_id)"
+                )
             self._connection.execute(
                 """
                 INSERT INTO hub_schema_migrations(version, name, applied_at)
                 VALUES (2, 'task_leases_controls_storage', ?)
                 ON CONFLICT(version) DO NOTHING
                 """,
-                (time.time(),),
+                (now,),
+            )
+            self._connection.execute(
+                """
+                INSERT INTO hub_schema_migrations(version, name, applied_at)
+                VALUES (3, 'multi_tenant_tokens_oidc', ?)
+                ON CONFLICT(version) DO NOTHING
+                """,
+                (now,),
             )
 
-    def register_principal(self, item: PrincipalRegistration) -> dict[str, Any]:
+    def register_principal(
+        self, item: PrincipalRegistration, *, tenant_id: str = "default"
+    ) -> dict[str, Any]:
         now = time.time()
         with self._condition, self._connection:
             self._connection.execute(
                 """
                 INSERT INTO hub_principals(
-                    principal_id, kind, display_name, metadata_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    principal_id, kind, display_name, metadata_json, tenant_id,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(principal_id) DO UPDATE SET
                     kind=excluded.kind,
                     display_name=excluded.display_name,
@@ -291,13 +389,16 @@ class AgentHubStore:
                     item.kind,
                     item.display_name,
                     _json(item.metadata),
+                    tenant_id,
                     now,
                     now,
                 ),
             )
             return self._principal(item.principal_id)
 
-    def register_actor(self, item: ActorRegistration) -> dict[str, Any]:
+    def register_actor(
+        self, item: ActorRegistration, *, tenant_id: str = "default"
+    ) -> dict[str, Any]:
         now = time.time()
         with self._condition, self._connection:
             self._require("hub_principals", "principal_id", item.principal_id)
@@ -305,14 +406,15 @@ class AgentHubStore:
                 """
                 INSERT INTO hub_actors(
                     actor_id, principal_id, kind, display_name,
-                    capabilities_json, metadata_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    capabilities_json, metadata_json, tenant_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(actor_id) DO UPDATE SET
                     principal_id=excluded.principal_id,
                     kind=excluded.kind,
                     display_name=excluded.display_name,
                     capabilities_json=excluded.capabilities_json,
                     metadata_json=excluded.metadata_json,
+                    tenant_id=excluded.tenant_id,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -322,13 +424,16 @@ class AgentHubStore:
                     item.display_name,
                     _json(item.capabilities),
                     _json(item.metadata),
+                    tenant_id,
                     now,
                     now,
                 ),
             )
             return self._actor(item.actor_id)
 
-    def register_node(self, item: NodeRegistration) -> dict[str, Any]:
+    def register_node(
+        self, item: NodeRegistration, *, tenant_id: str = "default"
+    ) -> dict[str, Any]:
         now = time.time()
         with self._condition, self._connection:
             self._require("hub_actors", "actor_id", item.actor_id)
@@ -336,13 +441,14 @@ class AgentHubStore:
                 """
                 INSERT INTO hub_nodes(
                     node_id, actor_id, display_name, capabilities_json,
-                    metadata_json, status, last_seen_at, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'online', ?, ?, ?)
+                    metadata_json, tenant_id, status, last_seen_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'online', ?, ?, ?)
                 ON CONFLICT(node_id) DO UPDATE SET
                     actor_id=excluded.actor_id,
                     display_name=excluded.display_name,
                     capabilities_json=excluded.capabilities_json,
                     metadata_json=excluded.metadata_json,
+                    tenant_id=excluded.tenant_id,
                     status='online',
                     last_seen_at=excluded.last_seen_at,
                     updated_at=excluded.updated_at
@@ -353,6 +459,7 @@ class AgentHubStore:
                     item.display_name,
                     _json(item.capabilities),
                     _json(item.metadata),
+                    tenant_id,
                     now,
                     now,
                     now,
@@ -376,42 +483,77 @@ class AgentHubStore:
                 raise LookupError("node not found")
             return self._node(node_id)
 
-    def list_principals(self) -> list[dict[str, Any]]:
+    def list_principals(self, *, tenant_id: str | None = None) -> list[dict[str, Any]]:
         with self._lock:
-            rows = self._connection.execute(
-                "SELECT principal_id FROM hub_principals ORDER BY principal_id"
-            ).fetchall()
+            if tenant_id is None:
+                rows = self._connection.execute(
+                    "SELECT principal_id FROM hub_principals ORDER BY principal_id"
+                ).fetchall()
+            else:
+                rows = self._connection.execute(
+                    """
+                    SELECT principal_id FROM hub_principals
+                    WHERE tenant_id=? ORDER BY principal_id
+                    """,
+                    (tenant_id,),
+                ).fetchall()
             return [self._principal(str(row["principal_id"])) for row in rows]
 
-    def list_actors(self) -> list[dict[str, Any]]:
+    def list_actors(self, *, tenant_id: str | None = None) -> list[dict[str, Any]]:
         with self._lock:
-            rows = self._connection.execute(
-                "SELECT actor_id FROM hub_actors ORDER BY actor_id"
-            ).fetchall()
+            if tenant_id is None:
+                rows = self._connection.execute(
+                    "SELECT actor_id FROM hub_actors ORDER BY actor_id"
+                ).fetchall()
+            else:
+                rows = self._connection.execute(
+                    """
+                    SELECT actor_id FROM hub_actors
+                    WHERE tenant_id=? ORDER BY actor_id
+                    """,
+                    (tenant_id,),
+                ).fetchall()
             return [self._actor(str(row["actor_id"])) for row in rows]
 
-    def list_nodes(self) -> list[dict[str, Any]]:
+    def list_nodes(self, *, tenant_id: str | None = None) -> list[dict[str, Any]]:
         with self._lock, self._connection:
             self._mark_stale_nodes_offline()
-            rows = self._connection.execute(
-                "SELECT node_id FROM hub_nodes ORDER BY node_id"
-            ).fetchall()
+            if tenant_id is None:
+                rows = self._connection.execute(
+                    "SELECT node_id FROM hub_nodes ORDER BY node_id"
+                ).fetchall()
+            else:
+                rows = self._connection.execute(
+                    """
+                    SELECT node_id FROM hub_nodes
+                    WHERE tenant_id=? ORDER BY node_id
+                    """,
+                    (tenant_id,),
+                ).fetchall()
             return [self._node(str(row["node_id"])) for row in rows]
 
-    def create_task(self, item: TaskSubmission) -> tuple[dict[str, Any], bool]:
+    def create_task(
+        self, item: TaskSubmission, *, tenant_id: str = "default"
+    ) -> tuple[dict[str, Any], bool]:
         now = time.time()
         with self._condition, self._connection:
-            self._require("hub_principals", "principal_id", item.principal_id)
-            self._require("hub_actors", "actor_id", item.delegator_actor_id)
+            principal = self._principal(item.principal_id)
+            delegator = self._actor(item.delegator_actor_id)
+            if principal["tenant_id"] != tenant_id:
+                raise PermissionError("principal does not belong to tenant")
+            if delegator["tenant_id"] != tenant_id:
+                raise PermissionError("delegator actor does not belong to tenant")
             if item.assignee_actor_id is not None:
-                self._require("hub_actors", "actor_id", item.assignee_actor_id)
+                assignee = self._actor(item.assignee_actor_id)
+                if assignee["tenant_id"] != tenant_id:
+                    raise PermissionError("assignee actor does not belong to tenant")
             if item.idempotency_key is not None:
                 existing = self._connection.execute(
                     """
                     SELECT task_id FROM hub_tasks
-                    WHERE principal_id=? AND idempotency_key=?
+                    WHERE principal_id=? AND idempotency_key=? AND tenant_id=?
                     """,
-                    (item.principal_id, item.idempotency_key),
+                    (item.principal_id, item.idempotency_key, tenant_id),
                 ).fetchone()
                 if existing is not None:
                     return self._task(str(existing["task_id"])), False
@@ -423,8 +565,8 @@ class AgentHubStore:
                     task_id, context_id, principal_id, delegator_actor_id,
                     assignee_actor_id, objective, required_capabilities_json,
                     input_json, metadata_json, origin, status, idempotency_key,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    tenant_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -439,6 +581,7 @@ class AgentHubStore:
                     item.origin,
                     TaskStatus.SUBMITTED.value,
                     item.idempotency_key,
+                    tenant_id,
                     now,
                     now,
                 ),
@@ -448,26 +591,42 @@ class AgentHubStore:
                 "task.submitted",
                 actor_id=item.delegator_actor_id,
                 payload={"origin": item.origin},
+                tenant_id=tenant_id,
                 now=now,
             )
             self._condition.notify_all()
             return self._task(task_id), True
 
-    def get_task(self, task_id: str) -> dict[str, Any]:
+    def get_task(self, task_id: str, *, tenant_id: str | None = None) -> dict[str, Any]:
         with self._lock:
-            return self._task(task_id)
+            task = self._task(task_id)
+            if tenant_id is not None and task["tenant_id"] != tenant_id:
+                raise LookupError("task not found")
+            return task
 
     def list_tasks(
-        self, *, status: str | None = None, limit: int = 100
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+        tenant_id: str | None = None,
     ) -> list[dict[str, Any]]:
         limit = min(max(limit, 1), 500)
         with self._lock:
-            if status is None:
+            if status is None and tenant_id is None:
                 rows = self._connection.execute(
                     "SELECT task_id FROM hub_tasks ORDER BY created_at DESC LIMIT ?",
                     (limit,),
                 ).fetchall()
-            else:
+            elif status is None:
+                rows = self._connection.execute(
+                    """
+                    SELECT task_id FROM hub_tasks
+                    WHERE tenant_id=? ORDER BY created_at DESC LIMIT ?
+                    """,
+                    (tenant_id, limit),
+                ).fetchall()
+            elif tenant_id is None:
                 TaskStatus(status)
                 rows = self._connection.execute(
                     """
@@ -475,6 +634,15 @@ class AgentHubStore:
                     WHERE status=? ORDER BY created_at DESC LIMIT ?
                     """,
                     (status, limit),
+                ).fetchall()
+            else:
+                TaskStatus(status)
+                rows = self._connection.execute(
+                    """
+                    SELECT task_id FROM hub_tasks
+                    WHERE status=? AND tenant_id=? ORDER BY created_at DESC LIMIT ?
+                    """,
+                    (status, tenant_id, limit),
                 ).fetchall()
             return [self._task(str(row["task_id"])) for row in rows]
 
@@ -485,6 +653,7 @@ class AgentHubStore:
         node_id: str,
         wait_seconds: float = 0,
         lease_seconds: float = 120,
+        tenant_id: str | None = None,
     ) -> dict[str, Any] | None:
         wait_seconds = min(max(wait_seconds, 0), 30)
         lease_seconds = min(max(lease_seconds, 10), 900)
@@ -493,6 +662,11 @@ class AgentHubStore:
             with self._connection:
                 self._mark_stale_nodes_offline()
             self._validate_executor(actor_id, node_id)
+            if tenant_id is not None:
+                actor = self._actor(actor_id)
+                node = self._node(node_id)
+                if actor["tenant_id"] != tenant_id or node["tenant_id"] != tenant_id:
+                    raise PermissionError("executor does not belong to tenant")
             while True:
                 if self._postgres:
                     with self._connection:
@@ -500,11 +674,11 @@ class AgentHubStore:
                             "SELECT pg_advisory_xact_lock(hashtext('agent_society_task_claim'))"
                         )
                         claimed = self._claim_available(
-                            actor_id, node_id, lease_seconds
+                            actor_id, node_id, lease_seconds, tenant_id
                         )
                 else:
                     claimed = self._claim_available(
-                        actor_id, node_id, lease_seconds
+                        actor_id, node_id, lease_seconds, tenant_id
                     )
                 if claimed is not None:
                     return claimed
@@ -514,28 +688,53 @@ class AgentHubStore:
                 self._condition.wait(timeout=remaining)
 
     def _claim_available(
-        self, actor_id: str, node_id: str, lease_seconds: float
+        self,
+        actor_id: str,
+        node_id: str,
+        lease_seconds: float,
+        tenant_id: str | None,
     ) -> dict[str, Any] | None:
         now = time.time()
         actor_capabilities = set(self._actor(actor_id)["capabilities"])
         actor_capabilities.update(self._node(node_id)["capabilities"])
-        rows = self._connection.execute(
-            """
-            SELECT task_id, required_capabilities_json, status
-            FROM hub_tasks
-            WHERE (
-                status=? OR (status=? AND lease_until <= ?)
-            ) AND (assignee_actor_id IS NULL OR assignee_actor_id=?)
-            ORDER BY created_at, task_id
-            LIMIT 100
-            """,
-            (
-                TaskStatus.SUBMITTED.value,
-                TaskStatus.WORKING.value,
-                now,
-                actor_id,
-            ),
-        ).fetchall()
+        if tenant_id is None:
+            rows = self._connection.execute(
+                """
+                SELECT task_id, required_capabilities_json, status
+                FROM hub_tasks
+                WHERE (
+                    status=? OR (status=? AND lease_until <= ?)
+                ) AND (assignee_actor_id IS NULL OR assignee_actor_id=?)
+                ORDER BY created_at, task_id
+                LIMIT 100
+                """,
+                (
+                    TaskStatus.SUBMITTED.value,
+                    TaskStatus.WORKING.value,
+                    now,
+                    actor_id,
+                ),
+            ).fetchall()
+        else:
+            rows = self._connection.execute(
+                """
+                SELECT task_id, required_capabilities_json, status
+                FROM hub_tasks
+                WHERE tenant_id=?
+                  AND (
+                    status=? OR (status=? AND lease_until <= ?)
+                  ) AND (assignee_actor_id IS NULL OR assignee_actor_id=?)
+                ORDER BY created_at, task_id
+                LIMIT 100
+                """,
+                (
+                    tenant_id,
+                    TaskStatus.SUBMITTED.value,
+                    TaskStatus.WORKING.value,
+                    now,
+                    actor_id,
+                ),
+            ).fetchall()
         selected: Any | None = None
         for row in rows:
             required = set(_decode(str(row["required_capabilities_json"])))
@@ -589,8 +788,8 @@ class AgentHubStore:
                 """
                 INSERT INTO hub_runs(
                     run_id, task_id, principal_id, actor_id, node_id, origin,
-                    objective, status, metadata_json, started_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'remote_task', ?, ?, '{}', ?, ?)
+                    objective, status, metadata_json, tenant_id, started_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 'remote_task', ?, ?, '{}', ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -600,6 +799,7 @@ class AgentHubStore:
                     node_id,
                     task["objective"],
                     RunStatus.ACTIVE.value,
+                    task["tenant_id"],
                     now,
                     now,
                 ),
@@ -611,6 +811,7 @@ class AgentHubStore:
                 actor_id=actor_id,
                 node_id=node_id,
                 payload={"lease_until": now + lease_seconds},
+                tenant_id=task["tenant_id"],
                 now=now,
             )
         return {
@@ -619,7 +820,9 @@ class AgentHubStore:
             "lease_token": lease_token,
         }
 
-    def update_task(self, task_id: str, item: TaskUpdate) -> dict[str, Any]:
+    def update_task(
+        self, task_id: str, item: TaskUpdate, *, tenant_id: str | None = None
+    ) -> dict[str, Any]:
         now = time.time()
         with self._condition, self._connection:
             row = self._connection.execute(
@@ -632,6 +835,10 @@ class AgentHubStore:
             ).fetchone()
             if row is None:
                 raise LookupError("task not found")
+            task_row = self._task(task_id)
+            if tenant_id is not None:
+                if task_row["tenant_id"] != tenant_id:
+                    raise LookupError("task not found")
             current = TaskStatus(str(row["status"]))
             if current in TERMINAL_TASK_STATUSES:
                 raise ValueError("task is already terminal")
@@ -690,19 +897,31 @@ class AgentHubStore:
                 node_id=str(row["executor_node_id"]),
                 message=item.message,
                 payload={"result": item.result},
+                tenant_id=task_row["tenant_id"],
                 now=now,
             )
             self._condition.notify_all()
             return self._task(task_id)
 
-    def cancel_task(self, task_id: str, *, actor_id: str, reason: str | None) -> dict[str, Any]:
+    def cancel_task(
+        self,
+        task_id: str,
+        *,
+        actor_id: str,
+        reason: str | None,
+        tenant_id: str | None = None,
+    ) -> dict[str, Any]:
         now = time.time()
         with self._condition, self._connection:
             task = self._task(task_id)
+            if tenant_id is not None and task["tenant_id"] != tenant_id:
+                raise LookupError("task not found")
             status = TaskStatus(task["status"])
             if status in TERMINAL_TASK_STATUSES:
                 return task
-            self._require("hub_actors", "actor_id", actor_id)
+            actor = self._actor(actor_id)
+            if tenant_id is not None and actor["tenant_id"] != tenant_id:
+                raise PermissionError("actor does not belong to tenant")
             self._connection.execute(
                 """
                 UPDATE hub_tasks
@@ -731,18 +950,26 @@ class AgentHubStore:
                 "task.cancelled",
                 actor_id=actor_id,
                 message=reason,
+                tenant_id=task["tenant_id"],
                 now=now,
             )
             self._condition.notify_all()
             return self._task(task_id)
 
     def list_task_events(
-        self, task_id: str, *, after_seq: int = 0, limit: int = 500
+        self,
+        task_id: str,
+        *,
+        after_seq: int = 0,
+        limit: int = 500,
+        tenant_id: str | None = None,
     ) -> list[dict[str, Any]]:
         after_seq = max(after_seq, 0)
         limit = min(max(limit, 1), 500)
         with self._lock:
-            self._task(task_id)
+            task = self._task(task_id)
+            if tenant_id is not None and task["tenant_id"] != tenant_id:
+                raise LookupError("task not found")
             rows = self._connection.execute(
                 """
                 SELECT * FROM hub_task_events
@@ -753,7 +980,13 @@ class AgentHubStore:
             return [self._event_dict(row) for row in rows]
 
     def create_task_control(
-        self, task_id: str, *, actor_id: str, kind: str, message: str
+        self,
+        task_id: str,
+        *,
+        actor_id: str,
+        kind: str,
+        message: str,
+        tenant_id: str | None = None,
     ) -> dict[str, Any]:
         if kind not in {"steer", "follow_up"}:
             raise ValueError("control kind must be steer or follow_up")
@@ -766,16 +999,20 @@ class AgentHubStore:
         control_id = f"control_{uuid.uuid4().hex}"
         with self._condition, self._connection:
             task = self._task(task_id)
+            if tenant_id is not None and task["tenant_id"] != tenant_id:
+                raise LookupError("task not found")
             if TaskStatus(task["status"]) in TERMINAL_TASK_STATUSES:
                 raise ValueError("task is already terminal")
-            self._require("hub_actors", "actor_id", actor_id)
+            actor = self._actor(actor_id)
+            if tenant_id is not None and actor["tenant_id"] != tenant_id:
+                raise PermissionError("actor does not belong to tenant")
             self._connection.execute(
                 """
                 INSERT INTO hub_task_controls(
-                    control_id, task_id, kind, message, actor_id, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    control_id, task_id, kind, message, actor_id, tenant_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (control_id, task_id, kind, message, actor_id, now),
+                (control_id, task_id, kind, message, actor_id, task["tenant_id"], now),
             )
             self._event(
                 task_id,
@@ -783,6 +1020,7 @@ class AgentHubStore:
                 actor_id=actor_id,
                 message=message,
                 payload={"control_id": control_id},
+                tenant_id=task["tenant_id"],
                 now=now,
             )
             self._condition.notify_all()
@@ -795,11 +1033,14 @@ class AgentHubStore:
         run_id: str,
         lease_token: str,
         limit: int = 20,
+        tenant_id: str | None = None,
     ) -> list[dict[str, Any]]:
         limit = min(max(limit, 1), 100)
         now = time.time()
         with self._condition, self._connection:
             task = self._task(task_id)
+            if tenant_id is not None and task["tenant_id"] != tenant_id:
+                raise LookupError("task not found")
             if task["status"] != TaskStatus.WORKING.value:
                 return []
             row = self._connection.execute(
@@ -846,9 +1087,13 @@ class AgentHubStore:
         *,
         run_id: str,
         lease_token: str,
+        tenant_id: str | None = None,
     ) -> dict[str, Any]:
         now = time.time()
         with self._condition, self._connection:
+            task = self._task(task_id)
+            if tenant_id is not None and task["tenant_id"] != tenant_id:
+                raise LookupError("task not found")
             row = self._connection.execute(
                 "SELECT * FROM hub_task_controls WHERE control_id=? AND task_id=?",
                 (control_id, task_id),
@@ -876,29 +1121,38 @@ class AgentHubStore:
                 "task.control.delivered",
                 run_id=run_id,
                 payload={"control_id": control_id, "kind": str(row["kind"])},
+                tenant_id=task["tenant_id"],
                 now=now,
             )
             return self._control(control_id)
 
-    def start_run(self, item: RunSubmission) -> dict[str, Any]:
+    def start_run(
+        self, item: RunSubmission, *, tenant_id: str = "default"
+    ) -> dict[str, Any]:
         now = time.time()
         run_id = f"run_{uuid.uuid4().hex}"
         with self._condition, self._connection:
-            self._require("hub_principals", "principal_id", item.principal_id)
+            principal = self._principal(item.principal_id)
             actor = self._actor(item.actor_id)
             node = self._node(item.node_id)
+            if principal["tenant_id"] != tenant_id:
+                raise PermissionError("principal does not belong to tenant")
             if actor["principal_id"] != item.principal_id:
                 raise ValueError("actor does not belong to principal")
             if node["actor_id"] != item.actor_id:
                 raise ValueError("node does not belong to actor")
+            if actor["tenant_id"] != tenant_id or node["tenant_id"] != tenant_id:
+                raise PermissionError("actor or node does not belong to tenant")
             if item.task_id is not None:
-                self._task(item.task_id)
+                task = self._task(item.task_id)
+                if task["tenant_id"] != tenant_id:
+                    raise PermissionError("task does not belong to tenant")
             self._connection.execute(
                 """
                 INSERT INTO hub_runs(
                     run_id, task_id, principal_id, actor_id, node_id, origin,
-                    objective, status, metadata_json, started_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    objective, status, metadata_json, tenant_id, started_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -910,15 +1164,39 @@ class AgentHubStore:
                     item.objective,
                     RunStatus.ACTIVE.value,
                     _json(item.metadata),
+                    tenant_id,
                     now,
                     now,
                 ),
             )
             return self._run(run_id)
 
-    def get_run(self, run_id: str) -> dict[str, Any]:
+    def get_run(self, run_id: str, *, tenant_id: str | None = None) -> dict[str, Any]:
         with self._lock:
-            return self._run(run_id)
+            run = self._run(run_id)
+            if tenant_id is not None and run["tenant_id"] != tenant_id:
+                raise LookupError("run not found")
+            return run
+
+    def list_runs(
+        self, *, limit: int = 100, tenant_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        limit = min(max(limit, 1), 500)
+        with self._lock:
+            if tenant_id is None:
+                rows = self._connection.execute(
+                    "SELECT run_id FROM hub_runs ORDER BY started_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = self._connection.execute(
+                    """
+                    SELECT run_id FROM hub_runs
+                    WHERE tenant_id=? ORDER BY started_at DESC LIMIT ?
+                    """,
+                    (tenant_id, limit),
+                ).fetchall()
+            return [self._run(str(row["run_id"])) for row in rows]
 
     def update_run(
         self,
@@ -927,10 +1205,13 @@ class AgentHubStore:
         status: RunStatus,
         result: dict[str, Any],
         error: str | None,
+        tenant_id: str | None = None,
     ) -> dict[str, Any]:
         now = time.time()
         with self._condition, self._connection:
             run = self._run(run_id)
+            if tenant_id is not None and run["tenant_id"] != tenant_id:
+                raise LookupError("run not found")
             current = RunStatus(run["status"])
             if current in TERMINAL_RUN_STATUSES:
                 raise ValueError("run is already terminal")
@@ -945,23 +1226,33 @@ class AgentHubStore:
             )
             return self._run(run_id)
 
-    def add_artifact(self, item: ArtifactSubmission) -> dict[str, Any]:
+    def add_artifact(
+        self, item: ArtifactSubmission, *, tenant_id: str = "default"
+    ) -> dict[str, Any]:
         now = time.time()
         artifact_id = f"artifact_{uuid.uuid4().hex}"
         with self._condition, self._connection:
-            self._require("hub_actors", "actor_id", item.created_by_actor_id)
+            creator = self._actor(item.created_by_actor_id)
+            if creator["tenant_id"] != tenant_id:
+                raise PermissionError("creator actor does not belong to tenant")
+            task_tenant_id: str | None = None
             if item.task_id is not None:
-                self._task(item.task_id)
+                task = self._task(item.task_id)
+                task_tenant_id = task["tenant_id"]
             if item.run_id is not None:
                 run = self._run(item.run_id)
                 if item.task_id is not None and run["task_id"] != item.task_id:
                     raise ValueError("artifact task_id and run_id do not match")
+                if run["tenant_id"] != tenant_id:
+                    raise PermissionError("run does not belong to tenant")
+            if item.task_id is not None and task_tenant_id != tenant_id:
+                raise PermissionError("task does not belong to tenant")
             self._connection.execute(
                 """
                 INSERT INTO hub_artifacts(
                     artifact_id, task_id, run_id, name, media_type, uri, sha256,
-                    size_bytes, created_by_actor_id, metadata_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    size_bytes, created_by_actor_id, metadata_json, tenant_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     artifact_id,
@@ -974,6 +1265,7 @@ class AgentHubStore:
                     item.size_bytes,
                     item.created_by_actor_id,
                     _json(item.metadata),
+                    tenant_id,
                     now,
                 ),
             )
@@ -984,11 +1276,35 @@ class AgentHubStore:
                     run_id=item.run_id,
                     actor_id=item.created_by_actor_id,
                     payload={"artifact_id": artifact_id, "name": item.name},
+                    tenant_id=tenant_id,
                     now=now,
                 )
             return self._artifact(artifact_id)
 
-    def stats(self) -> dict[str, int]:
+    def list_artifacts(
+        self, *, limit: int = 100, tenant_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        limit = min(max(limit, 1), 500)
+        with self._lock:
+            if tenant_id is None:
+                rows = self._connection.execute(
+                    """
+                    SELECT artifact_id FROM hub_artifacts
+                    ORDER BY created_at DESC LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = self._connection.execute(
+                    """
+                    SELECT artifact_id FROM hub_artifacts
+                    WHERE tenant_id=? ORDER BY created_at DESC LIMIT ?
+                    """,
+                    (tenant_id, limit),
+                ).fetchall()
+            return [self._artifact(str(row["artifact_id"])) for row in rows]
+
+    def stats(self, *, tenant_id: str | None = None) -> dict[str, int]:
         with self._lock, self._connection:
             self._mark_stale_nodes_offline()
             result: dict[str, int] = {}
@@ -1000,11 +1316,251 @@ class AgentHubStore:
                 ("runs", "hub_runs"),
                 ("artifacts", "hub_artifacts"),
             ):
-                row = self._connection.execute(
-                    f"SELECT COUNT(*) AS count FROM {table}"
-                ).fetchone()
+                if tenant_id is None:
+                    row = self._connection.execute(
+                        f"SELECT COUNT(*) AS count FROM {table}"
+                    ).fetchone()
+                else:
+                    row = self._connection.execute(
+                        f"SELECT COUNT(*) AS count FROM {table} WHERE tenant_id=?",
+                        (tenant_id,),
+                    ).fetchone()
                 result[name] = int(row["count"]) if row is not None else 0
             return result
+
+    def create_tenant(self, item: TenantRegistration) -> dict[str, Any]:
+        now = time.time()
+        with self._condition, self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO hub_tenants(
+                    tenant_id, display_name, metadata_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(tenant_id) DO UPDATE SET
+                    display_name=excluded.display_name,
+                    metadata_json=excluded.metadata_json,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    item.tenant_id,
+                    item.display_name,
+                    _json(item.metadata),
+                    now,
+                    now,
+                ),
+            )
+            return self._tenant(item.tenant_id)
+
+    def list_tenants(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT tenant_id FROM hub_tenants ORDER BY tenant_id"
+            ).fetchall()
+            return [self._tenant(str(row["tenant_id"])) for row in rows]
+
+    def get_tenant(self, tenant_id: str) -> dict[str, Any]:
+        with self._lock:
+            return self._tenant(tenant_id)
+
+    def create_auth_token(
+        self, item: AuthTokenCreation
+    ) -> tuple[str, dict[str, Any]]:
+        now = time.time()
+        if item.role == "node":
+            if not item.actor_id or not item.node_id:
+                raise ValueError("node tokens require actor_id and node_id")
+        elif not item.principal_id:
+            raise ValueError(
+                "tenant_admin and tenant_user tokens require principal_id"
+            )
+        with self._condition, self._connection:
+            self._tenant(item.tenant_id)
+            if item.principal_id is not None:
+                principal = self._principal(item.principal_id)
+                if principal["tenant_id"] != item.tenant_id:
+                    raise PermissionError("principal does not belong to tenant")
+            if item.actor_id is not None:
+                actor = self._actor(item.actor_id)
+                if actor["tenant_id"] != item.tenant_id:
+                    raise PermissionError("actor does not belong to tenant")
+                if (
+                    item.principal_id is not None
+                    and actor["principal_id"] != item.principal_id
+                ):
+                    raise ValueError("actor does not belong to principal")
+            if item.node_id is not None:
+                node = self._node(item.node_id)
+                if node["tenant_id"] != item.tenant_id:
+                    raise PermissionError("node does not belong to tenant")
+                if item.actor_id is not None and node["actor_id"] != item.actor_id:
+                    raise ValueError("node does not belong to actor")
+            raw_token = secrets.token_urlsafe(32)
+            token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+            token_id = f"token_{uuid.uuid4().hex}"
+            self._connection.execute(
+                """
+                INSERT INTO hub_auth_tokens(
+                    token_id, token_hash, tenant_id, role, principal_id,
+                    actor_id, node_id, label, created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    token_id,
+                    token_hash,
+                    item.tenant_id,
+                    item.role,
+                    item.principal_id,
+                    item.actor_id,
+                    item.node_id,
+                    item.label,
+                    now,
+                    item.expires_at,
+                ),
+            )
+            return raw_token, self._token_record(token_id)
+
+    def list_auth_tokens(
+        self, *, tenant_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            if tenant_id is None:
+                rows = self._connection.execute(
+                    "SELECT token_id FROM hub_auth_tokens ORDER BY created_at DESC"
+                ).fetchall()
+            else:
+                rows = self._connection.execute(
+                    """
+                    SELECT token_id FROM hub_auth_tokens
+                    WHERE tenant_id=? ORDER BY created_at DESC
+                    """,
+                    (tenant_id,),
+                ).fetchall()
+            return [self._token_record(str(row["token_id"])) for row in rows]
+
+    def revoke_auth_token(
+        self, token_id: str, *, tenant_id: str | None = None
+    ) -> dict[str, Any]:
+        now = time.time()
+        with self._condition, self._connection:
+            record = self._token_record(token_id)
+            if tenant_id is not None and record["tenant_id"] != tenant_id:
+                raise LookupError("token not found")
+            self._connection.execute(
+                "UPDATE hub_auth_tokens SET revoked_at=? WHERE token_id=?",
+                (now, token_id),
+            )
+            return self._token_record(token_id)
+
+    def authenticate_token(self, raw_token: str) -> AuthenticatedContext | None:
+        token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM hub_auth_tokens WHERE token_hash=?",
+                (token_hash,),
+            ).fetchone()
+            if row is None:
+                return None
+            if row["revoked_at"] is not None:
+                return None
+            if row["expires_at"] is not None and float(row["expires_at"]) < time.time():
+                return None
+            return AuthenticatedContext(
+                role=str(row["role"]),
+                tenant_id=str(row["tenant_id"]),
+                principal_id=row["principal_id"],
+                actor_id=row["actor_id"],
+                node_id=row["node_id"],
+            )
+
+    def register_oidc_identity(
+        self,
+        *,
+        provider: str,
+        subject: str,
+        tenant_id: str,
+        principal_id: str,
+        role: str,
+    ) -> dict[str, Any]:
+        if role not in {"tenant_admin", "tenant_user"}:
+            raise ValueError("role must be tenant_admin or tenant_user")
+        now = time.time()
+        with self._condition, self._connection:
+            self._tenant(tenant_id)
+            principal = self._principal(principal_id)
+            if principal["tenant_id"] != tenant_id:
+                raise PermissionError("principal does not belong to tenant")
+            self._connection.execute(
+                """
+                INSERT INTO hub_oidc_identities(
+                    provider, subject, tenant_id, principal_id, role, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(provider, subject) DO UPDATE SET
+                    tenant_id=excluded.tenant_id,
+                    principal_id=excluded.principal_id,
+                    role=excluded.role
+                """,
+                (provider, subject, tenant_id, principal_id, role, now),
+            )
+            return {
+                "provider": provider,
+                "subject": subject,
+                "tenant_id": tenant_id,
+                "principal_id": principal_id,
+                "role": role,
+                "created_at": now,
+            }
+
+    def authenticate_oidc(
+        self, *, provider: str, subject: str
+    ) -> AuthenticatedContext | None:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT tenant_id, principal_id, role FROM hub_oidc_identities
+                WHERE provider=? AND subject=?
+                """,
+                (provider, subject),
+            ).fetchone()
+            if row is None:
+                return None
+            return AuthenticatedContext(
+                role=str(row["role"]),
+                tenant_id=str(row["tenant_id"]),
+                principal_id=str(row["principal_id"]),
+            )
+
+    def _tenant(self, tenant_id: str) -> dict[str, Any]:
+        row = self._connection.execute(
+            "SELECT * FROM hub_tenants WHERE tenant_id=?", (tenant_id,)
+        ).fetchone()
+        if row is None:
+            raise LookupError("tenant not found")
+        return {
+            "tenant_id": str(row["tenant_id"]),
+            "display_name": str(row["display_name"]),
+            "metadata": _decode(str(row["metadata_json"])),
+            "created_at": float(row["created_at"]),
+            "updated_at": float(row["updated_at"]),
+        }
+
+    def _token_record(self, token_id: str) -> dict[str, Any]:
+        row = self._connection.execute(
+            "SELECT * FROM hub_auth_tokens WHERE token_id=?", (token_id,)
+        ).fetchone()
+        if row is None:
+            raise LookupError("token not found")
+        return {
+            "token_id": str(row["token_id"]),
+            "tenant_id": str(row["tenant_id"]),
+            "role": str(row["role"]),
+            "principal_id": row["principal_id"],
+            "actor_id": row["actor_id"],
+            "node_id": row["node_id"],
+            "label": str(row["label"]),
+            "created_at": float(row["created_at"]),
+            "expires_at": row["expires_at"],
+            "revoked_at": row["revoked_at"],
+        }
 
     def close(self) -> None:
         with self._lock:
@@ -1053,6 +1609,7 @@ class AgentHubStore:
             "kind": str(row["kind"]),
             "display_name": str(row["display_name"]),
             "metadata": _decode(str(row["metadata_json"])),
+            "tenant_id": str(row["tenant_id"]),
             "created_at": float(row["created_at"]),
             "updated_at": float(row["updated_at"]),
         }
@@ -1070,6 +1627,7 @@ class AgentHubStore:
             "display_name": str(row["display_name"]),
             "capabilities": _decode(str(row["capabilities_json"])),
             "metadata": _decode(str(row["metadata_json"])),
+            "tenant_id": str(row["tenant_id"]),
             "created_at": float(row["created_at"]),
             "updated_at": float(row["updated_at"]),
         }
@@ -1086,6 +1644,7 @@ class AgentHubStore:
             "display_name": str(row["display_name"]),
             "capabilities": _decode(str(row["capabilities_json"])),
             "metadata": _decode(str(row["metadata_json"])),
+            "tenant_id": str(row["tenant_id"]),
             "status": str(row["status"]),
             "last_seen_at": float(row["last_seen_at"]),
             "created_at": float(row["created_at"]),
@@ -1123,6 +1682,7 @@ class AgentHubStore:
             "status": str(row["status"]),
             "result": _decode(str(row["result_json"])),
             "error": row["error"],
+            "tenant_id": str(row["tenant_id"]),
             "lease_until": float(row["lease_until"]),
             "lease_seconds": float(row["lease_seconds"]),
             "attempts": int(row["attempts"]),
@@ -1149,6 +1709,7 @@ class AgentHubStore:
             "message": str(row["message"]),
             "actor_id": str(row["actor_id"]),
             "status": str(row["status"]),
+            "tenant_id": str(row["tenant_id"]),
             "lease_until": float(row["lease_until"]),
             "created_at": float(row["created_at"]),
             "delivered_at": row["delivered_at"],
@@ -1172,6 +1733,7 @@ class AgentHubStore:
             "metadata": _decode(str(row["metadata_json"])),
             "result": _decode(str(row["result_json"])),
             "error": row["error"],
+            "tenant_id": str(row["tenant_id"]),
             "started_at": float(row["started_at"]),
             "updated_at": float(row["updated_at"]),
             "completed_at": row["completed_at"],
@@ -1194,6 +1756,7 @@ class AgentHubStore:
             "size_bytes": row["size_bytes"],
             "created_by_actor_id": str(row["created_by_actor_id"]),
             "metadata": _decode(str(row["metadata_json"])),
+            "tenant_id": str(row["tenant_id"]),
             "created_at": float(row["created_at"]),
         }
 
@@ -1207,14 +1770,20 @@ class AgentHubStore:
         node_id: str | None = None,
         message: str | None = None,
         payload: dict[str, Any] | None = None,
+        tenant_id: str | None = None,
         now: float | None = None,
     ) -> None:
+        if tenant_id is None:
+            row = self._connection.execute(
+                "SELECT tenant_id FROM hub_tasks WHERE task_id=?", (task_id,)
+            ).fetchone()
+            tenant_id = str(row["tenant_id"]) if row is not None else "default"
         self._connection.execute(
             """
             INSERT INTO hub_task_events(
                 event_id, task_id, run_id, event_type, actor_id, node_id,
-                message, payload_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                message, payload_json, tenant_id, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 f"event_{uuid.uuid4().hex}",
@@ -1225,6 +1794,7 @@ class AgentHubStore:
                 node_id,
                 message,
                 _json(payload or {}),
+                tenant_id,
                 now if now is not None else time.time(),
             ),
         )
@@ -1241,5 +1811,6 @@ class AgentHubStore:
             "node_id": row["node_id"],
             "message": row["message"],
             "payload": _decode(str(row["payload_json"])),
+            "tenant_id": str(row["tenant_id"]),
             "created_at": float(row["created_at"]),
         }

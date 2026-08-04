@@ -6,6 +6,13 @@ services:
     restart: unless-stopped
     env_file:
       - .env.hub
+    environment:
+      AGENT_HUB_HOST: "0.0.0.0"
+      AGENT_HUB_PORT: "8090"
+      AGENT_HUB_ALLOW_NON_LOOPBACK_BIND: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "127.0.0.1:8090:8090"
     volumes:
@@ -30,5 +37,52 @@ services:
       retries: 3
       start_period: 5s
 
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${AGENT_HUB_POSTGRES_DB:-agenthub}
+      POSTGRES_USER: ${AGENT_HUB_POSTGRES_USER:-agenthub}
+      POSTGRES_PASSWORD: ${AGENT_HUB_POSTGRES_PASSWORD:?set AGENT_HUB_POSTGRES_PASSWORD in .env.hub}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          pg_isready -U ${AGENT_HUB_POSTGRES_USER:-agenthub}
+          -d ${AGENT_HUB_POSTGRES_DB:-agenthub}
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - agent-hub
+    environment:
+      AGENT_HUB_TLS_MODE: ${AGENT_HUB_TLS_MODE:-self-signed}
+      AGENT_HUB_DOMAIN: ${AGENT_HUB_DOMAIN:-}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile.selfsigned:/etc/caddy/Caddyfile.selfsigned:ro
+      - ./caddy/Caddyfile.domain:/etc/caddy/Caddyfile.domain:ro
+      - ./caddy/entrypoint.sh:/entrypoint.sh:ro
+      - ./certs:/certs:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health", "||", "exit", "1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
 volumes:
   hub-data:
+  postgres-data:
+  caddy-data:
+  caddy-config:

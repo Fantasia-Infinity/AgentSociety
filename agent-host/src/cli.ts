@@ -129,8 +129,12 @@ async function main(): Promise<void> {
     return;
   }
 
-  const engine = await PiAgentEngine.create(config, hub);
-  const worker = new TaskWorker(config, hub!, engine);
+  const workerHub = new HubClient(
+    config.hubUrl!,
+    config.hubNodeToken ?? config.hubToken!,
+  );
+  const engine = await PiAgentEngine.create(config, workerHub);
+  const worker = new TaskWorker(config, workerHub, engine);
   if (command === "once") {
     try {
       const worked = await worker.runOnce();
@@ -152,7 +156,7 @@ async function main(): Promise<void> {
           ? worker
           : new TaskWorker(
               config,
-              hub!,
+              workerHub,
               engine,
               (message) =>
                 console.log(`[worker ${index + 1}] ${message}`),

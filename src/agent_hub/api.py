@@ -6,13 +6,16 @@ import base64
 import binascii
 from urllib.parse import parse_qs
 
+from .auth import AuthenticatedContext
 from .domain import (
     ActorRegistration,
     ArtifactSubmission,
+    AuthTokenCreation,
     NodeRegistration,
     PrincipalRegistration,
     RunStatus,
     RunSubmission,
+    TenantRegistration,
     TaskSubmission,
     TaskUpdate,
     object_value,
@@ -39,16 +42,39 @@ class AgentHubApi:
         return path == cls.prefix or path.startswith(f"{cls.prefix}/")
 
     def get(
-        self, path: str, query_string: str
+        self,
+        path: str,
+        query_string: str,
+        context: AuthenticatedContext | None = None,
     ) -> tuple[HTTPStatus, dict[str, Any]] | None:
+        tenant_id = self._tenant_scope(context)
         if path == self.prefix:
-            return HTTPStatus.OK, {"status": "ok", **self.store.stats()}
+            return HTTPStatus.OK, {
+                "status": "ok",
+                **self.store.stats(tenant_id=tenant_id),
+            }
+        if path == f"{self.prefix}/tenants":
+            if context is not None and not context.is_admin:
+                return HTTPStatus.OK, {
+                    "tenants": [self.store.get_tenant(context.tenant_id or "default")]
+                }
+            return HTTPStatus.OK, {"tenants": self.store.list_tenants()}
+        if path == f"{self.prefix}/tokens":
+            return HTTPStatus.OK, {
+                "tokens": self.store.list_auth_tokens(tenant_id=tenant_id)
+            }
         if path == f"{self.prefix}/principals":
-            return HTTPStatus.OK, {"principals": self.store.list_principals()}
+            return HTTPStatus.OK, {
+                "principals": self.store.list_principals(tenant_id=tenant_id)
+            }
         if path == f"{self.prefix}/actors":
-            return HTTPStatus.OK, {"actors": self.store.list_actors()}
+            return HTTPStatus.OK, {
+                "actors": self.store.list_actors(tenant_id=tenant_id)
+            }
         if path == f"{self.prefix}/nodes":
-            return HTTPStatus.OK, {"nodes": self.store.list_nodes()}
+            return HTTPStatus.OK, {
+                "nodes": self.store.list_nodes(tenant_id=tenant_id)
+            }
         if path == f"{self.prefix}/tasks":
             query = parse_qs(query_string)
             status = (query.get("status") or [None])[0]
@@ -57,12 +83,21 @@ class AgentHubApi:
             except ValueError as exc:
                 raise ValueError("limit must be an integer") from exc
             return HTTPStatus.OK, {
-                "tasks": self.store.list_tasks(status=status, limit=limit)
+                "tasks": self.store.list_tasks(
+                    status=status, limit=limit, tenant_id=tenant_id
+                )
             }
 
         parts = self._parts(path)
+        if len(parts) == 2 and parts[0] == "tenants":
+            if context is not None and not context.is_admin:
+                if parts[1] != (context.tenant_id or "default"):
+                    raise PermissionError("cannot access another tenant")
+            return HTTPStatus.OK, {"tenant": self.store.get_tenant(parts[1])}
         if len(parts) == 2 and parts[0] == "tasks":
-            return HTTPStatus.OK, {"task": self.store.get_task(parts[1])}
+            return HTTPStatus.OK, {
+                "task": self.store.get_task(parts[1], tenant_id=tenant_id)
+            }
         if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "events":
             query = parse_qs(query_string)
             try:
@@ -72,32 +107,62 @@ class AgentHubApi:
                 raise ValueError("after_seq and limit must be integers") from exc
             return HTTPStatus.OK, {
                 "events": self.store.list_task_events(
-                    parts[1], after_seq=after_seq, limit=limit
+                    parts[1],
+                    after_seq=after_seq,
+                    limit=limit,
+                    tenant_id=tenant_id,
                 )
             }
         if len(parts) == 2 and parts[0] == "runs":
-            return HTTPStatus.OK, {"run": self.store.get_run(parts[1])}
+            return HTTPStatus.OK, {
+                "run": self.store.get_run(parts[1], tenant_id=tenant_id)
+            }
         return None
 
     def post(
-        self, path: str, payload: dict[str, Any]
+        self,
+        path: str,
+        payload: dict[str, Any],
+        context: AuthenticatedContext | None = None,
     ) -> tuple[HTTPStatus, dict[str, Any]] | None:
+        tenant_id = self._resolve_tenant(payload, context)
+        if path == f"{self.prefix}/tenants":
+            self._require_admin(context)
+            item = self.store.create_tenant(TenantRegistration.from_dict(payload))
+            return HTTPStatus.CREATED, {"tenant": item}
+        if path == f"{self.prefix}/tokens":
+            self._require_admin(context)
+            item = AuthTokenCreation.from_dict(payload)
+            raw, record = self.store.create_auth_token(item)
+            return HTTPStatus.CREATED, {"token": record, "raw_token": raw}
         if path == f"{self.prefix}/principals":
+            self._require_tenant_manager(context)
             item = self.store.register_principal(
-                PrincipalRegistration.from_dict(payload)
+                PrincipalRegistration.from_dict(payload), tenant_id=tenant_id
             )
             return HTTPStatus.OK, {"principal": item}
         if path == f"{self.prefix}/actors":
-            item = self.store.register_actor(ActorRegistration.from_dict(payload))
+            self._require_tenant_manager(context)
+            item = self.store.register_actor(
+                ActorRegistration.from_dict(payload), tenant_id=tenant_id
+            )
             return HTTPStatus.OK, {"actor": item}
         if path == f"{self.prefix}/nodes":
-            item = self.store.register_node(NodeRegistration.from_dict(payload))
+            self._require_tenant_manager(context)
+            item = self.store.register_node(
+                NodeRegistration.from_dict(payload), tenant_id=tenant_id
+            )
             return HTTPStatus.OK, {"node": item}
         if path == f"{self.prefix}/nodes/heartbeat":
             node_id = required_text(payload, "node_id", maximum=200)
+            if context is not None and not context.is_admin:
+                if context.node_id != node_id:
+                    raise PermissionError("node token cannot heartbeat another node")
             return HTTPStatus.OK, {"node": self.store.heartbeat_node(node_id)}
         if path == f"{self.prefix}/tasks":
-            task, created = self.store.create_task(TaskSubmission.from_dict(payload))
+            task, created = self.store.create_task(
+                TaskSubmission.from_dict(payload), tenant_id=tenant_id
+            )
             return (
                 HTTPStatus.CREATED if created else HTTPStatus.OK,
                 {"task": task, "created": created},
@@ -105,6 +170,11 @@ class AgentHubApi:
         if path == f"{self.prefix}/tasks/claim":
             actor_id = required_text(payload, "actor_id", maximum=200)
             node_id = required_text(payload, "node_id", maximum=200)
+            if context is not None and not context.is_admin:
+                if context.role != "node":
+                    raise PermissionError("only node tokens can claim tasks")
+                if context.actor_id != actor_id or context.node_id != node_id:
+                    raise PermissionError("node token cannot claim for another node")
             try:
                 wait_seconds = float(payload.get("wait_seconds", 0))
                 lease_seconds = float(payload.get("lease_seconds", 120))
@@ -117,10 +187,20 @@ class AgentHubApi:
                 node_id=node_id,
                 wait_seconds=wait_seconds,
                 lease_seconds=lease_seconds,
+                tenant_id=tenant_id,
             )
             return HTTPStatus.OK, {"claim": claim}
         if path == f"{self.prefix}/runs":
-            run = self.store.start_run(RunSubmission.from_dict(payload))
+            if context is not None and not context.is_admin:
+                if context.role != "node":
+                    raise PermissionError("only node tokens can start runs")
+                if context.actor_id != required_text(payload, "actor_id", maximum=200):
+                    raise PermissionError("node token cannot start a run for another actor")
+                if context.node_id != required_text(payload, "node_id", maximum=200):
+                    raise PermissionError("node token cannot start a run for another node")
+            run = self.store.start_run(
+                RunSubmission.from_dict(payload), tenant_id=tenant_id
+            )
             return HTTPStatus.CREATED, {"run": run}
         if path == f"{self.prefix}/artifacts":
             artifact_payload = dict(payload)
@@ -145,19 +225,41 @@ class AgentHubApi:
                 artifact_payload["sha256"] = stored.sha256
                 artifact_payload["size_bytes"] = stored.size_bytes
             artifact = self.store.add_artifact(
-                ArtifactSubmission.from_dict(artifact_payload)
+                ArtifactSubmission.from_dict(artifact_payload), tenant_id=tenant_id
             )
             return HTTPStatus.CREATED, {"artifact": artifact}
 
         parts = self._parts(path)
+        if len(parts) == 3 and parts[0] == "tenants" and parts[2] == "tokens":
+            if context is not None and not context.is_admin:
+                if context.role != "tenant_admin":
+                    raise PermissionError("tenant_admin role required")
+                if parts[1] != context.tenant_id:
+                    raise PermissionError("cannot manage another tenant")
+            item = AuthTokenCreation.from_dict(
+                {**payload, "tenant_id": parts[1]}
+            )
+            raw, record = self.store.create_auth_token(item)
+            return HTTPStatus.CREATED, {"token": record, "raw_token": raw}
+        if len(parts) == 3 and parts[0] == "tokens" and parts[2] == "revoke":
+            if context is not None and not context.is_admin:
+                if context.role != "tenant_admin":
+                    raise PermissionError("tenant_admin role required")
+            record = self.store.revoke_auth_token(
+                parts[1], tenant_id=tenant_id if not context.is_admin else None
+            )
+            return HTTPStatus.OK, {"token": record}
         if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "updates":
-            task = self.store.update_task(parts[1], TaskUpdate.from_dict(payload))
+            task = self.store.update_task(
+                parts[1], TaskUpdate.from_dict(payload), tenant_id=tenant_id
+            )
             return HTTPStatus.OK, {"task": task}
         if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "cancel":
             task = self.store.cancel_task(
                 parts[1],
                 actor_id=required_text(payload, "actor_id", maximum=200),
                 reason=optional_text(payload, "reason", maximum=10_000),
+                tenant_id=tenant_id,
             )
             return HTTPStatus.OK, {"task": task}
         if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "controls":
@@ -166,6 +268,7 @@ class AgentHubApi:
                 actor_id=required_text(payload, "actor_id", maximum=200),
                 kind=required_text(payload, "kind", maximum=40),
                 message=required_text(payload, "message", maximum=50_000),
+                tenant_id=tenant_id,
             )
             return HTTPStatus.CREATED, {"control": control}
         if (
@@ -179,6 +282,7 @@ class AgentHubApi:
                 run_id=required_text(payload, "run_id", maximum=200),
                 lease_token=required_text(payload, "lease_token", maximum=200),
                 limit=int(payload.get("limit", 20)),
+                tenant_id=tenant_id,
             )
             return HTTPStatus.OK, {"controls": controls}
         if (
@@ -192,6 +296,7 @@ class AgentHubApi:
                 parts[3],
                 run_id=required_text(payload, "run_id", maximum=200),
                 lease_token=required_text(payload, "lease_token", maximum=200),
+                tenant_id=tenant_id,
             )
             return HTTPStatus.OK, {"control": control}
         if len(parts) == 3 and parts[0] == "runs" and parts[2] == "updates":
@@ -205,9 +310,35 @@ class AgentHubApi:
                 status=status,
                 result=object_value(payload, "result"),
                 error=optional_text(payload, "error", maximum=10_000),
+                tenant_id=tenant_id,
             )
             return HTTPStatus.OK, {"run": run}
         return None
+
+    def _tenant_scope(
+        self, context: AuthenticatedContext | None
+    ) -> str | None:
+        if context is not None and not context.is_admin:
+            return context.tenant_id or "default"
+        return None
+
+    def _resolve_tenant(
+        self, payload: dict[str, Any], context: AuthenticatedContext | None
+    ) -> str:
+        if context is not None and not context.is_admin:
+            return context.tenant_id or "default"
+        requested = payload.get("tenant_id")
+        return str(requested).strip() if requested else "default"
+
+    def _require_admin(self, context: AuthenticatedContext | None) -> None:
+        if context is None or not context.is_admin:
+            raise PermissionError("admin role required")
+
+    def _require_tenant_manager(self, context: AuthenticatedContext | None) -> None:
+        if context is None:
+            return
+        if not context.is_admin and context.role != "tenant_admin":
+            raise PermissionError("tenant manager role required")
 
     def _parts(self, path: str) -> list[str]:
         prefix = f"{self.prefix}/"

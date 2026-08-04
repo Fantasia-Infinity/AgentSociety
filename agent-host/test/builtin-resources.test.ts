@@ -84,11 +84,26 @@ test("managed MCP and LSP defaults load in a remote session", async () => {
     );
     try {
       activateCompatibleTools(session, "remote", "full");
-      const tools = session.getActiveToolNames();
+      let tools = session.getActiveToolNames();
       assert.ok(tools.includes("mcp"));
       assert.ok(tools.includes("lsp_hover"));
-      assert.ok(tools.includes("channel_list_conversations"));
-      assert.ok(tools.includes("channel_send"));
+      let channelReady = false;
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        if (
+          tools.includes("channel_list_conversations") &&
+          tools.includes("channel_send")
+        ) {
+          channelReady = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        activateCompatibleTools(session, "remote", "full");
+        tools = session.getActiveToolNames();
+      }
+      assert.ok(
+        channelReady,
+        `channel tools missing; active=${tools.join(",")}`,
+      );
     } finally {
       await runtimeHost.dispose();
     }

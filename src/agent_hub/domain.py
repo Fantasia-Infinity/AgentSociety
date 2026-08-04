@@ -260,3 +260,46 @@ class ArtifactSubmission:
             size_bytes=size_bytes,
             metadata=object_value(payload, "metadata"),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class TenantRegistration:
+    tenant_id: str
+    display_name: str
+    metadata: dict[str, Any]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "TenantRegistration":
+        return cls(
+            tenant_id=required_text(payload, "tenant_id", maximum=200),
+            display_name=required_text(payload, "display_name", maximum=200),
+            metadata=object_value(payload, "metadata"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AuthTokenCreation:
+    tenant_id: str
+    role: str
+    principal_id: str | None
+    actor_id: str | None
+    node_id: str | None
+    label: str
+    expires_at: float | None
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "AuthTokenCreation":
+        role = required_text(payload, "role", maximum=40)
+        if role not in {"tenant_admin", "tenant_user", "node"}:
+            raise ValueError("role must be tenant_admin, tenant_user, or node")
+        raw_expires = payload.get("expires_at")
+        expires_at = None if raw_expires is None else float(raw_expires)
+        return cls(
+            tenant_id=required_text(payload, "tenant_id", maximum=200),
+            role=role,
+            principal_id=optional_text(payload, "principal_id", maximum=200),
+            actor_id=optional_text(payload, "actor_id", maximum=200),
+            node_id=optional_text(payload, "node_id", maximum=200),
+            label=required_text(payload, "label", maximum=200),
+            expires_at=expires_at,
+        )

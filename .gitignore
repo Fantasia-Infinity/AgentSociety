@@ -27,6 +27,7 @@ agent-host/.setup-complete
 .local/
 gateway-logs/
 worker-logs/
+deploy/hub/certs/
 
 
 .env*

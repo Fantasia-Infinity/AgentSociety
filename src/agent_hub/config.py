@@ -59,6 +59,10 @@ class HubSettings:
     object_store_url: str | None
     public_url: str | None
     allow_non_loopback_bind: bool
+    web_secret: str | None
+    web_cookie_secure: bool
+    oidc_issuer: str | None
+    oidc_audience: str | None
 
     @classmethod
     def from_env(cls) -> "HubSettings":
@@ -83,6 +87,11 @@ class HubSettings:
             allow_non_loopback_bind=_bool(
                 "AGENT_HUB_ALLOW_NON_LOOPBACK_BIND", False
             ),
+            web_secret=os.environ.get("AGENT_HUB_WEB_SECRET", "").strip() or None,
+            web_cookie_secure=_bool("AGENT_HUB_WEB_COOKIE_SECURE", True),
+            oidc_issuer=os.environ.get("AGENT_HUB_OIDC_ISSUER", "").strip() or None,
+            oidc_audience=os.environ.get("AGENT_HUB_OIDC_AUDIENCE", "").strip()
+            or None,
         )
         settings.validate()
         return settings
@@ -113,3 +122,7 @@ class HubSettings:
             ("http://", "https://")
         ):
             raise ValueError("AGENT_HUB_PUBLIC_URL must use HTTP or HTTPS")
+        if self.web_secret is not None and len(self.web_secret) < 32:
+            raise ValueError("AGENT_HUB_WEB_SECRET must contain at least 32 characters")
+        if self.oidc_issuer is not None and not self.oidc_issuer.startswith("https://"):
+            raise ValueError("AGENT_HUB_OIDC_ISSUER must use https://")

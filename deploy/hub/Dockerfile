@@ -7,7 +7,7 @@ WORKDIR /app
 
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir '.[postgres,s3,oidc]'
 
 USER 10001:10001
 ENV AGENT_HUB_HOST=0.0.0.0 \

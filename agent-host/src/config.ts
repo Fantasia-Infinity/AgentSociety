@@ -19,6 +19,7 @@ export interface AgentHostConfig {
   hubEnabled: boolean;
   hubUrl?: string;
   hubToken?: string;
+  hubNodeToken?: string;
   principalId: string;
   principalDisplayName: string;
   actorId: string;
@@ -217,6 +218,9 @@ export function loadConfig(): AgentHostConfig {
   );
   return {
     ...hubConfig,
+    ...(process.env.AGENT_HUB_NODE_TOKEN?.trim()
+      ? { hubNodeToken: process.env.AGENT_HUB_NODE_TOKEN.trim() }
+      : {}),
     principalId: required("AGENT_PRINCIPAL_ID", `human-${owner}`),
     principalDisplayName: required(
       "AGENT_PRINCIPAL_NAME",

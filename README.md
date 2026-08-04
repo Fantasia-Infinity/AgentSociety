@@ -28,6 +28,9 @@ Pi Agent，通过本机 TUI 由登录用户直接操作；配置 Hub 后才增�
 [Pi Agent 协作平台](docs/agent-platform.md)，Mac 端侧推理见
 [本地 RWKV 指南](docs/local-rwkv.md)。
 
+公网部署 Hub（无域名/域名、PostgreSQL/S3、Web 管理界面、多租户）见
+[Hub 公网部署指南](docs/public-hub.md)。
+
 ## 独立 Agent Hub
 
 Hub 和微信 Core 不共享进程、端口、SQLite 或 token：
