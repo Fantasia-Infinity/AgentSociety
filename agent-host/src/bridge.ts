@@ -22,6 +22,10 @@ import type {
   AdapterTaskEnvelope,
 } from "./bridge-types.js";
 import { AdapterSessionRegistry } from "./adapter-session-registry.js";
+import {
+  ensureAgentHubProject,
+  registerAgentHubThread,
+} from "./codex-project.js";
 import type { HubClaim, HubTask } from "./types.js";
 import { resolveTaskWorkspace } from "./worker.js";
 
@@ -250,6 +254,9 @@ export class BridgeWorker {
     private readonly workerSlot = 0,
   ) {
     this.sessions = new AdapterSessionRegistry(config.sessionDir);
+    if (adapter.id === "codex") {
+      ensureAgentHubProject(config.workspaceRoot);
+    }
   }
 
   async runOnce(waitSeconds = 0, signal?: AbortSignal): Promise<boolean> {
@@ -505,6 +512,13 @@ export class BridgeWorker {
         this.sessions.upsert(scope!, resultSessionId, task.task_id, {
           reset: resetRequested,
         });
+      }
+      if (
+        this.adapter.id === "codex" &&
+        typeof resultSessionId === "string" &&
+        resultSessionId
+      ) {
+        registerAgentHubThread(resultSessionId, cwd);
       }
       const text =
         (typeof parsed?.text === "string" && parsed.text.trim()

@@ -200,9 +200,20 @@ DeepSeek provider）。想为任务指定不同模型，可以复制内置 manif
 `-c model="<model>"`。
 
 关于 GUI：`codex exec` 的会话文件写在 `~/.codex/sessions/`，与 Codex 桌面端
-共用同一存储，因此会出现在 Codex 的历史/会话列表中（应用需要重新索引或重启
-后可见），也可以随时用 `codex exec resume <uuid>` 手动恢复。Bridge 只记录
+共用同一存储，也可以随时用 `codex exec resume <uuid>` 手动恢复。Bridge 只记录
 session id 并在任务间透传，不会伪造上下文。
+
+默认情况下，Bridge 每次运行都会幂等地在 Codex 桌面端注册一个统一项目
+`AgentHub`（`~/.codex/.codex-global-state.json` 的 `local-projects` +
+`thread-project-assignments`），并把每次 exec 会话的 thread id 关联进去。
+这样通过 Hub 执行的 Codex 会话在 GUI 重启后统一显示在 `AgentHub` 项目下，
+即使 workspace 是临时目录。相关环境变量：
+
+- `AGENT_HUB_CODEX_PROJECT`：默认 `1`；设为 `0` 关闭自动注册。
+- `AGENT_HUB_CODEX_PROJECT_NAME`：项目显示名，默认 `AgentHub`。
+
+注册是对桌面端状态文件的 best-effort 合并（保留其他字段、原子替换），状态
+文件缺失或格式异常时静默跳过，不影响任务执行。
 
 ## 新增一个适配器
 
