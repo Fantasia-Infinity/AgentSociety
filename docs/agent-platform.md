@@ -157,7 +157,7 @@ Keychain 读取 Hub token，避免把凭据写进 plist。
 微信 Core 默认继续使用远程 OpenAI-compatible API：
 
 ```bash
-LLM_BACKEND=remote PYTHONPATH=src python3 -m wechat_bot.api
+LLM_BACKEND=remote PYTHONPATH=src python3 -m wechat_core.api
 ```
 
 ## 新设备加入 Hub

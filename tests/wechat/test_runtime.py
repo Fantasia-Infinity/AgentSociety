@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import unittest
 
-from wechat_bot.conversations import InMemoryConversationStore
-from wechat_bot.domain import (
+from wechat_core.conversations import InMemoryConversationStore
+from wechat_core.domain import (
     ChatType,
     ContentType,
     IncomingMessage,
     ModelResponse,
     OutgoingAction,
 )
-from wechat_bot.runtime import ActionOutbox, BotRuntime
-from wechat_bot.service import AccessPolicy, BotService
+from wechat_core.runtime import ActionOutbox, BotRuntime
+from wechat_core.service import AccessPolicy, BotService
 
 
 class FakeProvider:

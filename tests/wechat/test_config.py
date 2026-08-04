@@ -4,13 +4,13 @@ import os
 from unittest.mock import patch
 import unittest
 
-from wechat_bot.config import Settings
+from wechat_core.config import Settings
 
 
 class SettingsTests(unittest.TestCase):
     def load(self, values: dict[str, str]) -> Settings:
         with (
-            patch("wechat_bot.config._load_env_file"),
+            patch("wechat_core.config._load_env_file"),
             patch.dict(os.environ, values, clear=True),
         ):
             return Settings.from_env()

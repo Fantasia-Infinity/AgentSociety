@@ -7,7 +7,7 @@ Pi Agent，通过本机 TUI 由登录用户直接操作；配置 Hub 后才增�
 
 ## 已实现
 
-- `wechat-bot-core`：HTTP 接入、显式 allowlist、持久化收件箱、去重、会话、回复 Outbox
+- `wechat-core`：HTTP 接入、显式 allowlist、持久化收件箱、去重、会话、回复 Outbox
   和 LLM 调用；模型结果的历史、去重、Outbox、Inbox 完成使用同一个事务提交。
 - `wechat-gateway`：消息采集、历史游标与 SQLite Inbox、回复长轮询、租约与 ACK、本地发送账本。
 - `mock` 适配器：可在 macOS 上用 JSON 行模拟微信消息，验证完整链路。
@@ -127,7 +127,7 @@ adapter 只接收通用 `query`，将来可在不改变 Pi 工具名的情况下
 ```bash
 cp .env.example .env
 # 默认 LLM_BACKEND=remote；至少设置 BOT_API_TOKEN、LLM_BASE_URL、LLM_MODEL
-PYTHONPATH=src python3 -m wechat_bot.api
+PYTHONPATH=src python3 -m wechat_core.api
 ```
 
 健康检查：
@@ -161,7 +161,7 @@ PYTHONPATH=src python3 -m wechat_gateway
 
 ```bash
 # 安装 llama.cpp 并下载兼容的 RWKV-6/7 GGUF 后：
-PYTHONPATH=src python3 -m wechat_bot.local_model
+PYTHONPATH=src python3 -m wechat_core.local_model
 ```
 
 模型文件、采样配置、健康检查和 LaunchAgent 模板参见

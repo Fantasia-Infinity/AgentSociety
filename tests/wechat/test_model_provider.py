@@ -5,8 +5,8 @@ from threading import Lock
 import time
 import unittest
 
-from wechat_bot.domain import ModelRequest, ModelResponse
-from wechat_bot.model_provider import (
+from wechat_core.domain import ModelRequest, ModelResponse
+from wechat_core.model_provider import (
     ConcurrencyLimitedProvider,
     FailoverProvider,
     ModelProviderError,

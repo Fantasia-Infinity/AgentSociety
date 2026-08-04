@@ -25,7 +25,7 @@ Windows 微信设备                       平台无关的 Bot/模型服务器
 ## 运行边界
 
 - Windows 设备只运行微信客户端与 `wechat-gateway`，不保存 LLM 密钥。
-- macOS 或服务器可分别运行 `wechat-bot-core` 和 `agent-hub`；两者使用独立端口、状态库和
+- macOS 或服务器可分别运行 `wechat-core` 和 `agent-hub`；两者使用独立端口、状态库和
   Bearer token。
 - 微信 Gateway 与 Core 只共享版本化消息协议；Agent Host 与 Hub 只共享协作任务协议。
 
@@ -102,3 +102,25 @@ llama.cpp。`LLM_BACKEND` 支持三种路由：
 - 模型 HTTP 错误正文不会写入日志或持久化重试数据库，防止服务回显提示词。
 - Gateway 只支持配置中列出的监听会话，不主动遍历或群发联系人。
 - Agent Hub 默认只绑定 loopback；远程节点通过带 TLS 的反向代理访问并使用独立 token。
+
+## API 版本与兼容性
+
+Hub 的四个接口共享同一内核（`AgentHubApi → AgentHubStore`），但各自的版本
+协商方式不同：
+
+- **REST（`/v1/hub/*`）**：路径版本化。`v1` 是当前稳定契约，只允许向后兼容
+  的增量扩展（新增端点/字段/查询参数）；破坏性变更必须开 `/v2/hub`，并保留
+  v1 至少一个过渡周期。`/v1` 前缀只用于 Hub 资源 API，不用于其它入口。
+- **MCP（`/mcp`）**：协议版本在 `initialize` 的 `protocolVersion` 协商（当前
+  `2025-06-18`）。工具名 `hub_*` 和输入输出结构是 Hub 侧契约；新增工具视为
+  向后兼容，删除/改名工具属于破坏性变更，随服务器版本发布并写入
+  `docs/agent-adapters.md`。可用 `AGENT_HUB_ENABLE_MCP=false` 关闭。
+- **A2A（`/a2a`）**：版本通过 `A2A-Version` 请求头协商（当前 `1.0`），Agent
+  Card 发布在 `/.well-known/agent-card.json`。目前只实现 SendMessage /
+  GetTask / ListTasks / CancelTask，不支持 streaming 与 pushNotifications
+  （Card 中显式声明）。不支持的版本返回 -32009。
+- **Web（`/web`）**：面向人类的界面，无版本契约；路由与表单字段随发布演进。
+
+兼容性承诺：所有接口都操作同一份任务/事件/租户状态，不会出现“接口之间不
+一致”的窗口；但能力面不同（REST 全量，MCP/A2A 是子集），跨接口使用时以 REST
+文档为准。需要新能力时优先扩展 REST，再决定是否映射到 MCP/A2A。

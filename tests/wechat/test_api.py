@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 import urllib.parse
 
-from wechat_bot.api import parse_action_ack_payload, parse_action_poll_query
+from wechat_core.api import parse_action_ack_payload, parse_action_poll_query
 
 
 class BotApiTests(unittest.TestCase):

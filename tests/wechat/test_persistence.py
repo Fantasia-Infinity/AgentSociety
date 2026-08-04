@@ -5,21 +5,21 @@ import tempfile
 import time
 import unittest
 
-from wechat_bot.domain import (
+from wechat_core.domain import (
     ChatType,
     ContentType,
     IncomingMessage,
     ModelResponse,
 )
-from wechat_bot.model_provider import ModelProviderError
-from wechat_bot.persistence import (
+from wechat_core.model_provider import ModelProviderError
+from wechat_core.persistence import (
     CoreInboxStore,
     SqliteActionOutbox,
     SqliteConversationStore,
     SqliteMessageDeduplicator,
 )
-from wechat_bot.runtime import BotRuntime
-from wechat_bot.service import AccessPolicy, BotService
+from wechat_core.runtime import BotRuntime
+from wechat_core.service import AccessPolicy, BotService
 
 
 class FakeProvider:
@@ -146,7 +146,7 @@ class PersistenceTests(unittest.TestCase):
             )
             reopened_conversations.close()
 
-            from wechat_bot.domain import OutgoingAction
+            from wechat_core.domain import OutgoingAction
 
             outbox = SqliteActionOutbox(path)
             outbox.push(

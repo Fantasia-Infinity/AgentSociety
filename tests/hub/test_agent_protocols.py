@@ -17,13 +17,13 @@ from agent_hub.domain import (
 )
 from agent_hub.object_store import FileObjectStore
 from agent_hub.store import AgentHubStore
-from wechat_bot.domain import (
+from wechat_core.domain import (
     ChatType,
     ContentType,
     IncomingMessage,
     OutgoingAction,
 )
-from wechat_bot.persistence import (
+from wechat_core.persistence import (
     CoreInboxStore,
     SqliteActionOutbox,
     SqliteConversationStore,

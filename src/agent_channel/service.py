@@ -8,8 +8,8 @@ from threading import Lock
 import uuid
 from typing import Any
 
-from wechat_bot.domain import ChatType, ContentType, OutgoingAction
-from wechat_bot.persistence import SqliteActionOutbox
+from wechat_core.domain import ChatType, ContentType, OutgoingAction
+from wechat_core.persistence import SqliteActionOutbox
 
 
 class ChannelCapabilityError(RuntimeError):

@@ -80,7 +80,7 @@ LOCAL_LLM_CHAT_TEMPLATE=rwkv-world
 先启动模型服务：
 
 ```bash
-PYTHONPATH=src python3 -m wechat_bot.local_model
+PYTHONPATH=src python3 -m wechat_core.local_model
 ```
 
 另一个终端验证：

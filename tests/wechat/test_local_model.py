@@ -5,13 +5,13 @@ import plistlib
 import tempfile
 import unittest
 
-from wechat_bot.local_model import LocalModelRuntimeSettings
+from wechat_core.local_model import LocalModelRuntimeSettings
 
 
 class LocalModelRuntimeTests(unittest.TestCase):
     def test_launchagent_template_is_persistent(self) -> None:
         path = (
-            Path(__file__).resolve().parents[1]
+            Path(__file__).resolve().parents[2]
             / "deploy/macos/com.fantasia.wechat-bot-local-llm.plist.example"
         )
         with path.open("rb") as handle:

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import unittest
 
-from wechat_bot.domain import ModelMessage, ModelRequest
-from wechat_bot.model_provider import ModelProviderError
-from wechat_bot.openai_compatible import OpenAICompatibleProvider
+from wechat_core.domain import ModelMessage, ModelRequest
+from wechat_core.model_provider import ModelProviderError
+from wechat_core.openai_compatible import OpenAICompatibleProvider
 
 
 class FakeTransport:

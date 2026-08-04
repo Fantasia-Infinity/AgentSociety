@@ -48,6 +48,9 @@ Git 忽略，不要提交。把 `ca.pem` 分发给要接入的设备。
 cp .env.hub.example .env.hub
 ```
 
+Hub 的全部配置示例只维护在仓库根目录的 `.env.hub.example`；
+`deploy/hub/.env.hub.example` 只是指向它的说明文件。
+
 至少修改：
 
 - `AGENT_HUB_TOKEN`：至少 24 字符，建议 `openssl rand -hex 24`。

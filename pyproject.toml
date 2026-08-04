@@ -17,8 +17,8 @@ oidc = ["PyJWT>=2.8,<3", "cryptography>=42"]
 [project.scripts]
 agent-hub = "agent_hub.server:main"
 agent-hub-mcp = "agent_hub.mcp_server:main"
-wechat-bot-core = "wechat_bot.api:main"
-wechat-bot-local-llm = "wechat_bot.local_model:main"
+wechat-bot-core = "wechat_core.api:main"
+wechat-bot-local-llm = "wechat_core.local_model:main"
 wechat-gateway = "wechat_gateway.main:main"
 agent-channel-mcp = "agent_channel.mcp_server:main"
 agent-hub-migrate-postgres = "agent_hub.migrate:main"

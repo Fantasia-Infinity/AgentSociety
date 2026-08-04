@@ -9,7 +9,7 @@
     <array>
         <string>__PYTHON__</string>
         <string>-m</string>
-        <string>wechat_bot.local_model</string>
+        <string>wechat_core.local_model</string>
     </array>
 
     <key>WorkingDirectory</key>
