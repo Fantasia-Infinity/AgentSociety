@@ -175,6 +175,7 @@ function parseJsonlResult(stdout: string): AdapterResultFile | undefined {
 function findEventSessionId(item: Record<string, unknown>): string | undefined {
   const candidates = [
     item.session_id,
+    item.sessionID,
     item.thread_id,
     (item.payload as Record<string, unknown> | undefined)?.session_id,
     (item.payload as Record<string, unknown> | undefined)?.thread_id,
@@ -193,6 +194,18 @@ function findEventSessionId(item: Record<string, unknown>): string | undefined {
 
 function findAssistantMessageText(item: Record<string, unknown>): string | undefined {
   const payload = item.payload as Record<string, unknown> | undefined;
+  if (item.type === "text") {
+    const part = item.part as Record<string, unknown> | undefined;
+    if (
+      part &&
+      typeof part === "object" &&
+      (part.type === "text" || part.type === undefined) &&
+      typeof part.text === "string" &&
+      part.text.trim()
+    ) {
+      return part.text.trim();
+    }
+  }
   if (item.type === "item.completed") {
     const completed = item.item as Record<string, unknown> | undefined;
     if (

@@ -303,6 +303,18 @@ test("parseStdoutResult extracts session metadata from desktop session events", 
   });
 });
 
+test("parseStdoutResult extracts OpenCode JSONL events", () => {
+  const stdout = [
+    '{"type":"step_start","sessionID":"ses_0339da3a5ffeF44DHwAOHkQqcH","part":{"type":"step-start"}}',
+    '{"type":"text","sessionID":"ses_0339da3a5ffeF44DHwAOHkQqcH","part":{"type":"text","text":"opencode-ok-1"}}',
+    '{"type":"step_finish","sessionID":"ses_0339da3a5ffeF44DHwAOHkQqcH","part":{"type":"step-finish","reason":"stop"}}',
+  ].join("\n");
+  assert.deepEqual(parseStdoutResult(stdout), {
+    text: "opencode-ok-1",
+    session_id: "ses_0339da3a5ffeF44DHwAOHkQqcH",
+  });
+});
+
 test("adapter session registry keeps, resets, and rotates sessions", () => {
   const workspace = temporaryDirectory();
   const registry = new AdapterSessionRegistry(join(workspace, ".sessions"));

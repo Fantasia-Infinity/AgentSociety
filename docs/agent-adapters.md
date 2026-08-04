@@ -53,15 +53,15 @@ AGENT_HUB_ADAPTER_DIR=/path/to/adapters ./agent bridge --adapter my-agent
   "display_name": "OpenCode",
   "capabilities": ["code"],
   "command": ["opencode", "run"],
-  "args": ["--json", "{prompt}"],
+  "args": ["--format", "json", "{prompt}"],
   "env": {},
   "result_mode": "stdout_json",
   "timeout_seconds": 3600,
   "cancel_grace_seconds": 10,
   "session": {
     "resume": true,
-    "new_args": ["--json", "{prompt}"],
-    "resume_args": ["--json", "--session", "{session_id}", "{prompt}"],
+    "new_args": ["--format", "json", "{prompt}"],
+    "resume_args": ["--format", "json", "--session", "{session_id}", "{prompt}"],
     "result_field": "session_id",
     "discovery_glob": ".opencode/sessions/*.jsonl"
   }
