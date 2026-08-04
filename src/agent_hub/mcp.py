@@ -135,12 +135,21 @@ class McpService:
             )
         if method == "tools/call":
             return self._result(request_id, self._tools_call(params, context))
+        if method == "resources/list":
+            return self._result(request_id, {"resources": [], "nextCursor": None})
+        if method == "resources/templates/list":
+            return self._result(
+                request_id, {"resourceTemplates": [], "nextCursor": None}
+            )
         return self._error(request_id, -32601, f"Method not found: {method}")
 
     def _initialize(self) -> dict[str, Any]:
         return {
             "protocolVersion": MCP_PROTOCOL_VERSION,
-            "capabilities": {"tools": {"listChanged": False}},
+            "capabilities": {
+                "tools": {"listChanged": False},
+                "resources": {"listChanged": False},
+            },
             "serverInfo": {"name": "AgentSociety Hub", "version": "0.4.0"},
             "instructions": (
                 "AgentSociety Hub task coordination. Use hub_create_task to "

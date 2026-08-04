@@ -62,6 +62,14 @@ class McpServiceTests(unittest.TestCase):
                 },
             )
 
+    def test_resources_list_is_supported(self) -> None:
+        with TemporaryDirectory() as temporary:
+            service = self.make_service(temporary)
+            resources = mcp_call(service, "resources/list", {})
+            self.assertEqual(resources["result"]["resources"], [])
+            templates = mcp_call(service, "resources/templates/list", {})
+            self.assertEqual(templates["result"]["resourceTemplates"], [])
+
     def test_create_get_events_cancel_flow(self) -> None:
         with TemporaryDirectory() as temporary:
             service = self.make_service(temporary)
