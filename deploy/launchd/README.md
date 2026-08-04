@@ -28,5 +28,6 @@ launchctl bootout gui/$(id -u)/ai.agentsociety.agent-worker
   `dist/src/cli.js` works.
 - The worker loads `../.env.agent` through `AGENT_ENV_FILE`; the Hub token is
   stored in the macOS keychain under the configured credential service.
-- `AGENT_SELF_UPDATE=0` is set in `.env.agent` so the worker stays on the
-  `publicserver` build instead of pulling `origin/main`.
+- `AGENT_SELF_UPDATE` defaults to on, so the worker follows `origin/main`.
+  Set it to `0` only when pinning a specific build (e.g. while a newer main
+  is known-broken); remove the pin once main is healthy again.
