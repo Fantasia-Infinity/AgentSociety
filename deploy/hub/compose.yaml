@@ -57,6 +57,8 @@ services:
       retries: 5
 
   caddy:
+    profiles:
+      - caddy
     image: caddy:2-alpine
     restart: unless-stopped
     depends_on:
@@ -80,6 +82,18 @@ services:
       interval: 15s
       timeout: 5s
       retries: 3
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    depends_on:
+      - agent-hub
+    environment:
+      AGENT_HUB_CLOUDFLARE_MODE: ${AGENT_HUB_CLOUDFLARE_MODE:-quick}
+      AGENT_HUB_CLOUDFLARE_TUNNEL_TOKEN: ${AGENT_HUB_CLOUDFLARE_TUNNEL_TOKEN:-}
+    volumes:
+      - ./cloudflared/entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
 
 volumes:
   hub-data:

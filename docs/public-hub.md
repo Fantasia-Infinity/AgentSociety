@@ -1,8 +1,9 @@
 # AgentSociety Hub 公网部署指南
 
-本文描述把 `agent-hub` 部署到公网 VPS 的两种方式：**无域名测试模式**
-（IP + 自签证书）和**正式域名模式**（Caddy 自动 HTTPS）。两种模式共用
-PostgreSQL 与可选 S3 对象存储，并支持内嵌的 Web 管理界面。
+本文描述把 `agent-hub` 部署到公网 VPS 的推荐方式：**Cloudflare Tunnel**
+（无域名测试用 Quick Tunnel，正式域名用 Named Tunnel，HTTPS 由 Cloudflare
+边缘自动提供），以及可选的**直连 Caddy** 模式（自签证书或 Let's Encrypt）。
+两种方式共用 PostgreSQL 与可选 S3 对象存储，并支持内嵌的 Web 管理界面。
 
 ## 架构
 
@@ -10,41 +11,41 @@ PostgreSQL 与可选 S3 对象存储，并支持内嵌的 Web 管理界面。
 公网设备 (./agent)
         │  HTTPS
         ▼
-   Caddy（TLS / 限流 / 安全头）
-        │  http://127.0.0.1:8090
+Cloudflare 边缘（TLS / DDoS 防护）
+        │  cloudflared 出站隧道（无需开放入站端口）
         ▼
-   agent-hub
+   agent-hub (127.0.0.1:8090)
         │
         ├── PostgreSQL（任务/租户/令牌）
         └── S3 / 本地文件（Artifact 内容）
 ```
 
-Hub 容器只监听宿主机 loopback；公网流量必须经过 Caddy。默认单一共享 token
-适合受控节点；开放多租户后每个租户和节点使用独立 token。
+`cloudflared` 容器只做出站连接；Hub 容器仍只监听宿主机 loopback，公网流量
+经 Cloudflare 边缘进入。默认单一共享 token 适合受控节点；开放多租户后每个
+租户和节点使用独立 token。
+
+可选直连模式（不使用 Cloudflare）：`docker compose --profile caddy up -d`
+会额外启动 Caddy 并发布 80/443，TLS 由自签证书或 Let's Encrypt 处理。
 
 ## 1. 服务器准备
 
 - 一台公网 VPS（建议 Ubuntu 24.04，2 vCPU / 2GB 起步），安装 Docker 与
   Docker Compose v2。
-- 防火墙只放行 `80/tcp` 与 `443/tcp`；**不要对外放行 8090**。
-- 无域名模式：记录 VPS 公网 IP；正式域名模式：把 `hub.example.com` 的 A
-  记录指向 VPS。
+- Cloudflare 模式：**不需要放行任何入站端口**，服务器只需能出站访问
+  Cloudflare（443/7844）；**不要对外放行 8090**。
+- 直连 Caddy 模式：防火墙放行 `80/tcp` 与 `443/tcp`。
+- 无域名测试：不需要 Cloudflare 账号；正式域名：创建 Named Tunnel 后在
+  Cloudflare 控制台配置 `hub.example.com` 的 Public Hostname。
 
-## 2. 无域名测试模式（自签证书）
+## 2. 无域名测试模式（Cloudflare Quick Tunnel，推荐）
 
-在仓库 `deploy/hub` 目录下生成 CA 与服务器证书：
+无需账号和域名，启动后得到随机的 `https://<随机ID>.trycloudflare.com`
+地址。该地址每次重启都会变化，只适合短期测试。
+
+在 `deploy/hub` 目录下复制并修改环境变量：
 
 ```bash
 cd deploy/hub
-AGENT_HUB_PUBLIC_IP=<VPS公网IP> bash scripts/generate-self-signed-cert.sh
-```
-
-生成 `certs/ca.pem`、`certs/hub.crt`、`certs/hub.key`。`certs/` 已被
-Git 忽略，不要提交。把 `ca.pem` 分发给要接入的设备。
-
-复制并修改环境变量：
-
-```bash
 cp ../../.env.hub.example .env.hub
 ```
 
@@ -54,46 +55,82 @@ Hub 的全部配置示例只维护在仓库根目录的 `.env.hub.example`；
 至少修改：
 
 - `AGENT_HUB_TOKEN`：至少 24 字符，建议 `openssl rand -hex 24`。
-- `AGENT_HUB_PUBLIC_URL=https://<VPS公网IP>`。
 - `AGENT_HUB_POSTGRES_PASSWORD` 与 `AGENT_HUB_DATABASE_URL` 中的密码一致。
 - `AGENT_HUB_WEB_SECRET`：至少 32 字符。
+- `AGENT_HUB_CLOUDFLARE_MODE=quick`（默认值，可省略）。
 - 可选：`AGENT_HUB_OBJECT_STORE_URL=s3://bucket/prefix`，并设置 AWS 凭据。
 
 启动：
 
 ```bash
 docker compose up -d --build
+docker compose logs -f cloudflared
 ```
 
-验证：
+从日志复制 `https://<随机ID>.trycloudflare.com`，写入 `.env.hub` 的
+`AGENT_HUB_PUBLIC_URL` 并重建 Hub（让 A2A Agent Card 返回正确地址）：
 
 ```bash
-curl --cacert certs/ca.pem https://<VPS公网IP>/health
-curl --cacert certs/ca.pem -o /dev/null -w '%{http_code}\n' https://<VPS公网IP>/web
-curl --cacert certs/ca.pem https://<VPS公网IP>/v1/hub/actors   # 应返回 401
+AGENT_HUB_PUBLIC_URL=https://<随机ID>.trycloudflare.com
+docker compose up -d --force-recreate agent-hub
 ```
 
-## 3. 正式域名模式
+验证（证书由 Cloudflare 签发，无需 `--cacert`）：
+
+```bash
+curl https://<随机ID>.trycloudflare.com/health
+curl -o /dev/null -w '%{http_code}\n' https://<随机ID>.trycloudflare.com/web
+curl https://<随机ID>.trycloudflare.com/v1/hub/actors   # 应返回 401
+```
+
+设备端直接使用该 HTTPS 地址即可，无需信任任何自签 CA。
+
+## 3. 正式域名模式（Cloudflare Named Tunnel）
+
+需要 Cloudflare 账号 + 域名（免费套餐即可，最多 50 条隧道）。在
+Cloudflare Zero Trust → Networks → Tunnels 创建隧道，选择 token 方式；
+在 Public Hostnames 里把 `hub.example.com` 的 ingress 指向
+`http://agent-hub:8090`（cloudflared 容器与 Hub 在同一 Docker 网络，
+可直接使用该地址）。
 
 在 `.env.hub` 中切换：
 
 ```dotenv
-AGENT_HUB_TLS_MODE=letsencrypt
+AGENT_HUB_CLOUDFLARE_MODE=named
+AGENT_HUB_CLOUDFLARE_TUNNEL_TOKEN=<创建隧道时获得的 token>
+AGENT_HUB_PUBLIC_URL=https://hub.example.com
+```
+
+重启隧道与 Hub：
+
+```bash
+docker compose up -d --force-recreate cloudflared agent-hub
+```
+
+Cloudflare 在边缘自动签发并续期可信证书，设备端无需任何额外证书配置。
+
+### 可选：直连 Caddy 模式（不用 Cloudflare）
+
+保留的原方案，TLS 由 Caddy 直接处理（自签证书需要先生成
+`AGENT_HUB_PUBLIC_IP=<VPS公网IP> bash scripts/generate-self-signed-cert.sh`
+并把 `certs/ca.pem` 分发给设备）：
+
+```dotenv
+AGENT_HUB_TLS_MODE=letsencrypt   # 或 self-signed（需 AGENT_HUB_PUBLIC_IP）
 AGENT_HUB_DOMAIN=hub.example.com
 AGENT_HUB_PUBLIC_URL=https://hub.example.com
 ```
 
-然后重启 Caddy：
-
 ```bash
-docker compose up -d --force-recreate caddy
+docker compose --profile caddy up -d --build
 ```
 
-Let's Encrypt 证书会自动签发和续期。自签证书目录此时不再使用。
+Let's Encrypt 证书会自动签发和续期；自签证书目录此时不再使用。
 
 ## 4. Web 管理界面
 
-访问 `https://<VPS公网IP>/web` 或 `https://hub.example.com/web`。使用
+访问 Quick Tunnel 地址的 `/web`（如 `https://<随机ID>.trycloudflare.com/web`）
+或 `https://hub.example.com/web`。使用
 `AGENT_HUB_TOKEN`（原始值，不带 `Bearer `）登录。
 
 管理员可以看到：
@@ -114,8 +151,9 @@ Web 会话使用 `HttpOnly + SameSite=Strict` Cookie 和 CSRF 防护；登录 to
 ./agent setup
 ```
 
-Hub URL 填 `https://hub.example.com`，token 填 `AGENT_HUB_TOKEN` 或租户
-token。无域名模式需要先让 Node.js 信任 CA：
+Hub URL 填 `https://hub.example.com` 或 Quick Tunnel 的
+`https://<随机ID>.trycloudflare.com`，token 填 `AGENT_HUB_TOKEN` 或租户
+token。Cloudflare 两种模式都不需要信任 CA；仅直连 Caddy 自签模式需要：
 
 ```bash
 export NODE_EXTRA_CA_CERTS=/path/to/certs/ca.pem
