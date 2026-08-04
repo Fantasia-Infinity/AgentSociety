@@ -174,6 +174,9 @@ class HubRequestHandler(BaseHTTPRequestHandler):
         return None
 
     def _web_get(self, path: str, query_string: str) -> None:
+        if path == "/web/login":
+            self._send_html(HTTPStatus.OK, login_page())
+            return
         session = self._web_session()
         if session is None:
             self._redirect("/web/login")
@@ -195,9 +198,6 @@ class HubRequestHandler(BaseHTTPRequestHandler):
                     self.server.api.store.list_runs(limit=10, tenant_id=tenant_id),
                 ),
             )
-            return
-        if path == "/web/login":
-            self._send_html(HTTPStatus.OK, login_page())
             return
         if path == "/web/tasks":
             query = parse_qs(query_string)
