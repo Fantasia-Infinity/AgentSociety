@@ -24,7 +24,7 @@ Cloudflare 边缘（TLS / DDoS 防护）
 经 Cloudflare 边缘进入。默认单一共享 token 适合受控节点；开放多租户后每个
 租户和节点使用独立 token。
 
-可选直连模式（不使用 Cloudflare）：`docker compose --profile caddy up -d`
+可选直连模式（不使用 Cloudflare）：`docker compose --env-file .env.hub --profile caddy up -d`
 会额外启动 Caddy 并发布 80/443，TLS 由自签证书或 Let's Encrypt 处理。
 
 ## 1. 服务器准备
@@ -57,14 +57,13 @@ Hub 的全部配置示例只维护在仓库根目录的 `.env.hub.example`；
 - `AGENT_HUB_TOKEN`：至少 24 字符，建议 `openssl rand -hex 24`。
 - `AGENT_HUB_POSTGRES_PASSWORD` 与 `AGENT_HUB_DATABASE_URL` 中的密码一致。
 - `AGENT_HUB_WEB_SECRET`：至少 32 字符。
-- `AGENT_HUB_CLOUDFLARE_MODE=quick`（默认值，可省略）。
 - 可选：`AGENT_HUB_OBJECT_STORE_URL=s3://bucket/prefix`，并设置 AWS 凭据。
 
 启动：
 
 ```bash
-docker compose up -d --build
-docker compose logs -f cloudflared
+docker compose --env-file .env.hub up -d --build
+docker compose --env-file .env.hub logs -f cloudflared
 ```
 
 从日志复制 `https://<随机ID>.trycloudflare.com`，写入 `.env.hub` 的
@@ -72,7 +71,7 @@ docker compose logs -f cloudflared
 
 ```bash
 AGENT_HUB_PUBLIC_URL=https://<随机ID>.trycloudflare.com
-docker compose up -d --force-recreate agent-hub
+docker compose --env-file .env.hub up -d --force-recreate agent-hub
 ```
 
 验证（证书由 Cloudflare 签发，无需 `--cacert`）：
@@ -93,18 +92,18 @@ Cloudflare Zero Trust → Networks → Tunnels 创建隧道，选择 token 方�
 `http://agent-hub:8090`（cloudflared 容器与 Hub 在同一 Docker 网络，
 可直接使用该地址）。
 
-在 `.env.hub` 中切换：
+在 `.env.hub` 中配置 token：
 
 ```dotenv
-AGENT_HUB_CLOUDFLARE_MODE=named
 AGENT_HUB_CLOUDFLARE_TUNNEL_TOKEN=<创建隧道时获得的 token>
 AGENT_HUB_PUBLIC_URL=https://hub.example.com
 ```
 
-重启隧道与 Hub：
+停掉 quick tunnel，启动 named tunnel 并重建 Hub：
 
 ```bash
-docker compose up -d --force-recreate cloudflared agent-hub
+docker compose --env-file .env.hub stop cloudflared
+docker compose --env-file .env.hub --profile named-tunnel up -d cloudflared-named agent-hub
 ```
 
 Cloudflare 在边缘自动签发并续期可信证书，设备端无需任何额外证书配置。
@@ -122,7 +121,7 @@ AGENT_HUB_PUBLIC_URL=https://hub.example.com
 ```
 
 ```bash
-docker compose --profile caddy up -d --build
+docker compose --env-file .env.hub --profile caddy up -d --build
 ```
 
 Let's Encrypt 证书会自动签发和续期；自签证书目录此时不再使用。
@@ -236,13 +235,13 @@ Principal 和租户，才能登录 Web 或调用 API。
 PostgreSQL：
 
 ```bash
-docker compose exec -T postgres pg_dump -U agenthub agenthub > hub-backup.sql
+docker compose --env-file .env.hub exec -T postgres pg_dump -U agenthub agenthub > hub-backup.sql
 ```
 
 恢复：
 
 ```bash
-cat hub-backup.sql | docker compose exec -T postgres psql -U agenthub agenthub
+cat hub-backup.sql | docker compose --env-file .env.hub exec -T postgres psql -U agenthub agenthub
 ```
 
 S3 bucket 开启版本控制，并按需做跨区复制。SQLite 本地部署的升级方式：

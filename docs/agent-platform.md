@@ -381,7 +381,7 @@ Hub 默认只绑定 loopback，且必须设置至少 24 字符的独立 token。
 cd deploy/hub
 cp ../../.env.hub.example .env.hub
 # 生成并写入高熵 AGENT_HUB_TOKEN，然后：
-docker compose up -d --build
+docker compose --env-file .env.hub up -d --build
 ```
 
 `Caddyfile.example` 给出了反向代理入口。多租户 token（租户管理员/租户用户/节点）与吊销、
