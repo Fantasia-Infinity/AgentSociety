@@ -24,6 +24,7 @@ import type {
 import { AdapterSessionRegistry } from "./adapter-session-registry.js";
 import {
   ensureAgentHubProject,
+  markCodexSessionVisible,
   registerAgentHubThread,
 } from "./codex-project.js";
 import type { HubClaim, HubTask } from "./types.js";
@@ -519,6 +520,7 @@ export class BridgeWorker {
         resultSessionId
       ) {
         registerAgentHubThread(resultSessionId, cwd);
+        markCodexSessionVisible(resultSessionId);
       }
       const text =
         (typeof parsed?.text === "string" && parsed.text.trim()

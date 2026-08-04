@@ -10,11 +10,13 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
+import { DatabaseSync } from "node:sqlite";
 
 import {
   agentHubProjectDir,
   agentHubProjectId,
   ensureAgentHubProject,
+  markCodexSessionVisible,
   registerAgentHubThread,
 } from "../src/codex-project.js";
 
@@ -165,4 +167,73 @@ test("registration is skipped when disabled or state file is missing", () => {
     existsSync(join(home, ".codex-global-state.json")),
     false,
   );
+});
+
+test("markCodexSessionVisible rewrites the session file and threads database", () => {
+  const home = temporaryHome();
+  process.env.CODEX_HOME = home;
+  process.env.AGENT_HUB_CODEX_PROJECT_SPAWN = "0";
+  const sid = "019fcc2c-7a47-7612-9c3a-a2404d5957ab";
+  const sessionDir = join(home, "sessions", "2026", "08", "04");
+  mkdirSync(sessionDir, { recursive: true });
+  const sessionPath = join(
+    sessionDir,
+    `rollout-2026-08-04T11-48-14-${sid}.jsonl`,
+  );
+  writeFileSync(
+    sessionPath,
+    `${JSON.stringify({
+      timestamp: "2026-08-04T09:48:14.792Z",
+      type: "session_meta",
+      payload: { id: sid, source: "exec", cwd: agentHubProjectDir() },
+    })}\n{"timestamp":"x","type":"event_msg"}\n`,
+  );
+  const dbPath = join(home, "state_5.sqlite");
+  const db = new DatabaseSync(dbPath);
+  db.exec(
+    "CREATE TABLE threads (id TEXT PRIMARY KEY, source TEXT NOT NULL, cwd TEXT)",
+  );
+  db.prepare("INSERT INTO threads (id, source, cwd) VALUES (?, ?, ?)").run(
+    sid,
+    "exec",
+    agentHubProjectDir(),
+  );
+  db.close();
+
+  assert.equal(markCodexSessionVisible(sid), true);
+  const firstLine = JSON.parse(readFileSync(sessionPath, "utf8").split("\n")[0]!)
+    .payload as Record<string, unknown>;
+  assert.equal(firstLine.source, "cli");
+  const reopened = new DatabaseSync(dbPath, { readOnly: true });
+  const row = reopened
+    .prepare("SELECT source FROM threads WHERE id = ?")
+    .get(sid) as Record<string, unknown> | undefined;
+  assert.equal(
+    row?.source,
+    "cli",
+  );
+  reopened.close();
+  assert.ok(existsSync(`${dbPath}.agenthub-bak`));
+});
+
+test("markCodexSessionVisible is skipped when disabled", () => {
+  const home = temporaryHome();
+  process.env.CODEX_HOME = home;
+  process.env.AGENT_HUB_CODEX_PROJECT = "0";
+  const sid = "019fcc2c-7a47-7612-9c3a-a2404d5957ab";
+  const sessionDir = join(home, "sessions", "2026", "08", "04");
+  mkdirSync(sessionDir, { recursive: true });
+  const sessionPath = join(
+    sessionDir,
+    `rollout-2026-08-04T11-48-14-${sid}.jsonl`,
+  );
+  writeFileSync(
+    sessionPath,
+    JSON.stringify({
+      type: "session_meta",
+      payload: { id: sid, source: "exec" },
+    }),
+  );
+  assert.equal(markCodexSessionVisible(sid), false);
+  assert.match(readFileSync(sessionPath, "utf8"), /"source":"exec"/);
 });

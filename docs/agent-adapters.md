@@ -218,10 +218,17 @@ bridge 默认以 `~/.agenthub/AgentHub` 作为工作区。相关环境变量：
 - `AGENT_HUB_CODEX_PROJECT_SPAWN`：默认 `1`；设为 `0` 禁止 bridge 调用
   `codex app` 拉起桌面端（例如无人值守场景）。
 
-已知限制：当前 Codex 桌面端不会在侧边栏展示 `source=exec` 的 CLI 会话（线程
-库已经索引，但 UI 过滤掉了），所以 `AgentHub` 项目本身会出现在 GUI 里，会话
-仍需用 `codex exec resume <uuid>` 在 CLI 恢复。项目注册和 thread 关联数据
-仍然写入，便于未来版本或其它界面使用。
+Codex 桌面端默认不展示 `source=exec` 的会话（线程库已经索引，但 UI 过滤）。
+Bridge 在每个 exec 会话结束后会做两步可见性处理：
+
+1. 把会话文件 `session_meta.source` 从 `exec` 重写为 `cli`（仅改首行，保留
+   其余内容）；
+2. 同步更新 `~/.codex/state_5.sqlite` 的 `threads.source`（首次修改前用
+   `VACUUM INTO` 生成 `state_5.sqlite.agenthub-bak` 备份）。
+
+配合前面的项目注册与 thread 关联，重启 Codex 后这些会话会显示在 `AgentHub`
+项目下。这是对 Codex 内部数据的 best-effort 适配：文件或数据库不可写时静默
+跳过，不影响任务执行；`AGENT_HUB_CODEX_PROJECT=0` 可整体关闭。
 
 ## 新增一个适配器
 
