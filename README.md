@@ -13,15 +13,23 @@ Pi Agent，通过本机 TUI 由登录用户直接操作；配置 Hub 后才增�
 - `mock` 适配器：可在 macOS 上用 JSON 行模拟微信消息，验证完整链路。
 - `wxauto4` / `wxautox4` 适配边界：Windows 下动态加载，不会成为 Core 的依赖。
 - `ModelProvider`：支持 `remote`、`local_rwkv` 和显式远程回退的 `auto` 模式。
-- `agent-hub`：独立的 Principal / Actor / Node / Task / Run / Artifact 服务、租约和事件流。
+- `agent-hub`：独立的 Principal / Actor / Node / Task / Run / Artifact 服务、租约和事件流；
+  支持多租户（token/OIDC）、PostgreSQL/S3 可选存储，以及 REST、MCP、A2A、Web 四个等价入口。
 - `agent-host`：Pi SDK 原生 TUI 与远程任务 worker；本地和远程默认具备 Sub-agent、
   plan/todo、分域长期记忆、LSP/代码索引、MCP 和 session 后台进程。远程 worker 可选择
   每任务独立 Pi session，或按 principal/workspace/worker slot 复用可跨重启恢复的连续 session。
+- 通用 Bridge：`./agent bridge --adapter codex|opencode|generic` 让任意带非交互 CLI 的
+  agent 成为 Hub worker；codex/opencode 支持跨任务连续会话，任务信封与结果契约见
+  [agent-adapters.md](docs/agent-adapters.md)。
 - `web_search`：模型无关的 Pi 工具契约；当前 adapter 使用 DeepSeek Responses API 的
   服务端搜索，并返回答案及可用的来源 URL。
 - `agent-channel-mcp`：MCP 2025-06-18 stdio server，统一 list/read/send/reply/react/download
   通道工具；微信适配器当前实现前四项并显式声明其余能力不可用。
 - A2A 1.0 JSON-RPC Adapter：标准 Agent Card 和 Send/Get/List/Cancel Task 映射。
+- Hub MCP Server：`/mcp` 暴露 `hub_create_task` / `hub_get_task` / `hub_cancel_task` 等
+  工具，Codex/OpenCode/Claude 可直接作为派发端；stdio 与 streamable HTTP 两种传输。
+- Hub Web 管理界面：管理员/租户仪表盘（任务、Run、Artifact、节点、租户、token），
+  会话 Cookie + CSRF，可选 OIDC 登录。
 
 完整设计见 [架构文档](docs/architecture.md)，Windows 部署见
 [Windows Gateway 指南](docs/windows-gateway.md)，Agent 平台见
@@ -30,6 +38,8 @@ Pi Agent，通过本机 TUI 由登录用户直接操作；配置 Hub 后才增�
 
 公网部署 Hub（无域名/域名、PostgreSQL/S3、Web 管理界面、多租户）见
 [Hub 公网部署指南](docs/public-hub.md)。
+通用 agent 适配器（codex/opencode/generic、任务信封、连续会话、GUI 可见性）见
+[agent-adapters.md](docs/agent-adapters.md)。
 
 ## 独立 Agent Hub
 
@@ -43,6 +53,18 @@ PYTHONPATH=src python3 -m agent_hub.server
 
 它默认只监听 `127.0.0.1:8090`。公网服务器部署模板见
 [`deploy/hub`](deploy/hub) 和 [Agent 平台文档](docs/agent-platform.md)。
+
+Hub 提供四个等价入口，共享同一内核（`AgentHubApi` → Store），状态天然一致：
+
+| 入口 | 路径 | 用途 |
+|---|---|---|
+| REST | `/v1/hub/*` | 全量 API，Pi worker/bridge 的 HubClient 使用 |
+| MCP | `/mcp` | Codex/OpenCode/Claude 等 MCP 客户端派发/观察任务 |
+| A2A | `/a2a` | 标准 Agent Card + Send/Get/List/Cancel Task |
+| Web | `/web` | 人类管理界面（需设置 `AGENT_HUB_WEB_SECRET`） |
+
+版本策略（REST `/v1` 路径版本化、MCP `protocolVersion`、A2A `A2A-Version` 头）见
+[架构文档](docs/architecture.md)。
 
 ## Pi Agent Host
 
@@ -79,6 +101,9 @@ TUI。配置 Hub 时才会额外登记 Principal/Actor/Node。
 ./agent steer task_xxx "立即先运行单元测试"
 ./agent follow-up task_xxx "完成后再给出性能摘要"
 ./agent cancel task_xxx "目标已变化"
+./agent bridge --adapter codex   # 用 Codex CLI 作为持续 worker
+./agent bridge --adapter opencode # 用 OpenCode 作为持续 worker
+./agent bridge --adapter generic  # 自定义命令适配器
 ```
 
 远程任务默认使用 `AGENT_WORKER_SESSION_MODE=per_task`，每个 Task 都有独立 Pi session。
@@ -184,5 +209,6 @@ PYTHONPATH=src python3 -m wechat_core.local_model
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
 
-测试覆盖 Core、HTTP 协议解析、Gateway、ACK 丢失去重和 wxauto 消息标准化；使用假的
-模型与微信对象，不会请求真实 LLM，也不需要 API Key。
+测试按子系统组织在 `tests/hub/`（REST/MCP/A2A/Web、多租户、Web 会话）与
+`tests/wechat/`（Core、HTTP 协议解析、Gateway、ACK 丢失去重、wxauto 消息标准化）；
+使用假的模型与微信对象，不会请求真实 LLM，也不需要 API Key。
