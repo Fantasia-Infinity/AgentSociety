@@ -45,7 +45,7 @@ Git 忽略，不要提交。把 `ca.pem` 分发给要接入的设备。
 复制并修改环境变量：
 
 ```bash
-cp .env.hub.example .env.hub
+cp ../../.env.hub.example .env.hub
 ```
 
 Hub 的全部配置示例只维护在仓库根目录的 `.env.hub.example`；
@@ -123,6 +123,9 @@ export NODE_EXTRA_CA_CERTS=/path/to/certs/ca.pem
 ```
 
 macOS/Windows/Linux 后台服务也要在启动环境里设置 `NODE_EXTRA_CA_CERTS`。
+
+非 Pi agent（Codex/OpenCode 等）用 `./agent bridge --adapter <id>` 作为 worker，
+并可用 MCP 作为派发端，详见 `docs/agent-adapters.md`。
 
 ## 5.1 MCP 接入（外部 Agent 派发任务）
 
@@ -213,4 +216,4 @@ S3 bucket 开启版本控制，并按需做跨区复制。SQLite 本地部署的
 - 当前 bootstrap token 是管理员级；任何拿到它的人都能管理所有租户。
 - 多租户隔离由 `tenant_id` 在存储层强制；跨租户任务委派不支持。
 - Hub 只做协调，不为租户任务提供沙箱；租户 worker 由设备所有者控制。
-- 公网开放前建议完成：逐节点凭证轮换、审计保留、速率限制、Run 隔离。
+- 逐节点 token 吊销/重签已支持；公网开放前仍需：审计保留、速率限制、Run 隔离。

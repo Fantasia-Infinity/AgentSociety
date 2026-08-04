@@ -86,10 +86,10 @@ llama.cpp。`LLM_BACKEND` 支持三种路由：
 | 会话历史 | Mac SQLite | PostgreSQL |
 | 微信接入 | Windows Gateway + mock/wxauto 适配器 | 其他合规渠道适配器 |
 | Gateway 消息与发送账本 | 本地 SQLite | SQLite 可继续使用 |
-| Agent 运行时 | Pi SDK Agent Host | Pi、其他框架及 A2A Adapter 并存 |
+| Agent 运行时 | Pi SDK Agent Host + 通用 Bridge（codex/opencode/generic） | Pi、其他框架及 A2A Adapter 并存 |
 | Agent 工具 | 托管 Sub-agent/plan/memory/background + Pi LSP/MCP + Channel MCP | 更多 MCP 客户端与节点策略 |
 | 协作任务 | SQLite 或可选 PostgreSQL；Artifact URI 或 file/S3 对象存储 | 事件总线与 Hub 联邦 |
-| 鉴权 | Bearer token | TLS + Principal/Node 身份与密钥轮换 |
+| 鉴权 | Bearer token（bootstrap/租户/节点）+ OIDC | TLS + 短期凭证与密钥轮换 |
 
 ## 安全默认值
 

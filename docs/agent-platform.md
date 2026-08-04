@@ -137,9 +137,12 @@ scope 保存，删除采用可恢复归档，且工具提示明确禁止写入 t
 4. `completed`、`failed`、`cancelled` 是终态；结果写入 Task 和 Run，事件流保留状态历史。
 5. 大产物放文件系统或对象存储，Hub 只保存 URI、媒体类型、大小和 SHA-256 等元数据。
 
-内部 `/v1/hub/*` API 仍是 AgentSociety worker 的高效协议；A2A Adapter 把同一状态映射为
-Task/Message/Artifact，并明确声明不支持 streaming/push notification。Channel 工具由独立 MCP
-stdio server 导出。这样替换 Pi 或并存其他开源 Agent 框架时不需要迁移 Hub 数据模型。
+内部 `/v1/hub/*` REST 仍是 AgentSociety worker 的高效协议；MCP `/mcp`（`hub_*` 工具）、
+A2A `/a2a`（Task/Message/Artifact，明确声明不支持 streaming/push）与 Web `/web` 提供
+派发/观察入口，四个入口共享同一内核状态。非 Pi agent 通过通用 Bridge
+（`./agent bridge --adapter codex|opencode|generic`）接入，规范见
+[agent-adapters.md](agent-adapters.md)。Channel 工具由独立 MCP stdio server 导出。这样替换
+Pi 或并存其他开源 Agent 框架时不需要迁移 Hub 数据模型。
 
 ## 启动
 
@@ -236,6 +239,11 @@ SQLite。系统凭据库不可用或锁定时 setup 会失败，不提供明文�
 ./agent steer task_xxx "先停止重构，运行现有测试"
 ./agent follow-up task_xxx "测试后补充变更摘要"
 ./agent cancel task_xxx "不再需要"
+
+# 让 Codex/OpenCode 等带非交互 CLI 的 agent 作为 Hub worker
+./agent bridge --adapter codex
+./agent bridge --adapter opencode
+# 自定义适配器见 docs/agent-adapters.md
 ```
 
 远程任务的 Pi JSONL session 保存在执行它的设备上。要查看另一台设备领取的任务，应先
@@ -321,8 +329,16 @@ curl -X POST http://127.0.0.1:8090/v1/hub/tasks \
 | POST | `/v1/hub/runs` | 记录本地/渠道 Run |
 | POST | `/v1/hub/runs/{id}/updates` | 更新 Run |
 | POST | `/v1/hub/artifacts` | 登记 Artifact 元数据 |
+| GET | `/v1/hub/runs` | 列出 Run（Web 仪表盘使用） |
+| GET | `/v1/hub/artifacts` | 列出 Artifact |
+| POST/GET | `/v1/hub/tenants` | 创建/列出租户（admin） |
+| POST | `/v1/hub/tenants/{id}/tokens` | 为租户签发 token |
+| GET | `/v1/hub/tenants/{id}/tokens` | 列出租户 token |
+| POST | `/v1/hub/tokens/{id}/revoke` | 吊销 token |
 | GET | `/.well-known/agent-card.json` | A2A 1.0 Agent Card |
 | POST | `/a2a` | A2A 1.0 JSON-RPC（复用 Hub Bearer token） |
+| POST | `/mcp` | Hub MCP Server（`hub_*` 工具，stdio + HTTP） |
+| GET | `/web` | Web 管理界面（需 `AGENT_HUB_WEB_SECRET`） |
 
 默认存储不变。需要 PostgreSQL 时安装 `.[postgres]`，设置
 `AGENT_HUB_DATABASE_URL=postgresql://...`；既有 SQLite 可用
@@ -363,19 +379,18 @@ Hub 默认只绑定 loopback，且必须设置至少 24 字符的独立 token。
 
 ```bash
 cd deploy/hub
-cp .env.hub.example .env.hub
+cp ../../.env.hub.example .env.hub
 # 生成并写入高熵 AGENT_HUB_TOKEN，然后：
 docker compose up -d --build
 ```
 
-`Caddyfile.example` 给出了反向代理入口。当前单一共享 Bearer token 只适合受控的两节点验证，
-不应当成多租户公网安全边界。正式公网阶段需要逐 Principal/Node 凭证（建议 mTLS 或短期
-OIDC token）、细粒度 capability policy、签名事件、审计保留、密钥轮换，以及每个 Run 的
-容器/VM 隔离。
+`Caddyfile.example` 给出了反向代理入口。多租户 token（租户管理员/租户用户/节点）与吊销、
+OIDC 登录已落地；公网开放前仍需：细粒度 capability policy、签名事件、审计保留、速率限制，
+以及每个 Run 的容器/VM 隔离。
 
 ## 后续实施顺序
 
-1. 增加逐节点身份、任务授权/审批、撤销、配额以及容器/VM Run Sandbox。
+1. 任务授权/审批、配额以及容器/VM Run Sandbox（逐节点 token 与吊销已实现）。
 2. 为 A2A 增加 SSE streaming/push notification，并为 Channel MCP 增加更多适配器能力。
 3. 增加公网 relay/消息总线、多 Hub 联邦和离线同步；微信、Slack、自建通信服务都只实现
    Channel Adapter。
