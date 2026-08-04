@@ -78,7 +78,9 @@ services:
       - caddy-config:/config
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health", "||", "exit", "1"]
+      test:
+        - CMD-SHELL
+        - wget -qO- http://agent-hub:8090/health >/dev/null || exit 1
       interval: 15s
       timeout: 5s
       retries: 3
