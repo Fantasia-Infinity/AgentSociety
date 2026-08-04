@@ -387,12 +387,8 @@ export class BridgeWorker {
           adapter: this.adapter.id,
           ...(typeof resultSessionId === "string" && resultSessionId
             ? { session_id: resultSessionId }
-            : {}),
+          : {}),
         },
-      });
-      await this.hub.updateRun(run.run_id, {
-        status: "completed",
-        result: { adapter: this.adapter.id, text },
       });
       this.output(`Completed ${task.task_id}`);
     } catch (error) {
@@ -408,15 +404,6 @@ export class BridgeWorker {
         });
       } catch (updateError) {
         this.output(`Could not report failure: ${errorMessage(updateError)}`);
-      }
-      try {
-        await this.hub.updateRun(run.run_id, {
-          status: "failed",
-          result: { adapter: this.adapter.id },
-          error: message,
-        });
-      } catch (updateError) {
-        this.output(`Could not fail run: ${errorMessage(updateError)}`);
       }
       throw error;
     }
@@ -516,11 +503,6 @@ export class BridgeWorker {
     message: string,
   ): Promise<void> {
     try {
-      await this.hub.updateRun(runId, {
-        status: "failed",
-        result: { adapter: this.adapter.id },
-        error: message,
-      });
       await this.hub.updateTask(taskId, {
         run_id: runId,
         lease_token: leaseToken,
