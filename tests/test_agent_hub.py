@@ -79,6 +79,25 @@ class AgentHubStoreTests(unittest.TestCase):
             origin="local_ui",
         )
 
+    def test_task_submission_from_dict_treats_null_assignee_as_missing(self) -> None:
+        item = TaskSubmission.from_dict(
+            {
+                "principal_id": "principal-owner",
+                "delegator_actor_id": "actor-owner",
+                "objective": "Run the test suite",
+                "assignee_actor_id": None,
+                "required_capabilities": ["code"],
+                "input": {},
+                "metadata": {},
+            }
+        )
+        self.assertIsNone(item.assignee_actor_id)
+        self.assertIsNone(item.context_id)
+        self.assertIsNone(item.idempotency_key)
+        task, created = self.store.create_task(item)
+        self.assertTrue(created)
+        self.assertIsNone(task["assignee_actor_id"])
+
     def test_task_lifecycle_creates_run_and_events(self) -> None:
         task, created = self.store.create_task(self._submission())
         self.assertTrue(created)

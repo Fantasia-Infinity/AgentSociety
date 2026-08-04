@@ -42,7 +42,10 @@ def required_text(
 def optional_text(
     payload: dict[str, Any], name: str, *, maximum: int = 4096
 ) -> str | None:
-    value = str(payload.get(name, "")).strip()
+    raw = payload.get(name)
+    if raw is None:
+        return None
+    value = str(raw).strip()
     if not value:
         return None
     if len(value) > maximum:
