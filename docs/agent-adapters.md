@@ -73,7 +73,8 @@ AGENT_HUB_ADAPTER_DIR=/path/to/adapters ./agent bridge --adapter my-agent
 - `command`：可执行文件 + 固定参数。
 - `args` / `session.new_args` / `session.resume_args`：追加参数，支持占位符
   `{task_file}`（任务信封路径）、`{prompt}`（任务目标文本）、`{workspace}`、
-  `{session_id}`。
+  `{session_id}`、`{sandbox}`（默认 `workspace-write`，可用环境变量
+  `AGENT_ADAPTER_SANDBOX` 覆盖为 `read-only` 或 `danger-full-access`）。
 - `env`：附加环境变量。
 - `result_mode`：`file` 表示读取信封目录下的 `AGENT_RESULT.json`；
   `stdout_json` 表示解析 stdout JSON（解析失败时把 stdout 当纯文本结果）。
@@ -148,6 +149,60 @@ MCP 客户端配置示例（streamable HTTP）：
   }
 }
 ```
+
+## Codex 接入
+
+Codex 可以同时扮演两种角色，互不冲突：
+
+1. **派发端（MCP 客户端）**：配置 Hub 的 `/mcp` 后，Codex 会话内直接获得
+   `hub_create_task`、`hub_list_tasks`、`hub_get_task`、
+   `hub_get_task_events`、`hub_cancel_task`、`hub_list_actors`、
+   `hub_list_nodes` 工具。
+2. **执行端（Bridge worker）**：`./agent bridge --adapter codex` 持续领取任务，
+   用 `codex exec` 执行；连续会话模式下复用 `codex exec resume <session_id>`。
+
+本机 MCP 配置（全局，之后新开 Codex 会话即可见）：
+
+```bash
+codex mcp add hub --url http://127.0.0.1:8090/mcp \
+  --header "Authorization: Bearer <hub-token>"
+codex mcp list --json        # 确认 hub enabled
+```
+
+配置完成后需要重启 Codex 会话让工具加载；Hub 未运行时工具调用会报连接失败。
+
+执行端示例：
+
+```bash
+AGENT_HUB_URL=http://127.0.0.1:8090 \
+AGENT_HUB_NODE_TOKEN=<node-token> \
+AGENT_WORKER_SESSION_MODE=continuous \
+./agent bridge --adapter codex
+```
+
+内置 `codex` 适配器使用非交互参数：
+
+- `--skip-git-repo-check`：允许在非 Git 目录执行。
+- `--sandbox workspace-write`：允许在 workspace 内写文件；需要更宽松或更严格
+  策略时设置 `AGENT_ADAPTER_SANDBOX`（例如 `danger-full-access`）。
+- `--json`：以 JSONL 事件输出，Bridge 从中提取最终 `agent_message` 文本和
+  session id。
+
+连续会话从 `codex exec --json` 的 `thread.started.thread_id` 事件读取 session
+id；拿不到时按 `~/.codex/sessions/**/*.jsonl` 找最新文件并从
+`rollout-<时间>-<uuid>.jsonl` 文件名中提取 UUID。恢复时参数顺序为
+`codex exec --sandbox ... --skip-git-repo-check resume <session_id> --json <prompt>`
+（`--sandbox` 必须放在 `resume` 子命令之前）。
+
+Codex 执行时使用 `~/.codex/config.toml` 的模型/认证配置（本机当前为
+DeepSeek provider）。想为任务指定不同模型，可以复制内置 manifest 到
+`AGENT_HUB_ADAPTER_DIR` 后在 `args` 里加 `-m <model>` 或
+`-c model="<model>"`。
+
+关于 GUI：`codex exec` 的会话文件写在 `~/.codex/sessions/`，与 Codex 桌面端
+共用同一存储，因此会出现在 Codex 的历史/会话列表中（应用需要重新索引或重启
+后可见），也可以随时用 `codex exec resume <uuid>` 手动恢复。Bridge 只记录
+session id 并在任务间透传，不会伪造上下文。
 
 ## 新增一个适配器
 

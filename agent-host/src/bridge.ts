@@ -28,6 +28,8 @@ import { resolveTaskWorkspace } from "./worker.js";
 const CANCEL_POLL_MS = 2_000;
 const OUTPUT_TAIL_BYTES = 64 * 1024;
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+const SESSION_UUID_RE =
+  /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/iu;
 
 export function renderArgs(
   args: string[],
@@ -66,43 +68,175 @@ export function parseStdoutResult(stdout: string): AdapterResultFile | undefined
   for (const candidate of [trimmed, lastLine(trimmed)]) {
     try {
       const value = JSON.parse(candidate) as unknown;
-      if (isResultFile(value)) return value;
+      if (isExplicitResult(value)) return value;
     } catch {
       // Try the next candidate.
     }
   }
-  return undefined;
+  return parseJsonlResult(stdout);
 }
 
 export function discoverSessionId(cwd: string, glob: string): string | undefined {
   const expanded = glob.startsWith("~/") ? join(homedir(), glob.slice(2)) : glob;
   const patternPath = resolve(cwd, expanded);
-  const directory = dirname(patternPath);
-  const pattern = basename(patternPath);
-  if (!pattern.includes("*") || !existsSync(directory)) return undefined;
+  const [staticPrefix, dynamicPattern] = splitGlob(patternPath);
+  if (!dynamicPattern.includes("*") || !existsSync(staticPrefix)) {
+    return undefined;
+  }
   const matcher = new RegExp(
-    `^${pattern
+    `^${dynamicPattern
       .split("*")
       .map((part) => part.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"))
       .join(".*")}$`,
     "u",
   );
-  const entries = readdirSync(directory)
-    .filter((entry) => matcher.test(entry))
-    .map((entry) => {
+  const found: Array<{ path: string; entry: string; modified: number }> = [];
+  const visit = (directory: string): void => {
+    for (const entry of readdirSync(directory)) {
       const path = join(directory, entry);
       let modified = 0;
       try {
-        modified = statSync(path).mtimeMs;
+        const stats = statSync(path);
+        modified = stats.mtimeMs;
+        if (stats.isDirectory()) {
+          visit(path);
+          continue;
+        }
       } catch {
-        modified = 0;
+        continue;
       }
-      return { entry, modified };
-    })
-    .sort((left, right) => right.modified - left.modified);
-  const newest = entries[0];
+      const relative = path.slice(staticPrefix.length).replace(/^[/\\]+/u, "");
+      if (matcher.test(relative)) found.push({ path, entry: relative, modified });
+    }
+  };
+  visit(staticPrefix);
+  const newest = found.sort((left, right) => right.modified - left.modified)[0];
   if (!newest) return undefined;
-  return newest.entry.replace(/\.jsonl?$/u, "");
+  const base = basename(newest.path).replace(/\.jsonl?$/u, "");
+  const uuid = base.match(SESSION_UUID_RE)?.[1];
+  return uuid ?? base;
+}
+
+function splitGlob(patternPath: string): [string, string] {
+  const marker = patternPath.indexOf("**");
+  if (marker < 0) {
+    return [dirname(patternPath), basename(patternPath)];
+  }
+  const prefix = patternPath.slice(0, marker).replace(/[/\\]+$/u, "");
+  const dynamic = patternPath
+    .slice(marker)
+    .replace(/^[/\\]+/u, "")
+    .replace(/^\*\*\/*/u, "");
+  return [prefix || patternPath, dynamic];
+}
+
+/**
+ * Parse a JSONL event stream (Codex `exec --json` and similar CLIs) into a
+ * result object. The last assistant message becomes `text`; the most recent
+ * session id found in event metadata becomes `session_id`.
+ */
+function parseJsonlResult(stdout: string): AdapterResultFile | undefined {
+  let text: string | undefined;
+  let sessionId: string | undefined;
+  let explicit: AdapterResultFile | undefined;
+  for (const rawLine of stdout.split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    let value: unknown;
+    try {
+      value = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (typeof value !== "object" || value === null) continue;
+    if (isExplicitResult(value)) {
+      explicit = value;
+      continue;
+    }
+    const item = value as Record<string, unknown>;
+    const foundSessionId = findEventSessionId(item);
+    if (foundSessionId) sessionId = foundSessionId;
+    const foundText = findAssistantMessageText(item);
+    if (foundText !== undefined) text = foundText;
+  }
+  if (explicit) return explicit;
+  if (text === undefined && sessionId === undefined) return undefined;
+  return {
+    ...(text !== undefined ? { text } : {}),
+    ...(sessionId ? { session_id: sessionId } : {}),
+  };
+}
+
+function findEventSessionId(item: Record<string, unknown>): string | undefined {
+  const candidates = [
+    item.session_id,
+    item.thread_id,
+    (item.payload as Record<string, unknown> | undefined)?.session_id,
+    (item.payload as Record<string, unknown> | undefined)?.thread_id,
+    (item.payload as Record<string, unknown> | undefined)?.response
+      ? ((item.payload as Record<string, unknown>).response as Record<string, unknown>)
+          ?.session_id
+      : undefined,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return undefined;
+}
+
+function findAssistantMessageText(item: Record<string, unknown>): string | undefined {
+  const payload = item.payload as Record<string, unknown> | undefined;
+  if (item.type === "item.completed") {
+    const completed = item.item as Record<string, unknown> | undefined;
+    if (
+      completed &&
+      typeof completed === "object" &&
+      (completed.type === "agent_message" || completed.type === "message") &&
+      typeof completed.text === "string" &&
+      completed.text.trim()
+    ) {
+      return completed.text.trim();
+    }
+  }
+  if (payload && typeof payload === "object") {
+    if (
+      payload.type === "message" &&
+      (payload.role === "assistant" || payload.role === "agent")
+    ) {
+      const content = payload.content;
+      if (Array.isArray(content)) {
+        const parts: string[] = [];
+        for (const block of content) {
+          if (typeof block !== "object" || block === null) continue;
+          const entry = block as Record<string, unknown>;
+          const blockText = entry.text ?? entry.content;
+          if (typeof blockText === "string" && blockText.trim()) {
+            parts.push(blockText);
+          }
+        }
+        if (parts.length > 0) return parts.join("\n").trim();
+      }
+      if (typeof content === "string" && content.trim()) {
+        return content.trim();
+      }
+    }
+    if (typeof payload.message === "string" && payload.message.trim()) {
+      return payload.message.trim();
+    }
+  }
+  if (typeof item.text === "string" && item.text.trim()) {
+    return item.text.trim();
+  }
+  const rawItem = item.item;
+  if (rawItem !== null && typeof rawItem === "object") {
+    const nested = rawItem as Record<string, unknown>;
+    if (typeof nested.text === "string" && nested.text.trim()) {
+      return nested.text.trim();
+    }
+  }
+  return undefined;
 }
 
 export class BridgeWorker {
@@ -200,6 +334,8 @@ export class BridgeWorker {
       prompt: task.objective,
       workspace: cwd,
       session_id: sessionId ?? "",
+      sandbox:
+        process.env.AGENT_ADAPTER_SANDBOX?.trim() || "workspace-write",
     };
     const args =
       sessionId && this.adapter.session?.resume_args
@@ -579,6 +715,12 @@ function isResultFile(value: unknown): value is AdapterResultFile {
     return false;
   }
   return true;
+}
+
+function isExplicitResult(value: unknown): value is AdapterResultFile {
+  if (typeof value !== "object" || value === null) return false;
+  const status = (value as Record<string, unknown>).status;
+  return status === "completed" || status === "failed";
 }
 
 function errorMessage(error: unknown): string {

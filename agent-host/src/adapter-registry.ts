@@ -9,6 +9,7 @@ const KNOWN_PLACEHOLDERS = new Set([
   "prompt",
   "workspace",
   "session_id",
+  "sandbox",
 ]);
 
 export function builtinAdaptersDir(): string {

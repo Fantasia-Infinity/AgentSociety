@@ -166,8 +166,19 @@ test("renderArgs substitutes known placeholders", () => {
       prompt: "hello",
       task_file: "/tmp/task.json",
       workspace: "/tmp",
+      sandbox: "workspace-write",
     }),
     ["--session", "ses-1", "hello"],
+  );
+  assert.deepEqual(
+    renderArgs(["--sandbox", "{sandbox}", "{prompt}"], {
+      session_id: "",
+      prompt: "hello",
+      task_file: "/tmp/task.json",
+      workspace: "/tmp",
+      sandbox: "read-only",
+    }),
+    ["--sandbox", "read-only", "hello"],
   );
 });
 
@@ -197,6 +208,16 @@ test("validateAdapterManifest accepts a valid manifest and rejects bad ones", ()
         result_mode: "stdout_json",
       }),
     /Unknown placeholder/,
+  );
+  assert.doesNotThrow(() =>
+    validateAdapterManifest({
+      id: "sample",
+      display_name: "Sample",
+      capabilities: [],
+      command: ["sample"],
+      args: ["--sandbox", "{sandbox}"],
+      result_mode: "stdout_json",
+    }),
   );
   assert.throws(
     () =>
@@ -258,6 +279,30 @@ test("parseStdoutResult parses JSON and falls back to text", () => {
   assert.equal(parseStdoutResult("plain text"), undefined);
 });
 
+test("parseStdoutResult extracts Codex JSONL events", () => {
+  const stdout = [
+    '{"type":"thread.started","thread_id":"019fcc11-c175-7540-ad53-41b9cae47e62"}',
+    '{"type":"turn.started"}',
+    '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"bridge-ok-1"}}',
+    '{"type":"turn.completed","usage":{"output_tokens":39}}',
+  ].join("\n");
+  assert.deepEqual(parseStdoutResult(stdout), {
+    text: "bridge-ok-1",
+    session_id: "019fcc11-c175-7540-ad53-41b9cae47e62",
+  });
+});
+
+test("parseStdoutResult extracts session metadata from desktop session events", () => {
+  const stdout = [
+    '{"type":"session_meta","payload":{"session_id":"019fc96b-01c5-7e50-ab12-3ca4b711bbfc"}}',
+    '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"final answer"}]}}',
+  ].join("\n");
+  assert.deepEqual(parseStdoutResult(stdout), {
+    text: "final answer",
+    session_id: "019fc96b-01c5-7e50-ab12-3ca4b711bbfc",
+  });
+});
+
 test("adapter session registry keeps, resets, and rotates sessions", () => {
   const workspace = temporaryDirectory();
   const registry = new AdapterSessionRegistry(join(workspace, ".sessions"));
@@ -293,6 +338,21 @@ test("discoverSessionId finds the newest session file", () => {
   assert.equal(
     discoverSessionId(workspace, ".opencode/sessions/*.jsonl"),
     "ses_new",
+  );
+});
+
+test("discoverSessionId extracts UUID from nested rollout session files", () => {
+  const workspace = temporaryDirectory();
+  const directory = join(workspace, "sessions", "2026", "08", "03");
+  mkdirSync(directory, { recursive: true });
+  const path = join(
+    directory,
+    "rollout-2026-08-03T22-57-41-019fc96b-01c5-7e50-ab12-3ca4b711bbfc.jsonl",
+  );
+  writeFileSync(path, "{}");
+  assert.equal(
+    discoverSessionId(workspace, "sessions/**/*.jsonl"),
+    "019fc96b-01c5-7e50-ab12-3ca4b711bbfc",
   );
 });
 

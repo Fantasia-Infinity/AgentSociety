@@ -3,16 +3,36 @@
   "display_name": "Codex CLI",
   "capabilities": ["code"],
   "command": ["codex", "exec"],
-  "args": ["--json", "{prompt}"],
+  "args": [
+    "--skip-git-repo-check",
+    "--sandbox",
+    "{sandbox}",
+    "--json",
+    "{prompt}"
+  ],
   "env": {},
   "result_mode": "stdout_json",
   "timeout_seconds": 3600,
   "cancel_grace_seconds": 10,
   "session": {
     "resume": true,
-    "new_args": ["--json", "{prompt}"],
-    "resume_args": ["resume", "{session_id}", "--json", "{prompt}"],
+    "new_args": [
+      "--skip-git-repo-check",
+      "--sandbox",
+      "{sandbox}",
+      "--json",
+      "{prompt}"
+    ],
+    "resume_args": [
+      "--skip-git-repo-check",
+      "--sandbox",
+      "{sandbox}",
+      "resume",
+      "{session_id}",
+      "--json",
+      "{prompt}"
+    ],
     "result_field": "session_id",
-    "discovery_glob": "~/.codex/sessions/*.jsonl"
+    "discovery_glob": "~/.codex/sessions/**/*.jsonl"
   }
 }
