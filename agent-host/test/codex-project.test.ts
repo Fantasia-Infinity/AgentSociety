@@ -237,3 +237,31 @@ test("markCodexSessionVisible is skipped when disabled", () => {
   assert.equal(markCodexSessionVisible(sid), false);
   assert.match(readFileSync(sessionPath, "utf8"), /"source":"exec"/);
 });
+
+test("markCodexSessionVisible picks the newest threads database across versions", () => {
+  const home = temporaryHome();
+  process.env.CODEX_HOME = home;
+  process.env.AGENT_HUB_CODEX_PROJECT_SPAWN = "0";
+  const sid = "019fcc2c-7a47-7612-9c3a-a2404d5957ab";
+  const older = new DatabaseSync(join(home, "state_5.sqlite"));
+  older.exec("CREATE TABLE other (id TEXT)");
+  older.close();
+  const newer = new DatabaseSync(join(home, "state_7.sqlite"));
+  newer.exec(
+    "CREATE TABLE threads (id TEXT PRIMARY KEY, source TEXT NOT NULL)",
+  );
+  newer
+    .prepare("INSERT INTO threads (id, source) VALUES (?, ?)")
+    .run(sid, "exec");
+  newer.close();
+
+  assert.equal(markCodexSessionVisible(sid), true);
+  const check = new DatabaseSync(join(home, "state_7.sqlite"), {
+    readOnly: true,
+  });
+  const row = check
+    .prepare("SELECT source FROM threads WHERE id = ?")
+    .get(sid) as Record<string, unknown> | undefined;
+  assert.equal(row?.source, "cli");
+  check.close();
+});

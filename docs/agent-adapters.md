@@ -223,8 +223,9 @@ Bridge 在每个 exec 会话结束后会做两步可见性处理：
 
 1. 把会话文件 `session_meta.source` 从 `exec` 重写为 `cli`（仅改首行，保留
    其余内容）；
-2. 同步更新 `~/.codex/state_5.sqlite` 的 `threads.source`（首次修改前用
-   `VACUUM INTO` 生成 `state_5.sqlite.agenthub-bak` 备份）。
+2. 同步更新 Codex 桌面端线程库（自动探测 `~/.codex/state_*.sqlite` 中最新的
+   含 `threads` 表的文件）的 `threads.source`（首次修改前用 `VACUUM INTO`
+   生成 `<库名>.agenthub-bak` 备份）。
 
 配合前面的项目注册与 thread 关联，重启 Codex 后这些会话会显示在 `AgentHub`
 项目下。这是对 Codex 内部数据的 best-effort 适配：文件或数据库不可写时静默

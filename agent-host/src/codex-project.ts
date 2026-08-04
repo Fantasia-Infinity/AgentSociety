@@ -224,9 +224,8 @@ function rewriteSessionSource(
 }
 
 function updateThreadSource(threadId: string, source: string): boolean {
-  const home = process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
-  const path = join(home, "state_5.sqlite");
-  if (!existsSync(path)) return false;
+  const path = threadDbPath();
+  if (!path || !existsSync(path)) return false;
   backupThreadDb(path);
   try {
     const db = new DatabaseSync(path, { timeout: 2_000 });
@@ -243,6 +242,47 @@ function updateThreadSource(threadId: string, source: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Locate the desktop app's threads database. The app names it with a schema
+ * version (`state_5.sqlite` today); prefer the newest `state_*.sqlite` that
+ * actually has a `threads` table so app upgrades keep working.
+ */
+function threadDbPath(): string | undefined {
+  const home = process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
+  let entries: string[] = [];
+  try {
+    entries = readdirSync(home);
+  } catch {
+    return undefined;
+  }
+  const candidates = entries
+    .filter((entry) => /^state_(\d+)\.sqlite$/u.test(entry))
+    .map((entry) => {
+      const version = Number(entry.match(/^state_(\d+)\.sqlite$/u)?.[1]);
+      return { path: join(home, entry), version };
+    })
+    .sort((left, right) => right.version - left.version)
+    .map((entry) => entry.path);
+  for (const path of candidates) {
+    try {
+      const db = new DatabaseSync(path, { readOnly: true });
+      try {
+        const row = db
+          .prepare(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='threads'",
+          )
+          .get();
+        if (row) return path;
+      } finally {
+        db.close();
+      }
+    } catch {
+      // Try the next candidate.
+    }
+  }
+  return candidates[0];
 }
 
 function backupThreadDb(path: string): void {
