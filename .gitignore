@@ -1,5 +1,7 @@
 .env
 .venv/
+.hub-venv/
+*.egg-info/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -27,6 +29,7 @@ agent-host/.setup-complete
 .local/
 gateway-logs/
 worker-logs/
+*.log
 deploy/hub/certs/
 
 
