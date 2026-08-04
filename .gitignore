@@ -36,3 +36,4 @@ deploy/hub/certs/
 !.env.gateway.example
 !.env.hub.example
 !deploy/hub/.env.hub.example
+.agenthub/
