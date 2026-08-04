@@ -78,11 +78,11 @@ case "$command" in
     doctor|sessions)
         exec npm --prefix "$agent_host" run "$command"
         ;;
-    register|once|observe|attach)
+    register|once|observe|attach|bridge)
         exec npm --prefix "$agent_host" run start -- "$command" "$@"
         ;;
     *)
-        echo "Usage: ./agent [setup|tui|local|worker|doctor|sessions|register|once|observe ID|attach ID]" >&2
+        echo "Usage: ./agent [setup|tui|local|worker|bridge --adapter ID|doctor|sessions|register|once|observe ID|attach ID]" >&2
         exit 2
         ;;
 esac

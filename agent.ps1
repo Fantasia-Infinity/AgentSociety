@@ -43,12 +43,12 @@ switch ($Command) {
     }
     "worker" { & $NpmCommand --prefix $AgentHost run worker; break }
     { $_ -in "doctor", "sessions" } { & $NpmCommand --prefix $AgentHost run $Command; break }
-    { $_ -in "register", "once", "observe", "attach" } {
+    { $_ -in "register", "once", "observe", "attach", "bridge" } {
         & $NpmCommand --prefix $AgentHost run start -- $Command @Rest
         break
     }
     default {
-        throw "Usage: .\\agent.ps1 [setup|tui|local|worker|doctor|sessions|register|once|observe ID|attach ID]"
+        throw "Usage: .\\agent.ps1 [setup|tui|local|worker|bridge --adapter ID|doctor|sessions|register|once|observe ID|attach ID]"
     }
 }
 exit $LASTEXITCODE

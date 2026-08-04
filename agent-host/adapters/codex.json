@@ -1,0 +1,18 @@
+{
+  "id": "codex",
+  "display_name": "Codex CLI",
+  "capabilities": ["code"],
+  "command": ["codex", "exec"],
+  "args": ["--json", "{prompt}"],
+  "env": {},
+  "result_mode": "stdout_json",
+  "timeout_seconds": 3600,
+  "cancel_grace_seconds": 10,
+  "session": {
+    "resume": true,
+    "new_args": ["--json", "{prompt}"],
+    "resume_args": ["resume", "{session_id}", "--json", "{prompt}"],
+    "result_field": "session_id",
+    "discovery_glob": "~/.codex/sessions/*.jsonl"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "id": "generic",
+  "display_name": "Generic Shell",
+  "capabilities": [],
+  "command": ["bash", "-lc"],
+  "args": ["echo \"$AGENT_HUB_OBJECTIVE\""],
+  "env": {},
+  "result_mode": "stdout_json",
+  "timeout_seconds": 3600,
+  "cancel_grace_seconds": 10
+}

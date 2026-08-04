@@ -74,6 +74,19 @@ export interface HubRun {
   error: string | null;
 }
 
+export interface HubArtifact {
+  artifact_id: string;
+  task_id: string | null;
+  run_id: string | null;
+  name: string;
+  media_type: string;
+  uri: string;
+  sha256: string | null;
+  size_bytes: number | null;
+  created_by_actor_id: string;
+  metadata: Record<string, unknown>;
+}
+
 export interface HubTaskEvent {
   seq: number;
   event_id: string;

@@ -121,6 +121,16 @@ export NODE_EXTRA_CA_CERTS=/path/to/certs/ca.pem
 
 macOS/Windows/Linux 后台服务也要在启动环境里设置 `NODE_EXTRA_CA_CERTS`。
 
+## 5.1 MCP 接入（外部 Agent 派发任务）
+
+Hub 内置 MCP Server：`POST /mcp`（streamable HTTP）与 `agent-hub-mcp`
+（stdio）。Bearer token 与 `/v1/hub/*` 相同，租户 token 自动隔离租户数据。
+Codex/OpenCode/Claude 等 MCP 客户端配置
+`"url": "https://<VPS>/mcp"` + `Authorization` 头即可获得
+`hub_create_task`、`hub_list_tasks`、`hub_get_task`、`hub_get_task_events`、
+`hub_cancel_task` 等工具。默认开启，`AGENT_HUB_ENABLE_MCP=false` 可关闭。
+详见 `docs/agent-adapters.md`。
+
 ## 6. 多租户与租户自带 worker
 
 ### 创建租户

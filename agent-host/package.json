@@ -19,7 +19,8 @@
     "tui": "node dist/src/cli.js tui",
     "sessions": "node dist/src/cli.js sessions",
     "doctor": "node dist/src/cli.js doctor",
-    "worker": "node dist/src/cli.js worker"
+    "worker": "node dist/src/cli.js worker",
+    "bridge": "node dist/src/cli.js bridge"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.83.0",

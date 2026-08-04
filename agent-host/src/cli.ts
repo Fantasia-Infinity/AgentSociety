@@ -3,11 +3,17 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { listAdapterIds, loadAdapterManifest } from "./adapter-registry.js";
+import { BridgeWorker } from "./bridge.js";
 import { loadConfig, loadSessionDir } from "./config.js";
 import { controlTask } from "./controller.js";
 import { runDoctor } from "./doctor.js";
 import { HubClient } from "./hub-client.js";
-import { registerHost } from "./host.js";
+import {
+  registerAdapterHost,
+  registerHost,
+  resolveAdapterIdentity,
+} from "./host.js";
 import { runInteractive, runInteractiveChild } from "./interactive.js";
 import { observeRun } from "./observer.js";
 import { PiAgentEngine } from "./pi-engine.js";
@@ -62,6 +68,7 @@ async function main(): Promise<void> {
 
   const hubCommands = new Set([
     "register",
+    "bridge",
     "observe",
     "attach",
     "steer",
@@ -76,10 +83,66 @@ async function main(): Promise<void> {
       `The ${command} command requires Hub configuration. Run ./agent setup to add one.`,
     );
   }
-  if (hub) await registerHost(config, hub);
+  if (hub && command !== "bridge") await registerHost(config, hub);
 
   if (command === "register") {
     console.log(`Registered ${config.actorId} on ${config.nodeId}`);
+    return;
+  }
+  if (command === "bridge") {
+    const bridgeArgs = process.argv.slice(3);
+    const adapterId =
+      adapterArgument(bridgeArgs) || process.env.AGENT_HUB_ADAPTER?.trim();
+    if (!adapterId) {
+      throw new Error(
+        "bridge requires --adapter <id> (or AGENT_HUB_ADAPTER). Available adapters: " +
+          (process.env.AGENT_HUB_ADAPTER_DIR
+            ? `${adapterList(process.env.AGENT_HUB_ADAPTER_DIR)} / builtin`
+            : adapterList()),
+      );
+    }
+    const adapter = loadAdapterManifest(
+      adapterId,
+      process.env.AGENT_HUB_ADAPTER_DIR,
+    );
+    const bridgeConfig = resolveAdapterIdentity(config, adapter);
+    await registerAdapterHost(bridgeConfig, hub!, adapter);
+    const workerHub = new HubClient(
+      bridgeConfig.hubUrl!,
+      bridgeConfig.hubNodeToken ?? bridgeConfig.hubToken!,
+    );
+    const runOnce = bridgeArgs.includes("--once");
+    if (runOnce) {
+      const worker = new BridgeWorker(bridgeConfig, workerHub, adapter);
+      try {
+        const worked = await worker.runOnce();
+        console.log(worked ? "Processed one task" : "No matching task");
+      } finally {
+        await worker.dispose();
+      }
+      return;
+    }
+    const controller = new AbortController();
+    const stop = () => controller.abort();
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+    const workers = Array.from(
+      { length: bridgeConfig.workerConcurrency },
+      (_, index) =>
+        new BridgeWorker(
+          bridgeConfig,
+          workerHub,
+          adapter,
+          (message) =>
+            index === 0
+              ? console.log(message)
+              : console.log(`[bridge ${index + 1}] ${message}`),
+          index,
+        ),
+    );
+    await Promise.all(
+      workers.map((current) => current.runForever(controller.signal)),
+    );
     return;
   }
   if (command === "doctor") {
@@ -176,3 +239,22 @@ main().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
 });
+
+function adapterArgument(argv: string[]): string | undefined {
+  for (const arg of argv) {
+    if (arg.startsWith("--adapter=")) {
+      const value = arg.slice("--adapter=".length).trim();
+      if (value) return value;
+    }
+  }
+  const index = argv.indexOf("--adapter");
+  if (index >= 0) {
+    const value = argv[index + 1]?.trim();
+    if (value) return value;
+  }
+  return undefined;
+}
+
+function adapterList(extraDir?: string): string {
+  return listAdapterIds(extraDir).join(", ");
+}

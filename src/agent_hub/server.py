@@ -15,6 +15,7 @@ from .api import AgentHubApi
 from .a2a import A2AApi
 from .config import HubSettings
 from .domain import AuthTokenCreation, TaskSubmission, TenantRegistration
+from .mcp import MCP_PROTOCOL_VERSION, McpService
 from .store import AgentHubStore
 from .object_store import build_object_store
 from .web import (
@@ -49,10 +50,12 @@ class HubHttpServer(ThreadingHTTPServer):
         web_secret: str | None = None,
         web_cookie_secure: bool = True,
         oidc_provider: OIDCIdentityProvider | None = None,
+        enable_mcp: bool = True,
     ) -> None:
         super().__init__(address, HubRequestHandler)
         self.api = api
         self.a2a = A2AApi(api.store)
+        self.mcp = McpService(api) if enable_mcp else None
         self.api_token = api_token
         self.public_url = public_url.rstrip("/") if public_url else None
         self.web = WebSession(web_secret) if web_secret is not None else None
@@ -70,6 +73,12 @@ class HubRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/health":
             self._send_json(HTTPStatus.OK, {"status": "ok"})
+            return
+        if parsed.path == "/mcp":
+            if self.server.mcp is None:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "mcp_disabled"})
+            else:
+                self._send_mcp_endpoint()
             return
         if parsed.path == "/.well-known/agent-card.json":
             self._send_json(
@@ -99,6 +108,29 @@ class HubRequestHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if self.server.web is not None and parsed.path.startswith("/web"):
             self._web_post(parsed.path)
+            return
+        if parsed.path == "/mcp":
+            if self.server.mcp is None:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "mcp_disabled"})
+                return
+            context = self._authorized()
+            if context is None:
+                return
+            try:
+                payload = self._read_json()
+                response = self.server.mcp.handle_message(payload, context)
+            except (json.JSONDecodeError, ValueError) as exc:
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32700, "message": str(exc)},
+                }
+            if response is None:
+                self.send_response(HTTPStatus.ACCEPTED)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            else:
+                self._send_mcp_json(response)
             return
         if parsed.path == "/a2a":
             context = self._authorized()
@@ -637,6 +669,25 @@ class HubRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_mcp_json(self, payload: dict[str, Any]) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("MCP-Protocol-Version", MCP_PROTOCOL_VERSION)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_mcp_endpoint(self) -> None:
+        body = f"event: endpoint\ndata: /mcp\n\n".encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _base_url(self) -> str:
         if self.server.public_url:
             return self.server.public_url
@@ -685,6 +736,7 @@ def main() -> None:
         settings.web_secret,
         settings.web_cookie_secure,
         oidc_provider,
+        settings.enable_mcp,
     )
     logger.info(
         "agent_hub_started host=%s port=%s storage=%s",
