@@ -36,3 +36,5 @@ deploy/hub/certs/
 !.env.gateway.example
 !.env.hub.example
 .agenthub/
+
+.DS_Store
