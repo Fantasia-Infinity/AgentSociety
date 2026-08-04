@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -11,6 +12,7 @@ import { join } from "node:path";
 import { afterEach, test } from "node:test";
 
 import {
+  agentHubProjectDir,
   agentHubProjectId,
   ensureAgentHubProject,
   registerAgentHubThread,
@@ -30,6 +32,8 @@ afterEach(() => {
   }
   delete process.env.AGENT_HUB_CODEX_PROJECT;
   delete process.env.AGENT_HUB_CODEX_PROJECT_NAME;
+  delete process.env.AGENT_HUB_CODEX_PROJECT_DIR;
+  delete process.env.AGENT_HUB_CODEX_PROJECT_SPAWN;
 });
 
 function temporaryHome(): string {
@@ -52,9 +56,10 @@ function readState(home: string): Record<string, unknown> {
   ) as Record<string, unknown>;
 }
 
-test("ensureAgentHubProject adds the project idempotently without losing state", () => {
+test("ensureAgentHubProject adds a fallback project idempotently without losing state", () => {
   const home = temporaryHome();
   process.env.CODEX_HOME = home;
+  process.env.AGENT_HUB_CODEX_PROJECT_SPAWN = "0";
   const otherId = "c5beb5fa-dcb8-483b-9522-0da7bb5ae116";
   writeState(home, {
     "local-projects": {
@@ -78,15 +83,18 @@ test("ensureAgentHubProject adds the project idempotently without losing state",
     "electron-persisted-atom-state": { kept: true },
   });
 
-  const workspace = join(home, "workspace");
-  assert.equal(ensureAgentHubProject(workspace), true);
-  assert.equal(ensureAgentHubProject(workspace), true);
+  const workspace = join(home, "extra-workspace");
+  assert.equal(ensureAgentHubProject(workspace), agentHubProjectId());
+  assert.equal(ensureAgentHubProject(workspace), agentHubProjectId());
 
   const state = readState(home);
   const projects = state["local-projects"] as Record<string, unknown>;
   const project = projects[agentHubProjectId()] as Record<string, unknown>;
   assert.equal(project.name, "AgentHub");
-  assert.deepEqual(project.rootPaths, [workspace]);
+  assert.deepEqual(
+    project.rootPaths,
+    [agentHubProjectDir(), workspace].sort(),
+  );
   assert.ok(
     (state["project-order"] as string[]).includes(agentHubProjectId()),
   );
@@ -95,28 +103,36 @@ test("ensureAgentHubProject adds the project idempotently without losing state",
     "agentsociety",
   );
   assert.equal(
-    (
-      (state["electron-persisted-atom-state"] as Record<string, unknown>)
-        .kept
-    ),
+    (state["electron-persisted-atom-state"] as Record<string, unknown>).kept,
     true,
   );
+  assert.ok(existsSync(agentHubProjectDir()));
 });
 
-test("registerAgentHubThread associates a thread with the AgentHub project", () => {
+test("ensureAgentHubProject reuses an app-created project for the same root", () => {
   const home = temporaryHome();
   process.env.CODEX_HOME = home;
+  process.env.AGENT_HUB_CODEX_PROJECT_SPAWN = "0";
+  const appProjectId = "f99d3694-1f1c-45a6-80f8-2a270d5fa3fd";
   writeState(home, {
-    "local-projects": {},
-    "project-order": [],
+    "local-projects": {
+      [appProjectId]: {
+        id: appProjectId,
+        name: "AgentHub",
+        rootPaths: [agentHubProjectDir()],
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    },
+    "project-order": [appProjectId],
     "thread-project-assignments": {},
   });
 
-  const workspace = join(home, "workspace");
+  assert.equal(ensureAgentHubProject(), appProjectId);
   assert.equal(
     registerAgentHubThread(
-      "019fcc11-c175-7540-ad53-41b9cae47e62",
-      workspace,
+      "019fcc2c-7a47-7612-9c3a-a2404d5957ab",
+      agentHubProjectDir(),
     ),
     true,
   );
@@ -124,23 +140,29 @@ test("registerAgentHubThread associates a thread with the AgentHub project", () 
   const assignments = state[
     "thread-project-assignments"
   ] as Record<string, unknown>;
-  assert.deepEqual(
-    assignments["019fcc11-c175-7540-ad53-41b9cae47e62"],
-    {
-      projectKind: "local",
-      projectId: agentHubProjectId(),
-      cwd: workspace,
-      pendingCoreUpdate: false,
-    },
+  assert.deepEqual(assignments["019fcc2c-7a47-7612-9c3a-a2404d5957ab"], {
+    projectKind: "local",
+    projectId: appProjectId,
+    cwd: agentHubProjectDir(),
+    pendingCoreUpdate: false,
+  });
+  assert.equal(
+    agentHubProjectId() in (state["local-projects"] as Record<string, unknown>),
+    false,
   );
 });
 
 test("registration is skipped when disabled or state file is missing", () => {
   const home = temporaryHome();
   process.env.CODEX_HOME = home;
+  process.env.AGENT_HUB_CODEX_PROJECT_SPAWN = "0";
   process.env.AGENT_HUB_CODEX_PROJECT = "0";
-  assert.equal(ensureAgentHubProject(home), false);
+  assert.equal(ensureAgentHubProject(home), undefined);
   assert.equal(registerAgentHubThread("thread-1", home), false);
   delete process.env.AGENT_HUB_CODEX_PROJECT;
-  assert.equal(ensureAgentHubProject(home), false);
+  assert.equal(ensureAgentHubProject(home), undefined);
+  assert.equal(
+    existsSync(join(home, ".codex-global-state.json")),
+    false,
+  );
 });

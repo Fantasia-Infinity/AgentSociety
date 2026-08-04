@@ -204,16 +204,24 @@ DeepSeek provider）。想为任务指定不同模型，可以复制内置 manif
 session id 并在任务间透传，不会伪造上下文。
 
 默认情况下，Bridge 每次运行都会幂等地在 Codex 桌面端注册一个统一项目
-`AgentHub`（`~/.codex/.codex-global-state.json` 的 `local-projects` +
-`thread-project-assignments`），并把每次 exec 会话的 thread id 关联进去。
-这样通过 Hub 执行的 Codex 会话在 GUI 重启后统一显示在 `AgentHub` 项目下，
-即使 workspace 是临时目录。相关环境变量：
+`AgentHub`：先确保 `~/.agenthub/AgentHub` 目录存在，若该目录还没有被注册为
+项目，就调用 `codex app ~/.agenthub/AgentHub` 让桌面端自己注册（应用创建的
+项目才会跨重启持久保存）；应用不可用时降级为直接合并
+`~/.codex/.codex-global-state.json`。每次 exec 会话完成后还会把 thread id
+关联到该项目（best-effort）。未显式设置 `AGENT_WORKSPACE_ROOT` 时，codex
+bridge 默认以 `~/.agenthub/AgentHub` 作为工作区。相关环境变量：
 
 - `AGENT_HUB_CODEX_PROJECT`：默认 `1`；设为 `0` 关闭自动注册。
 - `AGENT_HUB_CODEX_PROJECT_NAME`：项目显示名，默认 `AgentHub`。
+- `AGENT_HUB_CODEX_PROJECT_DIR`：统一工作区目录，默认
+  `~/.agenthub/AgentHub`。
+- `AGENT_HUB_CODEX_PROJECT_SPAWN`：默认 `1`；设为 `0` 禁止 bridge 调用
+  `codex app` 拉起桌面端（例如无人值守场景）。
 
-注册是对桌面端状态文件的 best-effort 合并（保留其他字段、原子替换），状态
-文件缺失或格式异常时静默跳过，不影响任务执行。
+已知限制：当前 Codex 桌面端不会在侧边栏展示 `source=exec` 的 CLI 会话（线程
+库已经索引，但 UI 过滤掉了），所以 `AgentHub` 项目本身会出现在 GUI 里，会话
+仍需用 `codex exec resume <uuid>` 在 CLI 恢复。项目注册和 thread 关联数据
+仍然写入，便于未来版本或其它界面使用。
 
 ## 新增一个适配器
 

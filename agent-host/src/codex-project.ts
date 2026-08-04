@@ -1,7 +1,9 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   readFileSync,
   renameSync,
   statSync,
@@ -20,10 +22,21 @@ interface CodexGlobalState {
 }
 
 /**
- * Stable project id for the unified "AgentHub" Codex project. The desktop app
- * stores projects in `.codex-global-state.json` under `local-projects` keyed by
- * a UUID; deriving it deterministically keeps the id stable across machines
- * and restarts without extra state files.
+ * Stable directory for Hub-executed Codex sessions. Registering this folder as
+ * a project through `codex app` makes the Codex desktop app own the project, so
+ * it persists across restarts (external edits to the app state are overwritten
+ * when the app exits).
+ */
+export function agentHubProjectDir(): string {
+  return resolve(
+    process.env.AGENT_HUB_CODEX_PROJECT_DIR?.trim() ||
+      join(homedir(), ".agenthub", "AgentHub"),
+  );
+}
+
+/**
+ * Deterministic fallback project id used only when the desktop app is
+ * unavailable and we merge the project into the state file ourselves.
  */
 export function agentHubProjectId(): string {
   const digest = createHash("sha256")
@@ -44,31 +57,110 @@ export function codexGlobalStatePath(): string {
 }
 
 /**
- * Register (or refresh) the AgentHub project in the Codex desktop app state so
- * sessions executed through the Hub are grouped under one project. Best effort:
- * returns false and never throws when the app state is missing or malformed.
+ * Make sure the AgentHub project exists in the Codex desktop app and return its
+ * project id. Preferred path: `codex app <dir>` lets the app itself register the
+ * folder (persists across restarts). If that is unavailable (headless, no app
+ * state, spawn disabled), falls back to a best-effort direct merge.
  */
-export function ensureAgentHubProject(workspaceRoot: string): boolean {
+export function ensureAgentHubProject(
+  workspaceRoot?: string,
+): string | undefined {
+  if (process.env.AGENT_HUB_CODEX_PROJECT?.trim() === "0") return undefined;
+  const dir = agentHubProjectDir();
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch {
+    // Continue; the project may already be registered.
+  }
+  let state = readGlobalState();
+  const existing = state ? findProjectForRoot(state, dir) : undefined;
+  let projectId = existing;
+  if (!projectId && process.env.AGENT_HUB_CODEX_PROJECT_SPAWN !== "0") {
+    try {
+      spawnSync("codex", ["app", dir], {
+        stdio: "ignore",
+        timeout: 20_000,
+      });
+    } catch {
+      // Fall back to the direct merge below.
+    }
+    for (let attempt = 0; attempt < 10 && !projectId; attempt += 1) {
+      state = readGlobalState();
+      projectId = state ? findProjectForRoot(state, dir) : undefined;
+      if (!projectId) {
+        // The app registers asynchronously; wait briefly between polls.
+        Atomics.wait(
+          new Int32Array(new SharedArrayBuffer(4)),
+          0,
+          0,
+          300,
+        );
+      }
+    }
+  }
+  if (!projectId) {
+    projectId = mergeProjectIntoState(state ?? {});
+  }
+  if (projectId && workspaceRoot && workspaceRoot !== dir) {
+    mergeRootIntoProject(projectId, workspaceRoot);
+  }
+  return projectId;
+}
+
+/**
+ * Associate one Codex thread (for example a codex exec session created by the
+ * bridge) with the AgentHub project. The desktop GUI currently hides exec-source
+ * sessions, but the assignment keeps the data consistent and is picked up if a
+ * future app version surfaces them.
+ */
+export function registerAgentHubThread(threadId: string, cwd: string): boolean {
   if (process.env.AGENT_HUB_CODEX_PROJECT?.trim() === "0") return false;
+  if (!threadId.trim()) return false;
+  const projectId = ensureAgentHubProject(cwd);
+  if (!projectId) return false;
   const state = readGlobalState();
   if (!state) return false;
+  const assignments = (state["thread-project-assignments"] ??= {});
+  assignments[threadId.trim()] = {
+    projectKind: "local",
+    projectId,
+    cwd: resolve(cwd),
+    pendingCoreUpdate: false,
+  };
+  return writeGlobalState(state);
+}
+
+function findProjectForRoot(
+  state: CodexGlobalState,
+  root: string,
+): string | undefined {
+  const projects = state["local-projects"];
+  if (!projects) return undefined;
+  for (const [id, raw] of Object.entries(projects)) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const rootPaths = (raw as Record<string, unknown>).rootPaths;
+    if (
+      Array.isArray(rootPaths) &&
+      rootPaths.some(
+        (entry) => typeof entry === "string" && resolve(entry) === root,
+      )
+    ) {
+      return id;
+    }
+  }
+  return undefined;
+}
+
+function mergeProjectIntoState(state: CodexGlobalState): string | undefined {
   const projectId = agentHubProjectId();
   const now = Date.now();
   const projects = (state["local-projects"] ??= {});
-  const existing = projects[projectId] as Record<string, unknown> | undefined;
-  const rootPaths = new Set<string>(
-    Array.isArray(existing?.rootPaths)
-      ? (existing.rootPaths as unknown[]).filter(
-          (entry): entry is string => typeof entry === "string",
-        )
-      : [],
-  );
-  rootPaths.add(resolve(workspaceRoot));
   projects[projectId] = {
     id: projectId,
-    name: process.env.AGENT_HUB_CODEX_PROJECT_NAME?.trim() || DEFAULT_PROJECT_NAME,
-    rootPaths: [...rootPaths],
-    createdAt: existing?.createdAt ?? now,
+    name:
+      process.env.AGENT_HUB_CODEX_PROJECT_NAME?.trim() || DEFAULT_PROJECT_NAME,
+    rootPaths: [agentHubProjectDir()],
+    createdAt: now,
     updatedAt: now,
   };
   const order = state["project-order"];
@@ -77,28 +169,30 @@ export function ensureAgentHubProject(workspaceRoot: string): boolean {
   } else if (!order.includes(projectId)) {
     order.push(projectId);
   }
-  return writeGlobalState(state);
+  return writeGlobalState(state) ? projectId : undefined;
 }
 
-/**
- * Associate one Codex thread (for example a codex exec session created by the
- * bridge) with the AgentHub project so the desktop sidebar shows it there.
- */
-export function registerAgentHubThread(threadId: string, cwd: string): boolean {
-  if (process.env.AGENT_HUB_CODEX_PROJECT?.trim() === "0") return false;
-  if (!threadId.trim()) return false;
-  const resolved = resolve(cwd);
-  if (!ensureAgentHubProject(resolved)) return false;
+function mergeRootIntoProject(projectId: string, root: string): boolean {
   const state = readGlobalState();
   if (!state) return false;
-  const assignments = (state["thread-project-assignments"] ??= {});
-  assignments[threadId.trim()] = {
-    projectKind: "local",
-    projectId: agentHubProjectId(),
-    cwd: resolved,
-    pendingCoreUpdate: false,
-  };
-  return writeGlobalState(state);
+  const raw = state["local-projects"]?.[projectId];
+  if (typeof raw !== "object" || raw === null) return false;
+  const project = raw as Record<string, unknown>;
+  const rootPaths = Array.isArray(project.rootPaths)
+    ? [...(project.rootPaths as unknown[])]
+    : [];
+  const resolved = resolve(root);
+  if (
+    !rootPaths.some(
+      (entry) => typeof entry === "string" && resolve(entry) === resolved,
+    )
+  ) {
+    rootPaths.push(resolved);
+    project.rootPaths = rootPaths;
+    project.updatedAt = Date.now();
+    return writeGlobalState(state);
+  }
+  return false;
 }
 
 function readGlobalState(): CodexGlobalState | undefined {
@@ -118,6 +212,7 @@ function readGlobalState(): CodexGlobalState | undefined {
 function writeGlobalState(state: CodexGlobalState): boolean {
   try {
     const path = codexGlobalStatePath();
+    if (!existsSync(path)) return false;
     const mode = statSync(path).mode & 0o777;
     const temporary = join(
       dirname(path),

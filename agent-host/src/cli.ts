@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { listAdapterIds, loadAdapterManifest } from "./adapter-registry.js";
 import { BridgeWorker } from "./bridge.js";
+import { agentHubProjectDir } from "./codex-project.js";
 import { loadConfig, loadSessionDir } from "./config.js";
 import { controlTask } from "./controller.js";
 import { runDoctor } from "./doctor.js";
@@ -105,7 +106,16 @@ async function main(): Promise<void> {
       adapterId,
       process.env.AGENT_HUB_ADAPTER_DIR,
     );
-    const bridgeConfig = resolveAdapterIdentity(config, adapter);
+    let bridgeConfig = resolveAdapterIdentity(config, adapter);
+    if (
+      adapter.id === "codex" &&
+      !process.env.AGENT_WORKSPACE_ROOT?.trim()
+    ) {
+      // Hub Codex sessions default to the unified AgentHub workspace so they
+      // live inside the registered project directory. Set
+      // AGENT_WORKSPACE_ROOT explicitly to use another workspace.
+      bridgeConfig = { ...bridgeConfig, workspaceRoot: agentHubProjectDir() };
+    }
     await registerAdapterHost(bridgeConfig, hub!, adapter);
     const workerHub = new HubClient(
       bridgeConfig.hubUrl!,
