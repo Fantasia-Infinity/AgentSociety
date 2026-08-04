@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote
 
 from .api import AgentHubApi
 from .auth import AuthenticatedContext
-from .domain import ActorRegistration, PrincipalRegistration, TaskSubmission
+from .domain import ActorRegistration, PrincipalRegistration
+from .errors import ApiError
 
 
 MCP_PROTOCOL_VERSION = "2025-06-18"
@@ -159,52 +161,55 @@ class McpService:
             return self._tool_error(-32602, "name and arguments object are required")
         try:
             if name == "hub_list_actors":
-                return self._tool_result(
-                    {"actors": self.api.store.list_actors(tenant_id=self._tenant(context, arguments))}
+                _, result = self.api.get(
+                    "/v1/hub/actors",
+                    f"tenant_id={quote(self._tenant(context, arguments))}",
+                    context,
                 )
+                return self._tool_result({"actors": result["actors"]})
             if name == "hub_list_nodes":
-                return self._tool_result(
-                    {"nodes": self.api.store.list_nodes(tenant_id=self._tenant(context, arguments))}
+                _, result = self.api.get(
+                    "/v1/hub/nodes",
+                    f"tenant_id={quote(self._tenant(context, arguments))}",
+                    context,
                 )
+                return self._tool_result({"nodes": result["nodes"]})
             if name == "hub_list_tasks":
                 status = arguments.get("status")
                 status = status if isinstance(status, str) and status else None
                 limit = arguments.get("limit", 100)
                 limit = limit if isinstance(limit, int) else 100
-                return self._tool_result(
-                    {
-                        "tasks": self.api.store.list_tasks(
-                            status=status,
-                            limit=limit,
-                            tenant_id=self._tenant(context, arguments),
-                        )
-                    }
-                )
+                query = [
+                    f"limit={limit}",
+                    f"tenant_id={quote(self._tenant(context, arguments))}",
+                ]
+                if status:
+                    query.append(f"status={quote(status)}")
+                _, result = self.api.get("/v1/hub/tasks", "&".join(query), context)
+                return self._tool_result({"tasks": result["tasks"]})
             if name == "hub_get_task":
                 task_id = self._required(arguments, "task_id")
-                return self._tool_result(
-                    {
-                        "task": self.api.store.get_task(
-                            task_id, tenant_id=self._tenant(context, arguments)
-                        )
-                    }
+                _, result = self.api.get(
+                    f"/v1/hub/tasks/{quote(task_id, safe='')}",
+                    f"tenant_id={quote(self._tenant(context, arguments))}",
+                    context,
                 )
+                return self._tool_result({"task": result["task"]})
             if name == "hub_get_task_events":
                 task_id = self._required(arguments, "task_id")
                 after_seq = arguments.get("after_seq", 0)
                 after_seq = after_seq if isinstance(after_seq, int) else 0
                 limit = arguments.get("limit", 500)
                 limit = limit if isinstance(limit, int) else 500
-                return self._tool_result(
-                    {
-                        "events": self.api.store.list_task_events(
-                            task_id,
-                            after_seq=after_seq,
-                            limit=limit,
-                            tenant_id=self._tenant(context, arguments),
-                        )
-                    }
+                _, result = self.api.get(
+                    f"/v1/hub/tasks/{quote(task_id, safe='')}/events",
+                    (
+                        f"after_seq={after_seq}&limit={limit}"
+                        f"&tenant_id={quote(self._tenant(context, arguments))}"
+                    ),
+                    context,
                 )
+                return self._tool_result({"events": result["events"]})
             if name == "hub_create_task":
                 return self._tool_result(
                     {"task": self._create_task(arguments, context)}
@@ -214,7 +219,7 @@ class McpService:
                     {"task": self._cancel_task(arguments, context)}
                 )
             return self._tool_error(-32601, f"Unknown tool: {name}")
-        except (LookupError, PermissionError, ValueError) as exc:
+        except (ApiError, ValueError) as exc:
             return self._tool_error(-32602, str(exc))
 
     def _create_task(
@@ -228,10 +233,9 @@ class McpService:
         payload.setdefault("principal_id", MCP_PRINCIPAL_ID)
         payload.setdefault("delegator_actor_id", MCP_ACTOR_ID)
         payload.setdefault("origin", "mcp")
-        task, _ = self.api.store.create_task(
-            TaskSubmission.from_dict(payload), tenant_id=tenant_id
-        )
-        return task
+        payload.setdefault("tenant_id", tenant_id)
+        _, response = self.api.post("/v1/hub/tasks", payload, context)
+        return response["task"]
 
     def _cancel_task(
         self,
@@ -240,12 +244,16 @@ class McpService:
     ) -> dict[str, Any]:
         tenant_id = self._tenant(context, arguments)
         self._ensure_identity(tenant_id)
-        return self.api.store.cancel_task(
-            self._required(arguments, "task_id"),
-            actor_id=arguments.get("actor_id") or MCP_ACTOR_ID,
-            reason=arguments.get("reason"),
-            tenant_id=tenant_id,
+        _, response = self.api.post(
+            f"/v1/hub/tasks/{quote(self._required(arguments, 'task_id'), safe='')}/cancel",
+            {
+                "actor_id": arguments.get("actor_id") or MCP_ACTOR_ID,
+                "reason": arguments.get("reason"),
+                "tenant_id": tenant_id,
+            },
+            context,
         )
+        return response["task"]
 
     def _tenant(
         self,
@@ -260,16 +268,13 @@ class McpService:
     def _ensure_identity(self, tenant_id: str) -> None:
         if tenant_id in self._identity_tenants:
             return
-        self.api.store.register_principal(
+        self.api.register_gateway_identity(
             PrincipalRegistration(
                 principal_id=MCP_PRINCIPAL_ID,
                 kind="service",
                 display_name="MCP clients",
                 metadata={"protocol": "mcp"},
             ),
-            tenant_id=tenant_id,
-        )
-        self.api.store.register_actor(
             ActorRegistration(
                 actor_id=MCP_ACTOR_ID,
                 principal_id=MCP_PRINCIPAL_ID,

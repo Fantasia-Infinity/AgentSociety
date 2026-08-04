@@ -15,6 +15,7 @@ from agent_hub.domain import (
     TaskSubmission,
     TenantRegistration,
 )
+from agent_hub.errors import ApiError
 from agent_hub.store import AgentHubStore
 
 
@@ -258,9 +259,9 @@ class MultiTenantApiTests(unittest.TestCase):
         other_tenant = AuthenticatedContext(
             role="tenant_user", tenant_id="tenant-b"
         )
-        with self.assertRaises(LookupError):
+        with self.assertRaises(ApiError):
             self.api.get(f"/v1/hub/tasks/{task_id}", "", other_tenant)
-        with self.assertRaises(PermissionError):
+        with self.assertRaises(ApiError):
             self.api.post("/v1/hub/tenants", {"tenant_id": "x"}, tenant_context)
 
 

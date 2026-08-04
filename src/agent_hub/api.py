@@ -22,6 +22,7 @@ from .domain import (
     optional_text,
     required_text,
 )
+from .errors import ApiError, map_error
 from .store import AgentHubStore
 from .object_store import ObjectStore
 
@@ -47,7 +48,58 @@ class AgentHubApi:
         query_string: str,
         context: AuthenticatedContext | None = None,
     ) -> tuple[HTTPStatus, dict[str, Any]] | None:
+        try:
+            return self._get(path, query_string, context)
+        except ApiError:
+            raise
+        except (LookupError, PermissionError, ValueError) as exc:
+            raise map_error(exc) from exc
+
+    def post(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        context: AuthenticatedContext | None = None,
+    ) -> tuple[HTTPStatus, dict[str, Any]] | None:
+        try:
+            return self._post(path, payload, context)
+        except ApiError:
+            raise
+        except (LookupError, PermissionError, ValueError) as exc:
+            raise map_error(exc) from exc
+
+    def authenticate(self, raw_token: str) -> AuthenticatedContext | None:
+        """Resolve a bearer token into a context (the only token entry point)."""
+
+        return self.store.authenticate_token(raw_token)
+
+    def register_gateway_identity(
+        self,
+        principal: PrincipalRegistration,
+        actor: ActorRegistration,
+        *,
+        tenant_id: str = "default",
+    ) -> None:
+        """Idempotently register a protocol gateway identity (MCP/A2A).
+
+        Gateway identities are trusted service accounts created by the protocol
+        adapters, so they bypass the tenant-manager role requirement.
+        """
+
+        self.store.register_principal(principal, tenant_id=tenant_id)
+        self.store.register_actor(actor, tenant_id=tenant_id)
+
+    def _get(
+        self,
+        path: str,
+        query_string: str,
+        context: AuthenticatedContext | None = None,
+    ) -> tuple[HTTPStatus, dict[str, Any]] | None:
         tenant_id = self._tenant_scope(context)
+        if context is not None and context.is_admin:
+            requested = (parse_qs(query_string).get("tenant_id") or [None])[0]
+            if requested:
+                tenant_id = requested
         if path == self.prefix:
             return HTTPStatus.OK, {
                 "status": "ok",
@@ -87,6 +139,28 @@ class AgentHubApi:
                     status=status, limit=limit, tenant_id=tenant_id
                 )
             }
+        if path == f"{self.prefix}/runs":
+            query = parse_qs(query_string)
+            try:
+                limit = int((query.get("limit") or ["100"])[0])
+            except ValueError as exc:
+                raise ValueError("limit must be an integer") from exc
+            return HTTPStatus.OK, {
+                "runs": self.store.list_runs(
+                    limit=limit, tenant_id=tenant_id
+                )
+            }
+        if path == f"{self.prefix}/artifacts":
+            query = parse_qs(query_string)
+            try:
+                limit = int((query.get("limit") or ["100"])[0])
+            except ValueError as exc:
+                raise ValueError("limit must be an integer") from exc
+            return HTTPStatus.OK, {
+                "artifacts": self.store.list_artifacts(
+                    limit=limit, tenant_id=tenant_id
+                )
+            }
 
         parts = self._parts(path)
         if len(parts) == 2 and parts[0] == "tenants":
@@ -94,6 +168,13 @@ class AgentHubApi:
                 if parts[1] != (context.tenant_id or "default"):
                     raise PermissionError("cannot access another tenant")
             return HTTPStatus.OK, {"tenant": self.store.get_tenant(parts[1])}
+        if len(parts) == 3 and parts[0] == "tenants" and parts[2] == "tokens":
+            if context is not None and not context.is_admin:
+                if parts[1] != (context.tenant_id or "default"):
+                    raise PermissionError("cannot access another tenant")
+            return HTTPStatus.OK, {
+                "tokens": self.store.list_auth_tokens(tenant_id=parts[1])
+            }
         if len(parts) == 2 and parts[0] == "tasks":
             return HTTPStatus.OK, {
                 "task": self.store.get_task(parts[1], tenant_id=tenant_id)
@@ -119,7 +200,7 @@ class AgentHubApi:
             }
         return None
 
-    def post(
+    def _post(
         self,
         path: str,
         payload: dict[str, Any],

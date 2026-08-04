@@ -8,13 +8,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from .auth import AuthenticatedContext, OIDCIdentityProvider
 from .api import AgentHubApi
 from .a2a import A2AApi
 from .config import HubSettings
-from .domain import AuthTokenCreation, TaskSubmission, TenantRegistration
+from .errors import ApiError, map_error
 from .mcp import MCP_PROTOCOL_VERSION, McpService
 from .store import AgentHubStore
 from .object_store import build_object_store
@@ -54,7 +54,7 @@ class HubHttpServer(ThreadingHTTPServer):
     ) -> None:
         super().__init__(address, HubRequestHandler)
         self.api = api
-        self.a2a = A2AApi(api.store)
+        self.a2a = A2AApi(api)
         self.mcp = McpService(api) if enable_mcp else None
         self.api_token = api_token
         self.public_url = public_url.rstrip("/") if public_url else None
@@ -96,7 +96,7 @@ class HubRequestHandler(BaseHTTPRequestHandler):
             return
         try:
             response = self.server.api.get(parsed.path, parsed.query, context)
-        except (LookupError, PermissionError, ValueError) as exc:
+        except ApiError as exc:
             self._send_api_error(exc)
             return
         if response is None:
@@ -174,7 +174,7 @@ class HubRequestHandler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json()
             response = self.server.api.post(parsed.path, payload, context)
-        except (json.JSONDecodeError, LookupError, PermissionError, ValueError) as exc:
+        except (json.JSONDecodeError, ApiError) as exc:
             self._send_api_error(exc)
             return
         if response is None:
@@ -192,7 +192,7 @@ class HubRequestHandler(BaseHTTPRequestHandler):
             return AuthenticatedContext(role="admin")
         if supplied.startswith("Bearer "):
             raw = supplied[len("Bearer ") :].strip()
-            context = self.server.api.store.authenticate_token(raw)
+            context = self.server.api.authenticate(raw)
             if context is not None:
                 return context
             if self.server.oidc_provider is not None:
@@ -214,116 +214,140 @@ class HubRequestHandler(BaseHTTPRequestHandler):
             self._redirect("/web/login")
             return
         session_id, claims = session
-        tenant_id = (
-            None
-            if claims.get("role") == "admin"
-            else claims.get("tenant_id") or "default"
-        )
+        context = AuthenticatedContext.from_dict(claims)
+        is_admin = context.is_admin
         if path in ("/web", "/web/"):
+            _, base = self.server.api.get("/v1/hub", "", context)
+            stats = dict(base)
+            stats.pop("status", None)
+            _, tasks = self.server.api.get(
+                "/v1/hub/tasks", "limit=20", context
+            )
+            _, runs = self.server.api.get("/v1/hub/runs", "limit=10", context)
             self._send_html(
                 HTTPStatus.OK,
                 dashboard_page(
-                    self.server.api.store.stats(tenant_id=tenant_id),
-                    self.server.api.store.list_tasks(
-                        limit=20, tenant_id=tenant_id
-                    ),
-                    self.server.api.store.list_runs(limit=10, tenant_id=tenant_id),
+                    stats,
+                    tasks["tasks"],
+                    runs["runs"],
                 ),
             )
             return
         if path == "/web/tasks":
             query = parse_qs(query_string)
             status = (query.get("status") or [None])[0]
+            params = "limit=200"
+            if status:
+                params += f"&status={quote(status)}"
+            _, tasks = self.server.api.get("/v1/hub/tasks", params, context)
+            _, principals = self.server.api.get(
+                "/v1/hub/principals", "", context
+            )
+            _, actors = self.server.api.get("/v1/hub/actors", "", context)
             self._send_html(
                 HTTPStatus.OK,
                 tasks_page(
-                    self.server.api.store.list_tasks(
-                        status=status, limit=200, tenant_id=tenant_id
-                    ),
+                    tasks["tasks"],
                     status_filter=status,
-                    principals=self.server.api.store.list_principals(
-                        tenant_id=tenant_id
-                    ),
-                    actors=self.server.api.store.list_actors(tenant_id=tenant_id),
+                    principals=principals["principals"],
+                    actors=actors["actors"],
                     csrf=self.server.web.csrf(session_id),
                 ),
             )
             return
         if path == "/web/runs":
+            _, runs = self.server.api.get("/v1/hub/runs", "limit=200", context)
             self._send_html(
                 HTTPStatus.OK,
-                runs_page(
-                    self.server.api.store.list_runs(
-                        limit=200, tenant_id=tenant_id
-                    )
-                ),
+                runs_page(runs["runs"]),
             )
             return
         if path == "/web/artifacts":
+            _, artifacts = self.server.api.get(
+                "/v1/hub/artifacts", "limit=200", context
+            )
             self._send_html(
                 HTTPStatus.OK,
-                artifacts_page(
-                    self.server.api.store.list_artifacts(
-                        limit=200, tenant_id=tenant_id
-                    )
-                ),
+                artifacts_page(artifacts["artifacts"]),
             )
             return
         if path == "/web/nodes":
+            _, principals = self.server.api.get(
+                "/v1/hub/principals", "", context
+            )
+            _, actors = self.server.api.get("/v1/hub/actors", "", context)
+            _, nodes = self.server.api.get("/v1/hub/nodes", "", context)
             self._send_html(
                 HTTPStatus.OK,
                 nodes_page(
-                    self.server.api.store.list_principals(tenant_id=tenant_id),
-                    self.server.api.store.list_actors(tenant_id=tenant_id),
-                    self.server.api.store.list_nodes(tenant_id=tenant_id),
+                    principals["principals"],
+                    actors["actors"],
+                    nodes["nodes"],
                 ),
             )
             return
         if path == "/web/tenants":
-            if claims.get("role") == "admin":
+            if is_admin:
+                _, tenants = self.server.api.get(
+                    "/v1/hub/tenants", "", context
+                )
                 self._send_html(
                     HTTPStatus.OK,
                     tenants_page(
-                        self.server.api.store.list_tenants(),
+                        tenants["tenants"],
                         csrf=self.server.web.csrf(session_id),
                     ),
                 )
             else:
-                self._redirect(f"/web/tenants/{tenant_id or 'default'}")
+                self._redirect(
+                    f"/web/tenants/{context.tenant_id or 'default'}"
+                )
             return
         parts = [part for part in path.split("/") if part]
         if len(parts) == 3 and parts[0] == "web" and parts[1] == "tenants":
             requested_tenant = parts[2]
-            if claims.get("role") != "admin" and requested_tenant != tenant_id:
+            if (
+                not is_admin
+                and requested_tenant != (context.tenant_id or "default")
+            ):
                 self._send_html(HTTPStatus.FORBIDDEN, not_found_page())
                 return
             try:
-                tenant = self.server.api.store.get_tenant(requested_tenant)
-                tokens = self.server.api.store.list_auth_tokens(
-                    tenant_id=requested_tenant
+                _, tenant = self.server.api.get(
+                    f"/v1/hub/tenants/{quote(requested_tenant, safe='')}",
+                    "",
+                    context,
                 )
-                principals = self.server.api.store.list_principals(
-                    tenant_id=requested_tenant
+                _, tokens = self.server.api.get(
+                    f"/v1/hub/tenants/{quote(requested_tenant, safe='')}/tokens",
+                    "",
+                    context,
                 )
-                actors = self.server.api.store.list_actors(
-                    tenant_id=requested_tenant
+                tenant_scope = (
+                    f"tenant_id={quote(requested_tenant)}" if is_admin else ""
                 )
-                nodes = self.server.api.store.list_nodes(
-                    tenant_id=requested_tenant
+                _, principals = self.server.api.get(
+                    "/v1/hub/principals", tenant_scope, context
                 )
-            except LookupError:
-                self._send_html(HTTPStatus.NOT_FOUND, not_found_page())
+                _, actors = self.server.api.get(
+                    "/v1/hub/actors", tenant_scope, context
+                )
+                _, nodes = self.server.api.get(
+                    "/v1/hub/nodes", tenant_scope, context
+                )
+            except ApiError as exc:
+                self._send_html(exc.status, not_found_page())
                 return
             query = parse_qs(query_string)
             created_raw = (query.get("created") or [None])[0]
             self._send_html(
                 HTTPStatus.OK,
                 tenant_detail_page(
-                    tenant,
-                    tokens=tokens,
-                    principals=principals,
-                    actors=actors,
-                    nodes=nodes,
+                    tenant["tenant"],
+                    tokens=tokens["tokens"],
+                    principals=principals["principals"],
+                    actors=actors["actors"],
+                    nodes=nodes["nodes"],
                     csrf=self.server.web.csrf(session_id),
                     created_raw_token=created_raw,
                 ),
@@ -332,27 +356,30 @@ class HubRequestHandler(BaseHTTPRequestHandler):
         if len(parts) == 3 and parts[0] == "web" and parts[1] == "tasks":
             task_id = parts[2]
             try:
-                task = self.server.api.store.get_task(
-                    task_id, tenant_id=tenant_id
+                _, task = self.server.api.get(
+                    f"/v1/hub/tasks/{quote(task_id, safe='')}", "", context
                 )
-                events = self.server.api.store.list_task_events(
-                    task_id, limit=500, tenant_id=tenant_id
+                _, events = self.server.api.get(
+                    f"/v1/hub/tasks/{quote(task_id, safe='')}/events",
+                    "limit=500",
+                    context,
+                )
+                _, runs = self.server.api.get(
+                    "/v1/hub/runs", "limit=500", context
                 )
                 runs = [
                     run
-                    for run in self.server.api.store.list_runs(
-                        limit=500, tenant_id=tenant_id
-                    )
+                    for run in runs["runs"]
                     if run["task_id"] == task_id
                 ]
-            except LookupError:
-                self._send_html(HTTPStatus.NOT_FOUND, not_found_page())
+            except ApiError as exc:
+                self._send_html(exc.status, not_found_page())
                 return
             self._send_html(
                 HTTPStatus.OK,
                 task_detail_page(
-                    task,
-                    events=events,
+                    task["task"],
+                    events=events["events"],
                     runs=runs,
                     csrf=self.server.web.csrf(session_id),
                 ),
@@ -367,7 +394,7 @@ class HubRequestHandler(BaseHTTPRequestHandler):
             if hmac.compare_digest(supplied, self.server.api_token):
                 _, cookie = self.server.web.create({"role": "admin"})
             else:
-                context = self.server.api.store.authenticate_token(supplied)
+                context = self.server.api.authenticate(supplied)
                 if (
                     context is None
                     and self.server.oidc_provider is not None
@@ -404,7 +431,9 @@ class HubRequestHandler(BaseHTTPRequestHandler):
             self._redirect("/web/login")
             return
         session_id, claims = session
-        tenant_id = claims.get("tenant_id") or "default"
+        context = AuthenticatedContext.from_dict(claims)
+        is_admin = context.is_admin
+        tenant_id = context.tenant_id or "default"
         csrf = (form.get("csrf_token") or [""])[0]
         if not hmac.compare_digest(csrf, self.server.web.csrf(session_id)):
             self._send_html(
@@ -435,43 +464,44 @@ class HubRequestHandler(BaseHTTPRequestHandler):
                     for item in (form.get("required_capabilities") or [""])[0].split(",")
                     if item.strip()
                 ]
-                submission = TaskSubmission.from_dict(
-                    {
-                        "principal_id": (form.get("principal_id") or [""])[0],
-                        "delegator_actor_id": (
-                            form.get("delegator_actor_id") or [""]
-                        )[0],
-                        "objective": (form.get("objective") or [""])[0],
-                        "assignee_actor_id": (
-                            form.get("assignee_actor_id") or [""]
-                        )[0]
-                        or None,
-                        "required_capabilities": capabilities,
-                        "input": parsed_input,
-                        "idempotency_key": (form.get("idempotency_key") or [""])[0]
-                        or None,
-                        "origin": "web_ui",
-                    }
+                payload = {
+                    "principal_id": (form.get("principal_id") or [""])[0],
+                    "delegator_actor_id": (
+                        form.get("delegator_actor_id") or [""]
+                    )[0],
+                    "objective": (form.get("objective") or [""])[0],
+                    "assignee_actor_id": (
+                        form.get("assignee_actor_id") or [""]
+                    )[0]
+                    or None,
+                    "required_capabilities": capabilities,
+                    "input": parsed_input,
+                    "idempotency_key": (form.get("idempotency_key") or [""])[0]
+                    or None,
+                    "origin": "web_ui",
+                }
+                _, created = self.server.api.post(
+                    "/v1/hub/tasks", payload, context
                 )
-                task, _ = self.server.api.store.create_task(
-                    submission, tenant_id=tenant_id
+                task = created["task"]
+            except (ApiError, ValueError, json.JSONDecodeError) as exc:
+                error = exc if isinstance(exc, ApiError) else map_error(exc)
+                _, tasks = self.server.api.get(
+                    "/v1/hub/tasks", "limit=200", context
                 )
-            except (ValueError, LookupError, json.JSONDecodeError) as exc:
+                _, principals = self.server.api.get(
+                    "/v1/hub/principals", "", context
+                )
+                _, actors = self.server.api.get("/v1/hub/actors", "", context)
                 self._send_html(
-                    HTTPStatus.BAD_REQUEST,
+                    error.status,
                     tasks_page(
-                        self.server.api.store.list_tasks(
-                            limit=200, tenant_id=tenant_id
-                        ),
+                        tasks["tasks"],
                         status_filter=None,
-                        principals=self.server.api.store.list_principals(
-                            tenant_id=tenant_id
-                        ),
-                        actors=self.server.api.store.list_actors(
-                            tenant_id=tenant_id
-                        ),
+                        principals=principals["principals"],
+                        actors=actors["actors"],
                         csrf=self.server.web.csrf(session_id),
-                        error=str(exc),
+                        error=error.message,
                     ),
                 )
                 return
@@ -480,25 +510,29 @@ class HubRequestHandler(BaseHTTPRequestHandler):
 
         parts = [part for part in path.split("/") if part]
         if parts == ["web", "tenants", "create"]:
-            if claims.get("role") != "admin":
+            if not is_admin:
                 self._send_html(HTTPStatus.FORBIDDEN, not_found_page())
                 return
             try:
-                tenant = self.server.api.store.create_tenant(
-                    TenantRegistration.from_dict(
-                        {
-                            "tenant_id": (form.get("tenant_id") or [""])[0],
-                            "display_name": (form.get("display_name") or [""])[0],
-                        }
-                    )
+                _, created = self.server.api.post(
+                    "/v1/hub/tenants",
+                    {
+                        "tenant_id": (form.get("tenant_id") or [""])[0],
+                        "display_name": (form.get("display_name") or [""])[0],
+                    },
+                    context,
                 )
-            except (ValueError, LookupError) as exc:
+                tenant = created["tenant"]
+            except ApiError as exc:
+                _, tenants = self.server.api.get(
+                    "/v1/hub/tenants", "", context
+                )
                 self._send_html(
-                    HTTPStatus.BAD_REQUEST,
+                    exc.status,
                     tenants_page(
-                        self.server.api.store.list_tenants(),
+                        tenants["tenants"],
                         csrf=self.server.web.csrf(session_id),
-                        error=str(exc),
+                        error=exc.message,
                     ),
                 )
                 return
@@ -512,42 +546,37 @@ class HubRequestHandler(BaseHTTPRequestHandler):
             and parts[4] == "create"
         ):
             requested_tenant = parts[2]
-            if claims.get("role") != "admin":
-                if claims.get("role") != "tenant_admin" or requested_tenant != tenant_id:
+            if not is_admin:
+                if context.role != "tenant_admin" or requested_tenant != tenant_id:
                     self._send_html(HTTPStatus.FORBIDDEN, not_found_page())
                     return
             try:
-                item = AuthTokenCreation.from_dict(
+                _, created = self.server.api.post(
+                    f"/v1/hub/tenants/{quote(requested_tenant, safe='')}/tokens",
                     {
-                        "tenant_id": requested_tenant,
                         "role": (form.get("role") or [""])[0],
                         "principal_id": (form.get("principal_id") or [""])[0] or None,
                         "actor_id": (form.get("actor_id") or [""])[0] or None,
                         "node_id": (form.get("node_id") or [""])[0] or None,
                         "label": (form.get("label") or [""])[0],
-                    }
+                    },
+                    context,
                 )
-                raw, _ = self.server.api.store.create_auth_token(item)
-            except (ValueError, LookupError, PermissionError) as exc:
-                tenant = self.server.api.store.get_tenant(requested_tenant)
+                raw = created["raw_token"]
+            except ApiError as exc:
+                data = self._web_tenant_detail_data(
+                    context, requested_tenant, is_admin
+                )
                 self._send_html(
-                    HTTPStatus.BAD_REQUEST,
+                    exc.status,
                     tenant_detail_page(
-                        tenant,
-                        tokens=self.server.api.store.list_auth_tokens(
-                            tenant_id=requested_tenant
-                        ),
-                        principals=self.server.api.store.list_principals(
-                            tenant_id=requested_tenant
-                        ),
-                        actors=self.server.api.store.list_actors(
-                            tenant_id=requested_tenant
-                        ),
-                        nodes=self.server.api.store.list_nodes(
-                            tenant_id=requested_tenant
-                        ),
+                        data["tenant"],
+                        tokens=data["tokens"],
+                        principals=data["principals"],
+                        actors=data["actors"],
+                        nodes=data["nodes"],
                         csrf=self.server.web.csrf(session_id),
-                        error=str(exc),
+                        error=exc.message,
                     ),
                 )
                 return
@@ -562,17 +591,17 @@ class HubRequestHandler(BaseHTTPRequestHandler):
             and parts[3] == "revoke"
         ):
             try:
-                record = self.server.api.store.revoke_auth_token(
-                    parts[2],
-                    tenant_id=None
-                    if claims.get("role") == "admin"
-                    else tenant_id,
+                _, revoked = self.server.api.post(
+                    f"/v1/hub/tokens/{quote(parts[2], safe='')}/revoke",
+                    {},
+                    context,
                 )
-            except (LookupError, PermissionError) as exc:
+                record = revoked["token"]
+            except ApiError as exc:
                 self._send_html(
-                    HTTPStatus.BAD_REQUEST,
-                    "<!doctype html><h1>400</h1>"
-                    f"<p>{escape(str(exc))}</p>",
+                    exc.status,
+                    "<!doctype html><h1>{}</h1>"
+                    "<p>{}</p>".format(exc.status.value, escape(exc.message)),
                 )
                 return
             self._redirect(f"/web/tenants/{record['tenant_id']}")
@@ -585,22 +614,54 @@ class HubRequestHandler(BaseHTTPRequestHandler):
         ):
             task_id = parts[2]
             try:
-                self.server.api.store.cancel_task(
-                    task_id,
-                    actor_id=(form.get("actor_id") or [""])[0],
-                    reason=(form.get("reason") or [""])[0] or None,
-                    tenant_id=tenant_id,
+                self.server.api.post(
+                    f"/v1/hub/tasks/{quote(task_id, safe='')}/cancel",
+                    {
+                        "actor_id": (form.get("actor_id") or [""])[0],
+                        "reason": (form.get("reason") or [""])[0] or None,
+                    },
+                    context,
                 )
-            except (ValueError, LookupError) as exc:
+            except ApiError as exc:
                 self._send_html(
-                    HTTPStatus.BAD_REQUEST,
-                    "<!doctype html><h1>400</h1>"
-                    f"<p>{escape(str(exc))}</p>",
+                    exc.status,
+                    "<!doctype html><h1>{}</h1>"
+                    "<p>{}</p>".format(exc.status.value, escape(exc.message)),
                 )
                 return
             self._redirect(f"/web/tasks/{task_id}")
             return
         self._send_html(HTTPStatus.NOT_FOUND, not_found_page())
+
+    def _web_tenant_detail_data(
+        self,
+        context: AuthenticatedContext,
+        requested_tenant: str,
+        is_admin: bool,
+    ) -> dict[str, Any]:
+        _, tenant = self.server.api.get(
+            f"/v1/hub/tenants/{quote(requested_tenant, safe='')}",
+            "",
+            context,
+        )
+        _, tokens = self.server.api.get(
+            f"/v1/hub/tenants/{quote(requested_tenant, safe='')}/tokens",
+            "",
+            context,
+        )
+        scope = f"tenant_id={quote(requested_tenant)}" if is_admin else ""
+        _, principals = self.server.api.get(
+            "/v1/hub/principals", scope, context
+        )
+        _, actors = self.server.api.get("/v1/hub/actors", scope, context)
+        _, nodes = self.server.api.get("/v1/hub/nodes", scope, context)
+        return {
+            "tenant": tenant["tenant"],
+            "tokens": tokens["tokens"],
+            "principals": principals["principals"],
+            "actors": actors["actors"],
+            "nodes": nodes["nodes"],
+        }
 
     def _web_session(self) -> tuple[str, dict[str, Any]] | None:
         raw = self.headers.get("Cookie", "")
@@ -698,13 +759,8 @@ class HubRequestHandler(BaseHTTPRequestHandler):
         return f"http://{host}"
 
     def _send_api_error(self, error: Exception) -> None:
-        if isinstance(error, LookupError):
-            status = HTTPStatus.NOT_FOUND
-        elif isinstance(error, PermissionError):
-            status = HTTPStatus.CONFLICT
-        else:
-            status = HTTPStatus.BAD_REQUEST
-        self._send_json(status, {"error": str(error)})
+        api_error = error if isinstance(error, ApiError) else map_error(error)
+        self._send_json(api_error.status, {"error": api_error.message})
 
 
 def main() -> None:

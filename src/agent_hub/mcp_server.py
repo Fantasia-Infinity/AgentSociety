@@ -6,7 +6,7 @@ import sys
 from typing import Any
 
 from .api import AgentHubApi
-from .auth import AuthenticatedContext
+from .auth import trusted_local_context
 from .config import HubSettings
 from .mcp import McpService
 from .object_store import build_object_store
@@ -28,7 +28,7 @@ def main() -> None:
     store = AgentHubStore(settings.database_url or settings.state_db)
     api = AgentHubApi(store, build_object_store(settings.object_store_url))
     service = McpService(api)
-    context = AuthenticatedContext(role="admin")
+    context = trusted_local_context()
     try:
         for raw_line in sys.stdin:
             line = raw_line.strip()

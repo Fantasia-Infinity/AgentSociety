@@ -25,6 +25,26 @@ class AuthenticatedContext:
             "node_id": self.node_id,
         }
 
+    @classmethod
+    def from_dict(cls, claims: dict[str, Any]) -> "AuthenticatedContext":
+        return cls(
+            role=str(claims.get("role") or "admin"),
+            tenant_id=claims.get("tenant_id"),
+            principal_id=claims.get("principal_id"),
+            actor_id=claims.get("actor_id"),
+            node_id=claims.get("node_id"),
+        )
+
+
+def trusted_local_context() -> AuthenticatedContext:
+    """Admin context for trusted local processes (stdio MCP).
+
+    This is intentionally not a bearer-token flow: the process is launched by
+    the local operator and already controls the machine.
+    """
+
+    return AuthenticatedContext(role="admin")
+
 
 class OIDCIdentityProvider(Protocol):
     """Validates an OIDC ID token and maps it to an AgentSociety identity."""

@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from http import HTTPStatus
 import json
 import uuid
 from typing import Any
+from urllib.parse import quote
 
+from .api import AgentHubApi
 from .domain import (
-    ActorRegistration,
-    PrincipalRegistration,
     TaskStatus,
-    TaskSubmission,
 )
-from .store import AgentHubStore
+from .errors import ApiError
 
 
 A2A_VERSION = "1.0"
@@ -27,8 +27,8 @@ class A2AApi:
     principal_id = "a2a-external"
     actor_id = "a2a-gateway"
 
-    def __init__(self, store: AgentHubStore) -> None:
-        self.store = store
+    def __init__(self, api: AgentHubApi) -> None:
+        self.api = api
         self._ensure_identity()
 
     def agent_card(self, base_url: str) -> dict[str, Any]:
@@ -98,8 +98,10 @@ class A2AApi:
             else:
                 return self._error(request_id, -32601, "Method not found")
             return {"jsonrpc": "2.0", "id": request_id, "result": result}
-        except LookupError:
-            return self._error(request_id, -32001, "Task not found")
+        except ApiError as exc:
+            if exc.status in (HTTPStatus.NOT_FOUND, HTTPStatus.CONFLICT):
+                return self._error(request_id, -32001, "Task not found")
+            return self._error(request_id, -32602, str(exc))
         except A2AError as exc:
             return self._error(request_id, exc.code, str(exc))
         except (TypeError, ValueError) as exc:
@@ -117,7 +119,10 @@ class A2AApi:
             raise A2AError(-32602, "messageId cannot be empty")
         task_id = str(message.get("taskId") or "").strip()
         if task_id:
-            task = self.store.get_task(task_id)
+            _, response = self.api.get(
+                f"/v1/hub/tasks/{quote(task_id, safe='')}", "", None
+            )
+            task = response["task"]
             if TaskStatus(task["status"]) in {
                 TaskStatus.COMPLETED,
                 TaskStatus.FAILED,
@@ -127,11 +132,14 @@ class A2AApi:
             context_id = str(message.get("contextId") or "").strip()
             if context_id and context_id != str(task.get("context_id") or ""):
                 raise A2AError(-32602, "contextId does not match task")
-            self.store.create_task_control(
-                task_id,
-                actor_id=self.actor_id,
-                kind="follow_up",
-                message=objective,
+            self.api.post(
+                f"/v1/hub/tasks/{quote(task_id, safe='')}/controls",
+                {
+                    "actor_id": self.actor_id,
+                    "kind": "follow_up",
+                    "message": objective,
+                },
+                None,
             )
             return {"task": self._task(task)}
 
@@ -145,32 +153,36 @@ class A2AApi:
             if isinstance(required, list)
             else ()
         )
-        submission = TaskSubmission(
-            principal_id=self.principal_id,
-            delegator_actor_id=self.actor_id,
-            objective=objective,
-            assignee_actor_id=(
+        submission = {
+            "principal_id": self.principal_id,
+            "delegator_actor_id": self.actor_id,
+            "objective": objective,
+            "assignee_actor_id": (
                 str(society["assigneeActorId"])
                 if society.get("assigneeActorId")
                 else None
             ),
-            context_id=str(message.get("contextId") or uuid.uuid4()),
-            idempotency_key=f"a2a:{message_id}",
-            required_capabilities=required_capabilities,
-            input=(
+            "context_id": str(message.get("contextId") or uuid.uuid4()),
+            "idempotency_key": f"a2a:{message_id}",
+            "required_capabilities": list(required_capabilities),
+            "input": (
                 society.get("input") if isinstance(society.get("input"), dict) else {}
             ),
-            metadata={"a2a_message_id": message_id},
-            origin="a2a",
-        )
-        task, _ = self.store.create_task(submission)
+            "metadata": {"a2a_message_id": message_id},
+            "origin": "a2a",
+        }
+        _, response = self.api.post("/v1/hub/tasks", submission, None)
+        task = response["task"]
         return {"task": self._task(task)}
 
     def _get_task(self, params: dict[str, Any]) -> dict[str, Any]:
         task_id = str(params.get("id") or "").strip()
         if not task_id:
             raise A2AError(-32602, "id is required")
-        task = self._task(self.store.get_task(task_id))
+        _, response = self.api.get(
+            f"/v1/hub/tasks/{quote(task_id, safe='')}", "", None
+        )
+        task = self._task(response["task"])
         if int(params.get("historyLength", 1)) == 0:
             task.pop("history", None)
         return {"task": task}
@@ -184,7 +196,11 @@ class A2AApi:
         raw_status = str(params.get("status") or "").strip()
         status = self._from_a2a_state(raw_status) if raw_status else None
         context_id = str(params.get("contextId") or "").strip()
-        tasks = self.store.list_tasks(status=status, limit=500)
+        query = "limit=500"
+        if status:
+            query += f"&status={quote(status)}"
+        _, response = self.api.get("/v1/hub/tasks", query, None)
+        tasks = response["tasks"]
         if context_id:
             tasks = [task for task in tasks if task.get("context_id") == context_id]
         selected = tasks[offset : offset + page_size]
@@ -200,9 +216,12 @@ class A2AApi:
         task_id = str(params.get("id") or "").strip()
         if not task_id:
             raise A2AError(-32602, "id is required")
-        task = self.store.cancel_task(
-            task_id, actor_id=self.actor_id, reason="Cancelled through A2A"
+        _, response = self.api.post(
+            f"/v1/hub/tasks/{quote(task_id, safe='')}/cancel",
+            {"actor_id": self.actor_id, "reason": "Cancelled through A2A"},
+            None,
         )
+        task = response["task"]
         return {"task": self._task(task)}
 
     def _task(self, task: dict[str, Any]) -> dict[str, Any]:
@@ -328,15 +347,15 @@ class A2AApi:
         }
 
     def _ensure_identity(self) -> None:
-        self.store.register_principal(
+        from .domain import ActorRegistration, PrincipalRegistration
+
+        self.api.register_gateway_identity(
             PrincipalRegistration(
                 principal_id=self.principal_id,
                 kind="service",
                 display_name="A2A clients",
                 metadata={"protocol": "a2a"},
-            )
-        )
-        self.store.register_actor(
+            ),
             ActorRegistration(
                 actor_id=self.actor_id,
                 principal_id=self.principal_id,
@@ -344,5 +363,5 @@ class A2AApi:
                 display_name="A2A gateway",
                 capabilities=(),
                 metadata={"protocol": "a2a", "version": A2A_VERSION},
-            )
+            ),
         )

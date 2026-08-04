@@ -8,6 +8,7 @@ import unittest
 from agent_channel.mcp_server import ChannelMcpServer
 from agent_channel.service import SqliteChannelService
 from agent_hub.a2a import A2AApi
+from agent_hub.api import AgentHubApi
 from agent_hub.domain import (
     ActorRegistration,
     NodeRegistration,
@@ -306,7 +307,7 @@ class A2ATests(unittest.TestCase):
     def test_a2a_send_get_followup_and_cancel(self) -> None:
         with TemporaryDirectory() as directory:
             store = AgentHubStore(Path(directory) / "hub.sqlite3")
-            api = A2AApi(store)
+            api = A2AApi(AgentHubApi(store))
             try:
                 sent = api.handle(
                     {
