@@ -1,215 +1,192 @@
-# AgentSociety
+# AgentSociety —— 你的赛博同事网络
 
-一个本地优先、可独立使用也可组成协作网络的 Agent 平台。每台设备上的 Agent 默认就是普通
-Pi Agent，通过本机 TUI 由登录用户直接操作；配置 Hub 后才增加跨设备任务、Run、Artifact
-和 session 观察能力。微信只是可选通信适配器：Windows Gateway 负责客户端操作，微信 Core
-负责消息、回复和模型调用。所有 Agent 默认调用远程 API。
+AgentSociety 是一个**跨设备、多 Agent 协作框架**：把家里的 Mac、办公室的
+Windows、云上的服务器，以及任何带命令行工具的机器，连成一张“同事网络”。
+每一台设备上的 Agent 都是你的一名赛博同事——你可以从任何一端派活、看进度、
+收结果，也可以让不同设备上的 Agent 互相协作。
 
-## 已实现
+```mermaid
+flowchart LR
+    You[你 / Codex / Web 仪表盘] --> Hub((Hub 协调中枢))
+    Hub --> Mac[Mac Agent]
+    Hub --> Win[Windows Agent]
+    Hub --> Server[服务器 Agent]
+    Hub --> Any[任意 CLI Agent<br/>codex / opencode / generic]
+```
 
-- `wechat-core`：HTTP 接入、显式 allowlist、持久化收件箱、去重、会话、回复 Outbox
-  和 LLM 调用；模型结果的历史、去重、Outbox、Inbox 完成使用同一个事务提交。
-- `wechat-gateway`：消息采集、历史游标与 SQLite Inbox、回复长轮询、租约与 ACK、本地发送账本。
-- `mock` 适配器：可在 macOS 上用 JSON 行模拟微信消息，验证完整链路。
-- `wxauto4` / `wxautox4` 适配边界：Windows 下动态加载，不会成为 Core 的依赖。
-- `ModelProvider`：支持 `remote`、`local_rwkv` 和显式远程回退的 `auto` 模式。
-- `agent-hub`：独立的 Principal / Actor / Node / Task / Run / Artifact 服务、租约和事件流；
-  支持多租户（token/OIDC）、PostgreSQL/S3 可选存储，以及 REST、MCP、A2A、Web 四个等价入口。
-- `agent-host`：Pi SDK 原生 TUI 与远程任务 worker；本地和远程默认具备 Sub-agent、
-  plan/todo、分域长期记忆、LSP/代码索引、MCP 和 session 后台进程。远程 worker 可选择
-  每任务独立 Pi session，或按 principal/workspace/worker slot 复用可跨重启恢复的连续 session。
-- 通用 Bridge：`./agent bridge --adapter codex|opencode|generic` 让任意带非交互 CLI 的
-  agent 成为 Hub worker；codex/opencode 支持跨任务连续会话，任务信封与结果契约见
-  [agent-adapters.md](docs/agent-adapters.md)。
-- `web_search`：模型无关的 Pi 工具契约；当前 adapter 使用 DeepSeek Responses API 的
-  服务端搜索，并返回答案及可用的来源 URL。
-- `agent-channel-mcp`：MCP 2025-06-18 stdio server，统一 list/read/send/reply/react/download
-  通道工具；微信适配器当前实现前四项并显式声明其余能力不可用。
-- A2A 1.0 JSON-RPC Adapter：标准 Agent Card 和 Send/Get/List/Cancel Task 映射。
-- Hub MCP Server：`/mcp` 暴露 `hub_create_task` / `hub_get_task` / `hub_cancel_task` 等
-  工具，Codex/OpenCode/Claude 可直接作为派发端；stdio 与 streamable HTTP 两种传输。
-- Hub Web 管理界面：管理员/租户仪表盘（任务、Run、Artifact、节点、租户、token），
-  会话 Cookie + CSRF，可选 OIDC 登录。
+## 它解决什么问题
 
-完整设计见 [架构文档](docs/architecture.md)，Windows 部署见
-[Windows Gateway 指南](docs/windows-gateway.md)，Agent 平台见
-[Pi Agent 协作平台](docs/agent-platform.md)，Mac 端侧推理见
-[本地 RWKV 指南](docs/local-rwkv.md)。
+- 你在一台机器上想到一个任务，想让另一台机器上的 Agent 去执行——不用手动 SSH
+  或复制文件，在 Hub 上派发即可。
+- 你想让多台设备上的 Agent 各自负责一块工作（跑测试、查资料、操作微信、整理
+  文件），最后把结果汇总给你。
+- 你想用 Codex、OpenCode 或任意命令行 Agent 作为执行端，而不是重新学一套新工具。
 
-公网部署 Hub（无域名/域名、PostgreSQL/S3、Web 管理界面、多租户）见
-[Hub 公网部署指南](docs/public-hub.md)。
-通用 agent 适配器（codex/opencode/generic、任务信封、连续会话、GUI 可见性）见
-[agent-adapters.md](docs/agent-adapters.md)。
+AgentSociety 只负责**协调**：谁是谁、谁在跑什么、跑到哪一步、结果放在哪里。
+真正的“干活”始终发生在你自己的设备上，由你自己安装的 Agent 完成。
 
-## 独立 Agent Hub
+## 核心概念
 
-Hub 和微信 Core 不共享进程、端口、SQLite 或 token：
+| 概念 | 含义 |
+|---|---|
+| Hub | 协调中枢，保存身份、任务、运行记录和事件流 |
+| Principal | 一个人/组织（比如你），是数据隔离的单位 |
+| Actor | 一个 Agent 的身份（比如 `pi-我的mac`） |
+| Node | 一台设备（比如你的 Mac 或服务器） |
+| Task | 一次委派的目标和指令，可指定给某个 Actor 或按能力匹配 |
+| Run | 一次实际执行（Task 可能因失败/取消被多次执行） |
+| Event | 任务事件流（提交、认领、开始、完成…），全程可审计 |
+| Artifact | 任务产出的文件或对象 |
+
+身份关系：**Principal（你）→ Actor（Agent）→ Node（设备）**。每个用户只
+能看见属于自己的数据，不同租户之间互相隔离。
+
+## 快速开始
+
+### 1. 准备一个 Hub
+
+最简单的办法是把 Hub 部署在一台有公网 IP 的服务器上（正式部署建议配一个域名），
+也可以先跑在局域网机器上体验。部署步骤见
+[Hub 公网部署指南](docs/public-hub.md)：
 
 ```bash
 cp .env.hub.example .env.hub
-# 设置一个至少 24 字符的独立 AGENT_HUB_TOKEN
+# 设置 AGENT_HUB_TOKEN（至少 24 字符）和 AGENT_HUB_WEB_SECRET（至少 32 字符）
 PYTHONPATH=src python3 -m agent_hub.server
 ```
 
-它默认只监听 `127.0.0.1:8090`。公网服务器部署模板见
-[`deploy/hub`](deploy/hub) 和 [Agent 平台文档](docs/agent-platform.md)。
+启动后打开 `http://<hub-address>:8090/web` 注册你的账号。Hub 默认只监听
+`127.0.0.1`，公网访问通过 Caddy/Cloudflare 等反向代理暴露。
 
-Hub 提供四个等价入口，共享同一内核（`AgentHubApi` → Store），状态天然一致：
+### 2. 在一台设备上安装 Agent
 
-| 入口 | 路径 | 用途 |
-|---|---|---|
-| REST | `/v1/hub/*` | 全量 API，Pi worker/bridge 的 HubClient 使用 |
-| MCP | `/mcp` | Codex/OpenCode/Claude 等 MCP 客户端派发/观察任务 |
-| A2A | `/a2a` | 标准 Agent Card + Send/Get/List/Cancel Task |
-| Web | `/web` | 人类管理界面（需设置 `AGENT_HUB_WEB_SECRET`） |
-
-版本策略（REST `/v1` 路径版本化、MCP `protocolVersion`、A2A `A2A-Version` 头）见
-[架构文档](docs/architecture.md)。
-
-## Pi Agent Host
-
-新设备只需要 Git、Node.js 22.19+ 和远程模型的三项连接信息。clone 后直接运行：
+需要 Git 和 Node.js 22.19+（Windows 用 PowerShell）：
 
 ```bash
 git clone <repository-url> AgentSociety
 cd AgentSociety
-./agent
+./agent               # Windows 用 ./agent.ps1
 ```
 
-Windows PowerShell 使用 `./agent.ps1`。首次运行只要求 OpenAI-compatible 模型 URL、model
-ID 和 API key；Hub URL/token 是可留空的附加项。随后自动安装锁定依赖、应用安全补丁、构建、
-生成本机身份、使用仓库根目录作为 workspace、调用一次最小模型连通性检查，并打开 Pi 原生
-TUI。配置 Hub 时才会额外登记 Principal/Actor/Node。
-非敏感配置保存在被 Git 忽略且权限为 `0600` 的 `.private/env/agent.env`
-（旧的根目录 `.env.agent` 仍被兼容读取）；LLM API key 和 Hub token
-只保存到 macOS Keychain、Windows Credential Manager 或 Linux Secret Service，配置文件
-不含明文凭据。系统安全凭据库不可用时 setup 会停止，不会降级写入文件。
-
-安装完成后，入口会自动在用户级 `~/.local/bin/agent` 注册全局命令；只要该目录在
-`PATH` 中，之后可从任意目录直接运行 `agent`。已有同名非 AgentSociety 命令时，安装器
-会拒绝覆盖；可用 `AGENT_GLOBAL_BIN=/path/to/bin` 指定其他用户级目录。
-
-后续常用命令：
+首次运行会引导你填写模型连接信息（OpenAI-compatible URL、Model ID、API Key），
+然后自动安装依赖、构建、生成本机身份并打开 TUI。Hub 连接是可选的，之后随时
+补充：
 
 ```bash
-./agent                 # 打开本机 Pi TUI
-./agent local           # 即使已配置 Hub，也强制以普通 Agent 模式启动
-./agent worker          # 持续领取 Hub 任务
-./agent doctor          # 复查 Hub、workspace、session 和远端模型
-./agent sessions        # 离线列出本机 session
-./agent observe task_xxx
-./agent control task_xxx  # 交互式 steer/follow-up/status/cancel
-./agent steer task_xxx "立即先运行单元测试"
-./agent follow-up task_xxx "完成后再给出性能摘要"
+./agent setup         # 重新配置，可补填 Hub URL / 用户名 / 密码
+./agent connect       # 用 Hub 账号密码换本机节点凭据
+./agent worker        # 作为常驻 worker 开始领取 Hub 任务
+./agent doctor        # 体检：Hub 连接、workspace、模型、session
+```
+
+非敏感配置保存在被 Git 忽略的 `.private/env/agent.env`（权限 0600）；API Key 和
+Hub 凭据只存入系统凭据库（macOS Keychain / Windows Credential Manager / Linux
+Secret Service），配置文件里没有明文密钥。
+
+### 3. 派发你的第一个任务
+
+配置好 Hub 后，从任何一端都可以派活：
+
+- **Web 仪表盘**：`/web` 登录后创建任务、查看进度和结果。
+- **Codex / OpenCode / Claude**：Hub 暴露 MCP 工具（`hub_create_task`、
+  `hub_get_task`、`hub_cancel_task` 等），配置后即可直接在对话里派活。
+- **本机 TUI**：通过 Hub 工具在对话里派发。
+- **REST API**：`/v1/hub/tasks`，适合脚本和自动化。
+
+用 Codex 连接 Hub 的 MCP 示例：
+
+```bash
+codex mcp add hub --url https://hub.example.com/mcp \
+  --header "Authorization: Bearer <你的节点凭据>"
+```
+
+### 4. 观察和干预
+
+```bash
+./agent sessions                  # 本机有哪些 session
+./agent observe task_xxx          # 跟踪一个任务的实时进度
+./agent control task_xxx          # 交互式 steer / follow-up / status / cancel
+./agent steer task_xxx "先运行单元测试"
 ./agent cancel task_xxx "目标已变化"
-./agent bridge --adapter codex   # 用 Codex CLI 作为持续 worker
-./agent bridge --adapter opencode # 用 OpenCode 作为持续 worker
-./agent bridge --adapter generic  # 自定义命令适配器
 ```
 
-远程任务默认使用 `AGENT_WORKER_SESSION_MODE=per_task`，每个 Task 都有独立 Pi session。
-改成 `continuous` 后，同一个 principal、workspace 和 worker slot 的顺序任务会复用同一个
-session，从而保留模型上下文；映射在首次模型回复后落盘，worker 重启后自动恢复。可用
-`AGENT_WORKER_SESSION_MAX_TASKS` / `AGENT_WORKER_SESSION_MAX_AGE_HOURS` 自动轮换，或在单个
-Task 的 `input` 中传 `reset_worker_session: true` 立即换新。每个 Run 仍单独审计，并记录
-session ID、是否复用和该任务对应的 JSONL entry 边界。
+## 支持的 Agent 类型
 
-本地 TUI 使用 Pi 原生资源加载器，兼容 Pi Package 中的 Extension 自定义工具、命令、事件、
-Skill、Prompt 和 Theme。Package 仍用 Pi 自己的入口管理，不额外包装安装命令：
+AgentSociety 不要求所有设备都用同一种 Agent：
 
-```bash
-npm --prefix agent-host exec -- pi install npm:<package-name>
-npm --prefix agent-host exec -- pi list
+- **Pi Agent（默认）**：完整的内建工具（Sub-agent、plan/todo、长期记忆、LSP、
+  MCP、后台进程、Web 搜索），支持本机 TUI 和远程任务。
+- **Codex / OpenCode**：通过通用 Bridge 作为 Hub worker
+  （`./agent bridge --adapter codex`），支持跨任务连续会话，任务会出现在
+  Codex GUI 的 “AgentHub” 项目里。
+- **Generic**：任何带非交互 CLI 的工具都可以通过
+  [适配器规范](docs/agent-adapters.md) 接入。
+
+远程任务默认每次新建独立 session；改成 `continuous` 后，同一台设备同一工作区
+的连续任务会复用同一个 session，保留模型上下文，worker 重启后还能恢复：
+
+```dotenv
+AGENT_WORKER_SESSION_MODE=continuous
 ```
 
-项目内 `.pi` 资源首次加载前会要求信任；Hub worker 默认不执行 Pi Package。远程插件策略见
-[Pi Agent 协作平台](docs/agent-platform.md)。第三方 Extension 与普通本地程序权限相同，安装前
-应审查来源和代码。
+## 四种访问入口，一个内核
 
-AgentSociety 固定并加载 `pi-mcp-adapter` 与 `pi-lsp-adapter`，新安装会自动为 Channel MCP
-写入一个不含 secret 的托管配置，并让 LSP 在首次使用某种语言时自动安装固定版本的语言服务。
-其他 Pi MCP 配置和社区 Package 仍按 Pi 原生方式工作。Hub custom tools 继续直接注入 Pi，
-二者共享领域契约而不要求统一插件安装入口。
+| 入口 | 路径 | 用途 |
+|---|---|---|
+| REST | `/v1/hub/*` | 全量 API，脚本和 worker 使用 |
+| MCP | `/mcp` | Codex / OpenCode / Claude 等 MCP 客户端 |
+| A2A | `/a2a` | 标准 Agent Card 互操作 |
+| Web | `/web` | 人类管理界面（注册、登录、任务、节点、账户） |
 
-内建能力对本地 TUI 和 `full`（默认）远程 worker 使用同一实现：`subagent` 创建隔离子 session；
-plan/todo 按 session 持久化；memory 分 workspace 与 principal 保存且不会记录模型凭据；后台进程
-只属于当前 session，session 结束会清理。`AGENT_BUILTIN_CAPABILITIES=0` 可整体关闭；显式的
-`read_only`/`no_tools` 远程策略仍优先限制可执行工具。
+四个入口共享同一套任务/事件/租户状态，不存在“接口之间不一致”的问题；能力面
+不同（REST 全量，MCP/A2A 是子集），新增能力优先扩展 REST。
 
-当模型地址是 `https://api.deepseek.com` 时，`AGENT_WEB_SEARCH=auto`（默认）会复用系统
-凭据库中的模型 key，并用 `deepseek-v4-flash` 调用 Responses API 的服务端 `web_search`。
-普通 Chat Completions 仍负责主 session；搜索作为独立、可替换的工具调用返回结果。可设置
-`AGENT_WEB_SEARCH=disabled` 完全关闭，或设置 `deepseek` 为兼容代理强制启用。当前 DeepSeek
-adapter 只接收通用 `query`，将来可在不改变 Pi 工具名的情况下替换其他搜索 provider。返回值以
-`citationsProvided` 明示提供商是否给出了结构化 URL 引用；未提供时不会把搜索动作 URL 冒充引用。
+## 安全设计
 
-高级身份覆盖、workspace、权限策略、远端 session 查看方式及 API 见
-[Pi Agent 协作平台](docs/agent-platform.md)。
+- **账号密码**：用户注册后用 argon2 哈希密码登录，Web 会话短期有效、可吊销。
+- **节点凭据**：每台设备用 `agent connect` 换取独立、可单独吊销的节点凭据，
+  不再使用共享 token。
+- **数据隔离**：用户只能看到自己的 Principal / Actor / Node / Task / Run。
+- **权限策略**：远程任务可设为 `read_only` / `no_tools`，Pi 插件资源默认
+  不在 worker 中执行。详见 [认证文档](docs/authentication.md) 和
+  [Agent 平台文档](docs/agent-platform.md)。
 
-## 在 Mac 上启动 Bot Core
+## 可选接入：微信通道（实验性，开发中）
 
-项目本身只使用 Python 标准库。
+微信不是 AgentSociety 的核心，而是**一个正在开发的可选通信工具**：通过 Windows
+上的 Gateway + 本机/服务器上的 Core，可以让你的 Agent 收发微信消息。它依赖
+wxauto 这类非官方 UI 自动化库，有客户端升级失效和账号风控风险，目前建议只做
+个人学习/研究用途。想了解细节和风险，见
+[Windows Gateway 指南](docs/windows-gateway.md)。
 
-```bash
-cp .env.example .env
-# 默认 LLM_BACKEND=remote；至少设置 BOT_API_TOKEN、LLM_BASE_URL、LLM_MODEL
-PYTHONPATH=src python3 -m wechat_core.api
+其他可选组件：本地 RWKV 推理（[指南](docs/local-rwkv.md)）、Channel MCP 通道适配。
+
+## 目录结构
+
+```text
+src/agent_hub/       Hub 协调中枢（REST/MCP/A2A/Web、存储、认证）
+src/wechat_core/     微信 Core（可选）
+src/wechat_gateway/  Windows 微信网关（可选）
+agent-host/          Agent 宿主（Pi worker、Bridge、CLI）
+deploy/              Hub 的 Docker/Caddy 部署模板
+docs/                架构、部署、适配器、认证文档
+tests/               测试（Python + Node）
 ```
 
-健康检查：
+## 开发与测试
 
 ```bash
-curl http://127.0.0.1:8080/health
-```
-
-另开一个终端启动模拟 Gateway（两个配置中的 `BOT_API_TOKEN` 必须相同）：
-
-```bash
-cp .env.gateway.example .env.gateway
-# 保持 WECHAT_DRIVER=mock，并编辑连接信息
-PYTHONPATH=src python3 -m wechat_gateway
-```
-
-在 Gateway 终端输入一行：
-
-```bash
-{"chat_id":"test-user-id","content":"你好"}
-```
-
-模型回复会以 `BOT_REPLY {...}` 输出。`test-user-id` 也必须存在于 Core 的
-`BOT_ALLOWED_USERS` 中。
-
-## 可选的 Mac 本地 RWKV
-
-本地模式使用单独的 `llama-server` 进程监听 `127.0.0.1:18080`，Core 继续监听
-`8080`。当前远程配置无需删除；把 `LLM_BACKEND` 改成 `local_rwkv` 才会启用本地
-模型，把它改成 `auto` 才会在本地失败后向远程发送同一会话。
-
-```bash
-# 安装 llama.cpp 并下载兼容的 RWKV-6/7 GGUF 后：
-PYTHONPATH=src python3 -m wechat_core.local_model
-```
-
-模型文件、采样配置、健康检查和 LaunchAgent 模板参见
-[本地 RWKV 指南](docs/local-rwkv.md)。
-
-## Windows 微信接入
-
-建议使用原生 Windows 10/11 或 Windows Server，Python 3.12。Gateway 当前依据 wxauto
-4.x 接口实现；官方文档目前把 `AddListenChat` 标记为 Plus 能力，因此新安装首选
-`wxautox4`，`wxauto4` 仅保留兼容入口。微信和 wxauto 小版本必须匹配，详见
-[wxauto 安装兼容表](https://docs.wxauto.org/docs/install.html)。
-
-此类 UI Automation 接入不是微信官方 Bot API，有账号风控、客户端升级失效及使用条款
-风险。wxauto 的协议限定合法的个人学习/研究用途并禁止商业用途；使用前请阅读
-[wxauto 用户协议](https://docs.wxauto.org/agreement.html)和微信相关条款。
-
-## 测试
-
-```bash
+# Python（Hub / 微信）
 PYTHONPATH=src python3 -m unittest discover -s tests -v
+
+# Node（agent-host）
+npm --prefix agent-host test
 ```
 
-测试按子系统组织在 `tests/hub/`（REST/MCP/A2A/Web、多租户、Web 会话）与
-`tests/wechat/`（Core、HTTP 协议解析、Gateway、ACK 丢失去重、wxauto 消息标准化）；
-使用假的模型与微信对象，不会请求真实 LLM，也不需要 API Key。
+## 项目状态
+
+- 已可用：跨设备任务派发、连续会话、MCP/Web/REST 入口、账号与节点凭据、
+  多租户隔离、Codex/OpenCode 适配器。
+- 开发中：一键安装与发布、微信通道完善、更多 Agent 适配器、Web 租户自助管理。
+
+想深入了解，从 [架构文档](docs/architecture.md) 开始。
