@@ -6,18 +6,30 @@ import os
 from pathlib import Path
 
 
-def _load_env_file(path: Path = Path(".env.hub")) -> None:
-    if not path.is_file():
-        return
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
+def _load_env_file(path: Path | None = None) -> None:
+    """Load KEY=VALUE env files without overriding process variables.
+
+    With no argument, loads the legacy root `.env.hub` first and then the
+    private `.private/env/hub.env`, so the private copy wins during migration.
+    """
+
+    candidates = (
+        [path]
+        if path is not None
+        else [Path(".env.hub"), Path(".private/env/hub.env")]
+    )
+    for candidate in candidates:
+        if not candidate.is_file():
             continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key:
-            os.environ.setdefault(key, value)
+        for raw_line in candidate.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key:
+                os.environ.setdefault(key, value)
 
 
 def _required(name: str) -> str:
@@ -77,7 +89,9 @@ class HubSettings:
             api_port=int(os.environ.get("AGENT_HUB_PORT", "8090")),
             api_token=_required("AGENT_HUB_TOKEN"),
             state_db=Path(
-                os.environ.get("AGENT_HUB_STATE_DB", "hub-state.sqlite3")
+                os.environ.get(
+                    "AGENT_HUB_STATE_DB", ".private/state/hub-state.sqlite3"
+                )
             ).expanduser(),
             database_url=os.environ.get("AGENT_HUB_DATABASE_URL", "").strip()
             or None,

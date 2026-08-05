@@ -5,8 +5,8 @@
 // stdio to mcp-remote. The token never lives in config.toml or on disk.
 //
 // Environment overrides:
-//   AGENT_HUB_MCP_URL              default https://hub.example.com/mcp
-//   AGENT_HUB_MCP_REMOTE_BIN       default /opt/homebrew/bin/mcp-remote
+//   AGENT_HUB_MCP_URL              required (e.g. https://hub.example.com/mcp)
+//   AGENT_HUB_MCP_REMOTE_BIN       default mcp-remote (resolved from PATH)
 //   AGENT_HUB_MCP_KEYCHAIN_SERVICE default AgentSociety Hub Node
 //   AGENT_HUB_MCP_KEYCHAIN_ACCOUNT default (omit -> any account)
 import { execFileSync, spawn } from "node:child_process";
@@ -14,10 +14,16 @@ import { execFileSync, spawn } from "node:child_process";
 const service =
   process.env.AGENT_HUB_MCP_KEYCHAIN_SERVICE || "AgentSociety Hub Node";
 const account = process.env.AGENT_HUB_MCP_KEYCHAIN_ACCOUNT || "";
-const url =
-  process.env.AGENT_HUB_MCP_URL || "https://hub.example.com/mcp";
+const url = process.env.AGENT_HUB_MCP_URL?.trim() || "";
 const mcpRemote =
-  process.env.AGENT_HUB_MCP_REMOTE_BIN || "/opt/homebrew/bin/mcp-remote";
+  process.env.AGENT_HUB_MCP_REMOTE_BIN?.trim() || "mcp-remote";
+
+if (!url) {
+  console.error(
+    "AGENT_HUB_MCP_URL is required (e.g. https://hub.example.com/mcp); set it before starting Codex.",
+  );
+  process.exit(1);
+}
 
 let token = "";
 try {

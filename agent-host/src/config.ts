@@ -77,11 +77,27 @@ export function loadProjectEnv(path?: string): void {
 
 export function discoverProjectEnv(cwd = process.cwd()): string | undefined {
   return firstExisting([
+    resolve(cwd, ".private/env/agent.env"),
     resolve(cwd, ".env.agent"),
+    resolve(cwd, "../.private/env/agent.env"),
     resolve(cwd, "../.env.agent"),
     resolve(cwd, ".env"),
     resolve(cwd, "../.env"),
   ]);
+}
+
+/**
+ * Canonical agent env file for a repository root. Prefers the private layout,
+ * falls back to the legacy root-level `.env.agent`, and otherwise returns the
+ * new canonical path so setup/connect can create it.
+ */
+export function agentEnvPath(root: string): string {
+  return (
+    firstExisting([
+      resolve(root, ".private/env/agent.env"),
+      resolve(root, ".env.agent"),
+    ]) ?? resolve(root, ".private/env/agent.env")
+  );
 }
 
 function firstExisting(paths: string[]): string | undefined {

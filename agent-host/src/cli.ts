@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { dirname, resolve } from "node:path";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
@@ -11,7 +11,7 @@ import { Writable } from "node:stream";
 import { listAdapterIds, loadAdapterManifest } from "./adapter-registry.js";
 import { BridgeWorker } from "./bridge.js";
 import { agentHubProjectDir } from "./codex-project.js";
-import { loadConfig, loadSessionDir } from "./config.js";
+import { agentEnvPath, loadConfig, loadSessionDir } from "./config.js";
 import type { AgentHostConfig } from "./config.js";
 import { controlTask } from "./controller.js";
 import {
@@ -398,13 +398,10 @@ async function connectCommand(config: AgentHostConfig): Promise<void> {
   const resolved = { ...config, hubUsername: username, hubPassword: password };
   const { token, saved } = await resolveNodeCredential(resolved);
   const hub = new HubClient(resolved.hubUrl!, token);
-  const envPath = resolve(
-    dirname(fileURLToPath(import.meta.url)),
-    "..",
-    "..",
-    "..",
-    ".env.agent",
+  const envPath = agentEnvPath(
+    resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", ".."),
   );
+  mkdirSync(dirname(envPath), { recursive: true });
   const nodeService =
     process.env.AGENT_HUB_NODE_TOKEN_CREDENTIAL_SERVICE?.trim() ||
     "AgentSociety Hub Node";

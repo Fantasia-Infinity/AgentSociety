@@ -189,7 +189,8 @@ override 无法越过该 shrinkwrap。因此 setup 直接锁定安全版 5.0.9�
 Pi 的这一份嵌套包；安全检查会验证实际运行版本。这里刻意禁用第三方安装脚本，补丁也不通过
 隐式 `postinstall` 执行。
 
-setup 把非敏感配置和凭据引用写入项目根目录 `.env.agent`，Agent Host 会优先自动读取它；
+setup 把非敏感配置和凭据引用写入 `.private/env/agent.env`（旧的根目录
+`.env.agent` 仍会被兼容读取），Agent Host 会优先自动读取它；
 旧 `.env` 仅作为兼容回退。模型地址必须是远程 HTTP(S) 地址，loopback 会被拒绝。Principal 默认为
 `human-<登录用户名>`，Actor/Node 根据主机名生成；workspace 自动设为 clone 后的仓库根目录。
 可以参照 `.env.agent.example` 覆盖这些高级默认值。
@@ -205,7 +206,8 @@ setup 输入的 Model API key 和可选 Hub token 会直接写入操作系统安
 - Windows 使用 Credential Manager。
 - Linux 使用 Secret Service，需要当前用户会话提供可用且已解锁的 keyring。
 
-`.env.agent` 只记录 credential service/account，不记录秘密本身；凭据不会进入 Hub、日志或
+`.private/env/agent.env` 只记录 credential service/account，不记录秘密本身；
+凭据不会进入 Hub、日志或
 SQLite。系统凭据库不可用或锁定时 setup 会失败，不提供明文文件回退。重新运行 setup 会把
 旧 `.env.agent` 中的 `AGENT_REMOTE_API_KEY` / `AGENT_HUB_TOKEN` 迁移到系统凭据库，并从配置
 文件中删除。CI 或外部 secret manager 仍可在进程环境中临时注入这些变量，但 setup 永远不会

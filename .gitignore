@@ -41,3 +41,8 @@ deploy/hub/certs/
 .agenthub/
 
 .DS_Store
+
+# Local private runtime files (env, state, logs, certs).
+# Only the README inside is tracked; everything else stays on the machine.
+.private/*
+!.private/README.md

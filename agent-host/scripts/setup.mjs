@@ -3,6 +3,7 @@
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   readFileSync,
   renameSync,
   writeFileSync,
@@ -17,8 +18,20 @@ import { Writable } from "node:stream";
 
 const agentHostDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(agentHostDir, "..");
+const legacyConfigPath = resolve(repositoryRoot, ".env.agent");
+const privateConfigPath = resolve(
+  repositoryRoot,
+  ".private",
+  "env",
+  "agent.env",
+);
 const configPath = resolve(
-  process.env.AGENT_SETUP_CONFIG_PATH || resolve(repositoryRoot, ".env.agent"),
+  process.env.AGENT_SETUP_CONFIG_PATH ||
+    (existsSync(privateConfigPath)
+      ? privateConfigPath
+      : existsSync(legacyConfigPath)
+        ? legacyConfigPath
+        : privateConfigPath),
 );
 const workspaceRoot = resolve(
   process.env.AGENT_SETUP_WORKSPACE || repositoryRoot,
@@ -413,6 +426,7 @@ function writeConfig(original, values) {
       if (value !== null) next.push(`${key}=${dotenvValue(value)}`);
     }
   }
+  mkdirSync(dirname(configPath), { recursive: true });
   const temporary = `${configPath}.${process.pid}.tmp`;
   writeFileSync(temporary, `${next.join("\n").replace(/\n+$/u, "")}\n`, {
     encoding: "utf8",

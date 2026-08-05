@@ -7,20 +7,30 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 
-def _load_env_file(path: Path = Path(".env")) -> None:
-    """Load a small KEY=VALUE env file without overriding process variables."""
-    if not path.is_file():
-        return
+def _load_env_file(path: Path | None = None) -> None:
+    """Load KEY=VALUE env files without overriding process variables.
 
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
+    With no argument, loads the legacy root `.env` first and then the private
+    `.private/env/core.env`, so the private copy wins during migration.
+    """
+
+    candidates = (
+        [path]
+        if path is not None
+        else [Path(".env"), Path(".private/env/core.env")]
+    )
+    for candidate in candidates:
+        if not candidate.is_file():
             continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key:
-            os.environ.setdefault(key, value)
+        for raw_line in candidate.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key:
+                os.environ.setdefault(key, value)
 
 
 def _required(name: str) -> str:
@@ -164,7 +174,9 @@ class Settings:
             ),
             max_history_messages=int(os.environ.get("BOT_MAX_HISTORY_MESSAGES", "20")),
             state_db=Path(
-                os.environ.get("BOT_STATE_DB", "core-state.sqlite3")
+                os.environ.get(
+                    "BOT_STATE_DB", ".private/state/core-state.sqlite3"
+                )
             ).expanduser(),
         )
         settings.validate()
