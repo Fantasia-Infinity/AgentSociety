@@ -294,19 +294,24 @@ class AgentHubApi:
                 },
             }
         if path == f"{self.auth_prefix}/agent-login":
-            item = self.store.agent_login(
-                username=str(payload.get("username", "")),
-                password=str(payload.get("password", "")),
-                node_id=str(payload.get("node_id", "")),
-                actor_id=str(payload.get("actor_id", "")).strip() or None,
-                display_name=str(payload.get("display_name", "")).strip() or None,
-                capabilities=tuple(
-                    str(c).strip()
-                    for c in (payload.get("capabilities") or [])
-                    if str(c).strip()
-                ),
-                metadata=object_value(payload, "metadata"),
-            )
+            try:
+                item = self.store.agent_login(
+                    username=str(payload.get("username", "")),
+                    password=str(payload.get("password", "")),
+                    node_id=str(payload.get("node_id", "")),
+                    actor_id=str(payload.get("actor_id", "")).strip() or None,
+                    display_name=str(payload.get("display_name", "")).strip() or None,
+                    capabilities=tuple(
+                        str(c).strip()
+                        for c in (payload.get("capabilities") or [])
+                        if str(c).strip()
+                    ),
+                    metadata=object_value(payload, "metadata"),
+                )
+            except PermissionError as exc:
+                raise ApiError(
+                    "invalid username or password", HTTPStatus.UNAUTHORIZED
+                ) from exc
             return HTTPStatus.OK, item
         if path == f"{self.auth_prefix}/logout":
             if context is None or not context.session_id:

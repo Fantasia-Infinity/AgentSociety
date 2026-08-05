@@ -260,11 +260,6 @@ async function main(): Promise<void> {
   throw new Error(`Unknown command: ${command}`);
 }
 
-main().catch((error: unknown) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
-
 function adapterArgument(argv: string[]): string | undefined {
   for (const arg of argv) {
     if (arg.startsWith("--adapter=")) {
@@ -331,7 +326,10 @@ async function resolveNodeCredential(
         },
       });
     } catch (error) {
-      if (error instanceof HubError && error.status === 401) {
+      if (
+        error instanceof HubError &&
+        (error.status === 401 || error.status === 409)
+      ) {
         throw new Error(
           "Hub rejected your credentials. If you changed your password, run `agent connect` and enter the new password.",
         );
@@ -378,17 +376,16 @@ async function connectCommand(config: AgentHostConfig): Promise<void> {
   let password = config.hubPassword ?? "";
   const interactive = Boolean(stdin.isTTY && stdout.isTTY);
   if (interactive) {
-    const muted = new Writable({
-      write(_chunk, _encoding, callback) {
-        callback();
-      },
-    });
+    const muted = new MutedOutput();
     const rl = createInterface({ input: stdin, output: muted, terminal: true });
     const answer = (
       await rl.question(`Hub username [${username || "required"}]: `)
     ).trim();
     if (answer) username = answer;
-    password = await rl.question("Hub password: ");
+    process.stdout.write("Hub password: ");
+    muted.muted = true;
+    password = await rl.question("");
+    muted.muted = false;
     process.stdout.write("\n");
     rl.close();
   }
@@ -412,3 +409,23 @@ async function connectCommand(config: AgentHostConfig): Promise<void> {
     );
   }
 }
+
+class MutedOutput extends Writable {
+  muted = false;
+
+  _write(
+    chunk: Buffer | string,
+    _encoding: BufferEncoding,
+    callback: (error?: Error | null) => void,
+  ): void {
+    if (!this.muted) {
+      process.stdout.write(chunk, _encoding);
+    }
+    callback();
+  }
+}
+
+main().catch((error: unknown) => {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+});
