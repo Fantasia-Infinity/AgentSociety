@@ -63,6 +63,7 @@ class HubSettings:
     enable_mcp: bool
     web_secret: str | None
     web_cookie_secure: bool
+    disable_bootstrap: bool
     oidc_issuer: str | None
     oidc_audience: str | None
 
@@ -93,6 +94,7 @@ class HubSettings:
             enable_mcp=_bool("AGENT_HUB_ENABLE_MCP", True),
             web_secret=os.environ.get("AGENT_HUB_WEB_SECRET", "").strip() or None,
             web_cookie_secure=_bool("AGENT_HUB_WEB_COOKIE_SECURE", True),
+            disable_bootstrap=_bool("AGENT_HUB_DISABLE_BOOTSTRAP", False),
             oidc_issuer=os.environ.get("AGENT_HUB_OIDC_ISSUER", "").strip() or None,
             oidc_audience=os.environ.get("AGENT_HUB_OIDC_AUDIENCE", "").strip()
             or None,

@@ -34,6 +34,7 @@ class HubHttpServer(ThreadingHTTPServer):
         public_url: str | None = None,
         web_secret: str | None = None,
         web_cookie_secure: bool = True,
+        disable_bootstrap: bool = False,
         oidc_provider: OIDCIdentityProvider | None = None,
         enable_mcp: bool = True,
     ) -> None:
@@ -45,6 +46,7 @@ class HubHttpServer(ThreadingHTTPServer):
         self.public_url = public_url.rstrip("/") if public_url else None
         self.web = WebSession(web_secret) if web_secret is not None else None
         self.web_cookie_secure = web_cookie_secure
+        self.disable_bootstrap = disable_bootstrap
         self.oidc_provider = oidc_provider
 
 
@@ -185,7 +187,9 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
     def _authorized(self) -> AuthenticatedContext | None:
         supplied = self.headers.get("Authorization", "")
         expected = f"Bearer {self.server.api_token}"
-        if hmac.compare_digest(supplied, expected):
+        if not self.server.disable_bootstrap and hmac.compare_digest(
+            supplied, expected
+        ):
             return AuthenticatedContext(role="admin")
         if supplied.startswith("Bearer "):
             raw = supplied[len("Bearer ") :].strip()
@@ -322,6 +326,7 @@ def main() -> None:
         settings.public_url,
         settings.web_secret,
         settings.web_cookie_secure,
+        settings.disable_bootstrap,
         oidc_provider,
         settings.enable_mcp,
     )

@@ -21,6 +21,9 @@
 - Agent 连接：`agent connect` 交互输入自己的用户名/密码 → Hub 校验后
   注册/绑定 principal/actor/node，并签发**节点短期凭据**（默认 7 天）；
   密码不落盘，节点凭据存入系统钥匙串，worker 启动时自动登录/续期。
+- 无系统钥匙串的主机（如无头 Linux）：`agent connect` 会提示把
+  `AGENT_HUB_NODE_TOKEN` 写入 `.env.agent`（文件权限 600）；该凭据由密码
+  登录签发、可单独吊销，不等同于旧的共享 bootstrap token。
 
 ## 2. 数据模型（新增表）
 

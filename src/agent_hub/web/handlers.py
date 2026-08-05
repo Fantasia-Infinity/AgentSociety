@@ -286,7 +286,10 @@ class WebHandlersMixin:
                     }
                 )
             elif supplied:
-                if hmac.compare_digest(supplied, self.server.api_token):
+                if (
+                    not self.server.disable_bootstrap
+                    and hmac.compare_digest(supplied, self.server.api_token)
+                ):
                     _, cookie = self.server.web.create({"role": "admin"})
                 else:
                     context = self.server.api.authenticate(supplied)
