@@ -2,14 +2,23 @@
 
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createInterface } from "node:readline/promises";
+import { stdin, stdout } from "node:process";
+import { userInfo } from "node:os";
+import { Writable } from "node:stream";
 
 import { listAdapterIds, loadAdapterManifest } from "./adapter-registry.js";
 import { BridgeWorker } from "./bridge.js";
 import { agentHubProjectDir } from "./codex-project.js";
 import { loadConfig, loadSessionDir } from "./config.js";
+import type { AgentHostConfig } from "./config.js";
 import { controlTask } from "./controller.js";
+import {
+  deleteSystemCredential,
+  writeSystemCredential,
+} from "./credential-store.js";
 import { runDoctor } from "./doctor.js";
-import { HubClient } from "./hub-client.js";
+import { HubClient, HubError } from "./hub-client.js";
 import {
   registerAdapterHost,
   registerHost,
@@ -56,9 +65,14 @@ async function main(): Promise<void> {
 
   const config = loadConfig();
   const hubRuntimeDisabled = process.env.AGENT_HUB_RUNTIME_DISABLED === "1";
-  const hub = config.hubEnabled && !hubRuntimeDisabled
-    ? new HubClient(config.hubUrl!, config.hubToken!)
-    : undefined;
+  if (command === "connect") {
+    await connectCommand(config);
+    return;
+  }
+  const hub =
+    config.hubEnabled && !hubRuntimeDisabled
+      ? await resolveHubClient(config)
+      : undefined;
   if (command === "__tui-child") {
     const runId = process.argv[3]?.trim();
     if (!runId) throw new Error("Internal TUI child requires a run_id");
@@ -117,10 +131,7 @@ async function main(): Promise<void> {
       bridgeConfig = { ...bridgeConfig, workspaceRoot: agentHubProjectDir() };
     }
     await registerAdapterHost(bridgeConfig, hub!, adapter);
-    const workerHub = new HubClient(
-      bridgeConfig.hubUrl!,
-      bridgeConfig.hubNodeToken ?? bridgeConfig.hubToken!,
-    );
+    const workerHub = await resolveHubClient(bridgeConfig);
     const runOnce = bridgeArgs.includes("--once");
     if (runOnce) {
       const worker = new BridgeWorker(bridgeConfig, workerHub, adapter);
@@ -202,10 +213,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  const workerHub = new HubClient(
-    config.hubUrl!,
-    config.hubNodeToken ?? config.hubToken!,
-  );
+  const workerHub = hub!;
   const engine = await PiAgentEngine.create(config, workerHub);
   const worker = new TaskWorker(config, workerHub, engine);
   if (command === "once") {
@@ -267,4 +275,120 @@ function adapterArgument(argv: string[]): string | undefined {
 
 function adapterList(extraDir?: string): string {
   return listAdapterIds(extraDir).join(", ");
+}
+
+function hostCapabilities(config: AgentHostConfig): string[] {
+  return [
+    "pi",
+    "code",
+    "hub-task",
+    ...(config.builtinCapabilitiesEnabled
+      ? [
+          "subagent",
+          "plan-todo",
+          "long-term-memory",
+          "lsp",
+          "mcp",
+          "background-process",
+        ]
+      : []),
+    ...(config.webSearchMode !== "disabled" ? ["web-search"] : []),
+    ...(config.remoteToolPolicy === "full" ? ["workspace-write"] : []),
+  ];
+}
+
+async function resolveNodeCredential(
+  config: AgentHostConfig,
+): Promise<{ token: string; saved: boolean }> {
+  if (config.hubNodeToken) {
+    return { token: config.hubNodeToken, saved: true };
+  }
+  if (config.hubUsername && config.hubPassword) {
+    const login = await new HubClient(config.hubUrl!, "").agentLogin({
+      username: config.hubUsername,
+      password: config.hubPassword,
+      node_id: config.nodeId,
+      actor_id: config.actorId,
+      display_name: config.nodeDisplayName,
+      capabilities: hostCapabilities(config),
+      metadata: {
+        origin: "worker-boot",
+        workspace_root: config.workspaceRoot,
+      },
+    });
+    const service =
+      process.env.AGENT_HUB_NODE_TOKEN_CREDENTIAL_SERVICE?.trim() ||
+      "AgentSociety Hub Node";
+    const account =
+      process.env.AGENT_HUB_NODE_TOKEN_CREDENTIAL_ACCOUNT?.trim() ||
+      userInfo().username;
+    let saved = true;
+    try {
+      writeSystemCredential(service, account, login.node_token, "Hub node credential");
+    } catch (error) {
+      saved = false;
+      console.warn(
+        `System credential store unavailable (${error instanceof Error ? error.message : String(error)}); keeping the node credential in memory only.`,
+      );
+    }
+    return { token: login.node_token, saved };
+  }
+  if (config.hubToken) {
+    return { token: config.hubToken, saved: true };
+  }
+  throw new Error(
+    "Hub is not configured with a password account or token. Run ./agent setup.",
+  );
+}
+
+async function resolveHubClient(
+  config: AgentHostConfig,
+): Promise<HubClient> {
+  const { token } = await resolveNodeCredential(config);
+  return new HubClient(config.hubUrl!, token);
+}
+
+async function connectCommand(config: AgentHostConfig): Promise<void> {
+  if (!config.hubEnabled || !config.hubUrl) {
+    throw new Error("Hub is not configured. Run ./agent setup.");
+  }
+  let username = config.hubUsername ?? "";
+  let password = config.hubPassword ?? "";
+  const interactive = Boolean(stdin.isTTY && stdout.isTTY);
+  if (!username || !password) {
+    if (!interactive) {
+      throw new Error(
+        "Hub password account is not configured. Run ./agent setup.",
+      );
+    }
+    const muted = new Writable({
+      write(_chunk, _encoding, callback) {
+        callback();
+      },
+    });
+    const rl = createInterface({ input: stdin, output: muted, terminal: true });
+    if (!username) {
+      username = (await rl.question("Hub username: ")).trim();
+    }
+    if (!password) {
+      password = await rl.question("Hub password: ");
+      process.stdout.write("\n");
+    }
+    rl.close();
+  }
+  const resolved = { ...config, hubUsername: username, hubPassword: password };
+  const { token, saved } = await resolveNodeCredential(resolved);
+  const hub = new HubClient(resolved.hubUrl!, token);
+  await registerHost(resolved, hub);
+  console.log(
+    `Connected to Hub as ${username} on node ${config.nodeId} (${config.actorId})`,
+  );
+  if (saved) {
+    console.log("Node credential saved to the system credential store.");
+  } else {
+    console.warn(
+      "The system credential store is unavailable on this machine. " +
+        `Set AGENT_HUB_NODE_TOKEN=${token} in .env.agent to persist the node credential.`,
+    );
+  }
 }

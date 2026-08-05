@@ -21,6 +21,35 @@ export function readSystemCredential(
   }
 }
 
+export function writeSystemCredential(
+  service: string,
+  account: string,
+  value: string,
+  label: string,
+): void {
+  try {
+    new Entry(service, account).setPassword(value);
+  } catch {
+    throw new Error(
+      `Could not save the ${label} credential in the system store`,
+    );
+  }
+}
+
+export function deleteSystemCredential(
+  service: string,
+  account: string,
+  label: string,
+): void {
+  try {
+    new Entry(service, account).deletePassword();
+  } catch {
+    throw new Error(
+      `Could not delete the ${label} credential from the system store`,
+    );
+  }
+}
+
 export function readLegacyMacKeychainCredential(
   service: string | undefined,
   account: string | undefined,

@@ -260,6 +260,54 @@ export class HubClient {
     return response.artifact;
   }
 
+  async agentLogin(item: {
+    username: string;
+    password: string;
+    node_id: string;
+    actor_id?: string;
+    display_name?: string;
+    capabilities?: string[];
+    metadata?: Record<string, unknown>;
+  }): Promise<{
+    node_token: string;
+    node: NodeRecord;
+    actor: Actor;
+    principal: Principal;
+    tenant_id: string;
+    user: {
+      username: string;
+      display_name: string;
+      principal_id: string;
+      tenant_id: string;
+      role: string;
+    };
+  }> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30_000);
+    try {
+      const response = await this.fetchImpl(`${this.baseUrl}/v1/auth/agent-login`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(item),
+        signal: controller.signal,
+      });
+      const payload = (await response.json()) as Record<string, unknown>;
+      if (!response.ok) {
+        const message =
+          typeof payload.error === "string"
+            ? payload.error
+            : "Hub agent-login failed";
+        throw new HubError(message, response.status);
+      }
+      return payload as unknown as Awaited<ReturnType<HubClient["agentLogin"]>>;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   private async request<T = Record<string, unknown>>(
     path: string,
     options: {

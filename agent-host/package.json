@@ -17,6 +17,7 @@
     "start": "node dist/src/cli.js",
     "interactive": "node dist/src/cli.js interactive",
     "tui": "node dist/src/cli.js tui",
+    "connect": "node dist/src/cli.js connect",
     "sessions": "node dist/src/cli.js sessions",
     "doctor": "node dist/src/cli.js doctor",
     "worker": "node dist/src/cli.js worker",

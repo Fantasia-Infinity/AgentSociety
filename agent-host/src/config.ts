@@ -19,6 +19,8 @@ export interface AgentHostConfig {
   hubEnabled: boolean;
   hubUrl?: string;
   hubToken?: string;
+  hubUsername?: string;
+  hubPassword?: string;
   hubNodeToken?: string;
   principalId: string;
   principalDisplayName: string;
@@ -181,7 +183,35 @@ export function loadConfig(): AgentHostConfig {
         process.env.AGENT_HUB_TOKEN_KEYCHAIN_ACCOUNT?.trim(),
         "Hub",
       );
-  const hubConfig = resolveHubConfig(hubUrl, hubToken);
+  const hubUsername = hubRuntimeDisabled
+    ? undefined
+    : process.env.AGENT_HUB_USERNAME?.trim() || undefined;
+  const hubPassword = hubRuntimeDisabled
+    ? undefined
+    : process.env.AGENT_HUB_PASSWORD?.trim() ||
+      configuredCredential(
+        process.env.AGENT_HUB_PASSWORD_CREDENTIAL_SERVICE?.trim(),
+        process.env.AGENT_HUB_PASSWORD_CREDENTIAL_ACCOUNT?.trim(),
+        process.env.AGENT_HUB_PASSWORD_KEYCHAIN_SERVICE?.trim(),
+        process.env.AGENT_HUB_PASSWORD_KEYCHAIN_ACCOUNT?.trim(),
+        "Hub password",
+      );
+  const hubNodeToken = hubRuntimeDisabled
+    ? undefined
+    : process.env.AGENT_HUB_NODE_TOKEN?.trim() ||
+      configuredCredential(
+        process.env.AGENT_HUB_NODE_TOKEN_CREDENTIAL_SERVICE?.trim(),
+        process.env.AGENT_HUB_NODE_TOKEN_CREDENTIAL_ACCOUNT?.trim(),
+        process.env.AGENT_HUB_NODE_TOKEN_KEYCHAIN_SERVICE?.trim(),
+        process.env.AGENT_HUB_NODE_TOKEN_KEYCHAIN_ACCOUNT?.trim(),
+        "Hub node credential",
+      );
+  const hubConfig = resolveHubConfig(
+    hubUrl,
+    hubToken,
+    hubUsername,
+    hubPassword,
+  );
 
   const piProvider = process.env.PI_PROVIDER?.trim() || undefined;
   const piModel = process.env.PI_MODEL?.trim() || undefined;
@@ -218,9 +248,7 @@ export function loadConfig(): AgentHostConfig {
   );
   return {
     ...hubConfig,
-    ...(process.env.AGENT_HUB_NODE_TOKEN?.trim()
-      ? { hubNodeToken: process.env.AGENT_HUB_NODE_TOKEN.trim() }
-      : {}),
+    ...(hubNodeToken ? { hubNodeToken } : {}),
     principalId: required("AGENT_PRINCIPAL_ID", `human-${owner}`),
     principalDisplayName: required(
       "AGENT_PRINCIPAL_NAME",
@@ -294,19 +322,36 @@ function configuredCredential(
 export function resolveHubConfig(
   hubUrl?: string,
   hubToken?: string,
-):
-  | { hubEnabled: false }
-  | { hubEnabled: true; hubUrl: string; hubToken: string } {
-  if ((hubUrl === undefined) !== (hubToken === undefined)) {
+  hubUsername?: string,
+  hubPassword?: string,
+): { hubEnabled: false } | {
+  hubEnabled: true;
+  hubUrl: string;
+  hubToken?: string;
+  hubUsername?: string;
+  hubPassword?: string;
+} {
+  const hasToken = Boolean(hubToken);
+  const hasPassword = Boolean(hubUsername && hubPassword);
+  if ((hubUrl === undefined && (hasToken || hasPassword)) ||
+      (hubUrl !== undefined && !hasToken && !hasPassword)) {
     throw new Error(
-      "AGENT_HUB_URL and AGENT_HUB_TOKEN must be configured together",
+      "AGENT_HUB_URL and Hub credentials must be configured together",
     );
   }
-  if (!hubUrl || !hubToken) return { hubEnabled: false };
+  if (!hubUrl) return { hubEnabled: false };
+  if (hasToken) {
+    console.warn(
+      "Hub token mode is deprecated; register a password account and run `agent setup` to switch.",
+    );
+  }
   return {
     hubEnabled: true,
     hubUrl: assertHttpUrl(hubUrl, "AGENT_HUB_URL"),
-    hubToken: secureHubToken(hubToken),
+    ...(hasToken ? { hubToken: secureHubToken(hubToken!) } : {}),
+    ...(hasPassword
+      ? { hubUsername: hubUsername!, hubPassword: hubPassword! }
+      : {}),
   };
 }
 

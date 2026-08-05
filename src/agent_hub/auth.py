@@ -11,6 +11,7 @@ class AuthenticatedContext:
     principal_id: str | None = None
     actor_id: str | None = None
     node_id: str | None = None
+    session_id: str | None = None
 
     @property
     def is_admin(self) -> bool:
@@ -23,6 +24,7 @@ class AuthenticatedContext:
             "principal_id": self.principal_id,
             "actor_id": self.actor_id,
             "node_id": self.node_id,
+            "session_id": self.session_id,
         }
 
     @classmethod
@@ -33,6 +35,7 @@ class AuthenticatedContext:
             principal_id=claims.get("principal_id"),
             actor_id=claims.get("actor_id"),
             node_id=claims.get("node_id"),
+            session_id=claims.get("session_id"),
         )
 
 

@@ -31,12 +31,29 @@ class AgentHubApi:
     """HTTP-independent router for the coordination API."""
 
     prefix = "/v1/hub"
+    auth_prefix = "/v1/auth"
+    public_auth_posts = frozenset(
+        {
+            "/v1/auth/register",
+            "/v1/auth/login",
+            "/v1/auth/agent-login",
+        }
+    )
 
     def __init__(
-        self, store: AgentHubStore, object_store: ObjectStore | None = None
+        self,
+        store: AgentHubStore,
+        object_store: ObjectStore | None = None,
+        *,
+        allow_registration: bool = True,
     ) -> None:
         self.store = store
         self.object_store = object_store
+        self.allow_registration = allow_registration
+
+    @classmethod
+    def is_public_auth_post(cls, path: str) -> bool:
+        return path in cls.public_auth_posts
 
     @classmethod
     def matches(cls, path: str) -> bool:
@@ -198,6 +215,25 @@ class AgentHubApi:
             return HTTPStatus.OK, {
                 "run": self.store.get_run(parts[1], tenant_id=tenant_id)
             }
+        if path == f"{self.auth_prefix}/me":
+            if context is None or not context.principal_id:
+                raise ApiError("authentication required", HTTPStatus.UNAUTHORIZED)
+            principal = self.store._principal(context.principal_id)
+            account = self.store.account_for_principal(context.principal_id)
+            sessions = self.store.list_sessions(
+                principal_id=context.principal_id
+            )
+            tokens = self.store.list_principal_tokens(context.principal_id)
+            return HTTPStatus.OK, {
+                "me": {
+                    "principal": principal,
+                    "account": account,
+                    "tenant_id": context.tenant_id,
+                    "role": context.role,
+                },
+                "sessions": sessions,
+                "tokens": tokens,
+            }
         return None
 
     def _post(
@@ -207,6 +243,98 @@ class AgentHubApi:
         context: AuthenticatedContext | None = None,
     ) -> tuple[HTTPStatus, dict[str, Any]] | None:
         tenant_id = self._resolve_tenant(payload, context)
+        if path == f"{self.auth_prefix}/register":
+            if not self.allow_registration:
+                raise ApiError("registration is disabled", HTTPStatus.FORBIDDEN)
+            account = self.store.register_user(
+                username=str(payload.get("username", "")),
+                password=str(payload.get("password", "")),
+                display_name=str(payload.get("display_name", "")).strip(),
+                tenant_id=tenant_id,
+            )
+            return HTTPStatus.CREATED, {"user": account}
+        if path == f"{self.auth_prefix}/login":
+            account = self.store.authenticate_password(
+                username=str(payload.get("username", "")),
+                password=str(payload.get("password", "")),
+            )
+            if account is None:
+                raise ApiError("invalid username or password", HTTPStatus.UNAUTHORIZED)
+            raw, record = self.store.create_session(
+                account,
+                label=str(payload.get("label", "api")),
+            )
+            return HTTPStatus.OK, {
+                "session_token": raw,
+                "session": record,
+                "user": {
+                    "username": account["username"],
+                    "display_name": account["display_name"],
+                    "principal_id": account["principal_id"],
+                    "tenant_id": account["tenant_id"],
+                    "role": account["role"],
+                },
+            }
+        if path == f"{self.auth_prefix}/agent-login":
+            item = self.store.agent_login(
+                username=str(payload.get("username", "")),
+                password=str(payload.get("password", "")),
+                node_id=str(payload.get("node_id", "")),
+                actor_id=str(payload.get("actor_id", "")).strip() or None,
+                display_name=str(payload.get("display_name", "")).strip() or None,
+                capabilities=tuple(
+                    str(c).strip()
+                    for c in (payload.get("capabilities") or [])
+                    if str(c).strip()
+                ),
+                metadata=object_value(payload, "metadata"),
+            )
+            return HTTPStatus.OK, item
+        if path == f"{self.auth_prefix}/logout":
+            if context is None or not context.session_id:
+                raise ApiError("session authentication required", HTTPStatus.UNAUTHORIZED)
+            return HTTPStatus.OK, {
+                "session": self.store.revoke_session(context.session_id)
+            }
+        if path == f"{self.auth_prefix}/change-password":
+            if context is None or not context.principal_id:
+                raise ApiError("authentication required", HTTPStatus.UNAUTHORIZED)
+            account = self.store.account_for_principal(context.principal_id)
+            if account is None:
+                raise ApiError(
+                    "no password account for this principal", HTTPStatus.CONFLICT
+                )
+            ok = self.store.change_password(
+                username=str(account["username"]),
+                old_password=str(payload.get("old_password", "")),
+                new_password=str(payload.get("new_password", "")),
+            )
+            if not ok:
+                raise ApiError("invalid current password", HTTPStatus.UNAUTHORIZED)
+            self.store.revoke_principal_sessions(
+                principal_id=context.principal_id, except_hash=context.session_id
+            )
+            return HTTPStatus.OK, {"changed": True}
+        if path == f"{self.auth_prefix}/sessions/revoke":
+            if context is None or not context.principal_id:
+                raise ApiError("authentication required", HTTPStatus.UNAUTHORIZED)
+            session_hash = str(payload.get("session_token_id", "")).strip()
+            if not session_hash:
+                raise ValueError("session_token_id is required")
+            record = self.store.revoke_session(session_hash)
+            if record["principal_id"] != context.principal_id:
+                raise ApiError("session not found", HTTPStatus.NOT_FOUND)
+            return HTTPStatus.OK, {"session": record}
+        if path == f"{self.auth_prefix}/tokens/revoke":
+            if context is None or not context.principal_id:
+                raise ApiError("authentication required", HTTPStatus.UNAUTHORIZED)
+            token_id = str(payload.get("token_id", "")).strip()
+            if not token_id:
+                raise ValueError("token_id is required")
+            record = self.store.revoke_principal_token(
+                token_id, context.principal_id
+            )
+            return HTTPStatus.OK, {"token": record}
         if path == f"{self.prefix}/tenants":
             self._require_admin(context)
             item = self.store.create_tenant(TenantRegistration.from_dict(payload))

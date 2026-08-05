@@ -78,6 +78,7 @@ def _layout(title: str, body: str, *, csrf: str | None = None) -> str:
         '<a href="/web/artifacts">Artifacts</a>'
         '<a href="/web/nodes">Nodes &amp; Identities</a>'
         '<a href="/web/tenants">Tenants</a>'
+        '<a href="/web/account">Account</a>'
         f"{logout}</div>"
     )
     return (
@@ -88,17 +89,138 @@ def _layout(title: str, body: str, *, csrf: str | None = None) -> str:
     )
 
 
-def login_page(error: str | None = None) -> str:
+def login_page(
+    error: str | None = None, *, registration_open: bool = True
+) -> str:
     error_html = f'<div class="error">{_esc(error)}</div>' if error else ""
+    register_link = (
+        '<p class="muted"><a href="/web/register">Create an account</a></p>'
+        if registration_open
+        else ""
+    )
     body = (
         f"<h1>Hub login</h1>{error_html}"
         '<form method="post" action="/web/login">'
-        '<label for="token">Hub API token</label>'
-        '<input id="token" name="token" type="password" required '
-        'autocomplete="current-password" placeholder="bootstrap or tenant token">'
+        '<label for="username">Username</label>'
+        '<input id="username" name="username" type="text" required '
+        'autocomplete="username" placeholder="your username">'
+        '<label for="password">Password</label>'
+        '<input id="password" name="password" type="password" required '
+        'autocomplete="current-password">'
         '<button type="submit">Sign in</button></form>'
+        '<details><summary class="muted">Use an admin/token login instead</summary>'
+        '<form method="post" action="/web/login">'
+        '<label for="token">Hub API token</label>'
+        '<input id="token" name="token" type="password" '
+        'autocomplete="current-password" placeholder="bootstrap or tenant token">'
+        '<button type="submit">Sign in with token</button></form></details>'
+        f"{register_link}"
     )
     return _layout("Login", body)
+
+
+def register_page(
+    error: str | None = None,
+    *,
+    username: str = "",
+    display_name: str = "",
+) -> str:
+    error_html = f'<div class="error">{_esc(error)}</div>' if error else ""
+    body = (
+        f"<h1>Create account</h1>{error_html}"
+        '<form method="post" action="/web/register">'
+        '<label for="username">Username</label>'
+        '<input id="username" name="username" type="text" required '
+        f'autocomplete="username" value="{_esc(username)}" '
+        'placeholder="lowercase letters, digits, dot, dash, underscore">'
+        '<label for="display_name">Display name</label>'
+        '<input id="display_name" name="display_name" type="text" '
+        f'value="{_esc(display_name)}">'
+        '<label for="password">Password (at least 10 chars, letters + digits)</label>'
+        '<input id="password" name="password" type="password" required '
+        'autocomplete="new-password">'
+        '<label for="password2">Repeat password</label>'
+        '<input id="password2" name="password2" type="password" required '
+        'autocomplete="new-password">'
+        '<button type="submit">Register</button></form>'
+        '<p class="muted"><a href="/web/login">Back to login</a></p>'
+    )
+    return _layout("Register", body)
+
+
+def account_page(
+    me: dict[str, Any],
+    sessions: list[dict[str, Any]],
+    tokens: list[dict[str, Any]],
+    *,
+    csrf: str,
+    error: str | None = None,
+    notice: str | None = None,
+) -> str:
+    error_html = f'<div class="error">{_esc(error)}</div>' if error else ""
+    notice_html = (
+        f'<div class="notice">{_esc(notice)}</div>' if notice else ""
+    )
+    account = me.get("account") or {}
+    principal = me.get("principal") or {}
+    session_rows = "".join(
+        "<tr>"
+        f"<td>{_esc(session.get('label'))}</td>"
+        f"<td>{_esc(session.get('role'))}</td>"
+        f"<td>{_fmt(session.get('created_at'))}</td>"
+        f"<td>{_fmt(session.get('expires_at'))}</td>"
+        f"<td>{'revoked' if session.get('revoked_at') else 'active'}</td>"
+        f"<td><form method=\"post\" action=\"/web/account/sessions/revoke\">"
+        f'<input type="hidden" name="csrf_token" value="{_esc(csrf)}">'
+        f'<input type="hidden" name="session_token_id" '
+        f'value="{_esc(session.get("session_token_id"))}">'
+        '<button class="secondary" type="submit">Revoke</button></form></td>'
+        "</tr>"
+        for session in sessions
+    ) or "<tr><td colspan=6 class=muted>No sessions</td></tr>"
+    token_rows = "".join(
+        "<tr>"
+        f"<td>{_esc(token.get('label'))}</td>"
+        f"<td>{_esc(token.get('role'))}</td>"
+        f"<td>{_esc(token.get('node_id') or '-')}</td>"
+        f"<td>{_fmt(token.get('created_at'))}</td>"
+        f"<td>{_fmt(token.get('expires_at'))}</td>"
+        f"<td>{'revoked' if token.get('revoked_at') else 'active'}</td>"
+        f"<td><form method=\"post\" action=\"/web/account/tokens/revoke\">"
+        f'<input type="hidden" name="csrf_token" value="{_esc(csrf)}">'
+        f'<input type="hidden" name="token_id" value="{_esc(token.get("token_id"))}">'
+        '<button class="secondary" type="submit">Revoke</button></form></td>'
+        "</tr>"
+        for token in tokens
+    ) or "<tr><td colspan=7 class=muted>No node credentials</td></tr>"
+    body = (
+        f"<h1>Account</h1>{error_html}{notice_html}"
+        "<h2>Profile</h2>"
+        "<table>"
+        f"<tr><th>Username</th><td>{_esc(account.get('username') or '-')}</td></tr>"
+        f"<tr><th>Display name</th><td>{_esc(account.get('display_name') or principal.get('display_name') or '-')}</td></tr>"
+        f"<tr><th>Role</th><td>{_esc(me.get('role') or account.get('role') or '-')}</td></tr>"
+        f"<tr><th>Tenant</th><td>{_esc(me.get('tenant_id') or account.get('tenant_id') or '-')}</td></tr>"
+        f"<tr><th>Principal</th><td>{_esc(principal.get('principal_id') or '-')}</td></tr>"
+        "</table>"
+        "<h2>Change password</h2>"
+        '<form method="post" action="/web/account/change-password">'
+        f'<input type="hidden" name="csrf_token" value="{_esc(csrf)}">'
+        '<label for="old_password">Current password</label>'
+        '<input id="old_password" name="old_password" type="password" required '
+        'autocomplete="current-password">'
+        '<label for="new_password">New password</label>'
+        '<input id="new_password" name="new_password" type="password" required '
+        'autocomplete="new-password">'
+        '<button type="submit">Change password</button></form>'
+        "<h2>Sessions</h2>"
+        f"<table><tr><th>Label</th><th>Role</th><th>Created</th><th>Expires</th>"
+        f"<th>Status</th><th></th></tr>{session_rows}</table>"
+        "<h2>Node credentials</h2>"
+        f"<table><tr><th>Label</th><th>Role</th><th>Node</th><th>Created</th>"
+        f"<th>Expires</th><th>Status</th><th></th></tr>{token_rows}</table>"
+    )
+    return _layout("Account", body)
 
 
 def dashboard_page(

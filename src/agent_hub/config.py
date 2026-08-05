@@ -59,6 +59,7 @@ class HubSettings:
     object_store_url: str | None
     public_url: str | None
     allow_non_loopback_bind: bool
+    allow_registration: bool
     enable_mcp: bool
     web_secret: str | None
     web_cookie_secure: bool
@@ -88,6 +89,7 @@ class HubSettings:
             allow_non_loopback_bind=_bool(
                 "AGENT_HUB_ALLOW_NON_LOOPBACK_BIND", False
             ),
+            allow_registration=_bool("AGENT_HUB_ALLOW_REGISTRATION", True),
             enable_mcp=_bool("AGENT_HUB_ENABLE_MCP", True),
             web_secret=os.environ.get("AGENT_HUB_WEB_SECRET", "").strip() or None,
             web_cookie_secure=_bool("AGENT_HUB_WEB_COOKIE_SECURE", True),

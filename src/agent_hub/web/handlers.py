@@ -11,11 +11,13 @@ from urllib.parse import parse_qs, quote
 from ..auth import AuthenticatedContext
 from ..errors import ApiError, map_error
 from .pages import (
+    account_page,
     artifacts_page,
     dashboard_page,
     login_page,
     nodes_page,
     not_found_page,
+    register_page,
     runs_page,
     task_detail_page,
     tasks_page,
@@ -34,7 +36,24 @@ class WebHandlersMixin:
 
     def _web_get(self, path: str, query_string: str) -> None:
         if path == "/web/login":
-            self._send_html(HTTPStatus.OK, login_page())
+            self._send_html(
+                HTTPStatus.OK,
+                login_page(
+                    registration_open=self.server.api.allow_registration
+                ),
+            )
+            return
+        if path == "/web/register":
+            self._send_html(
+                HTTPStatus.OK,
+                register_page(
+                    error=(
+                        "Registration is disabled."
+                        if not self.server.api.allow_registration
+                        else None
+                    )
+                ),
+            )
             return
         session = self._web_session()
         if session is None:
@@ -110,6 +129,28 @@ class WebHandlersMixin:
                     principals["principals"],
                     actors["actors"],
                     nodes["nodes"],
+                ),
+            )
+            return
+        if path == "/web/account":
+            try:
+                _, data = self.server.api.get("/v1/auth/me", "", context)
+            except ApiError as exc:
+                self._send_html(
+                    exc.status,
+                    login_page(str(exc.message)),
+                )
+                return
+            query = parse_qs(query_string)
+            notice = "Password changed." if query.get("changed") else None
+            self._send_html(
+                HTTPStatus.OK,
+                account_page(
+                    data["me"],
+                    data["sessions"],
+                    data["tokens"],
+                    csrf=self.server.web.csrf(session_id),
+                    notice=notice,
                 ),
             )
             return
@@ -217,30 +258,64 @@ class WebHandlersMixin:
     def _web_post(self, path: str) -> None:
         form = self._read_form()
         if path == "/web/login":
+            username = (form.get("username") or [""])[0].strip()
+            password = (form.get("password") or [""])[0]
             supplied = (form.get("token") or [""])[0]
-            if hmac.compare_digest(supplied, self.server.api_token):
-                _, cookie = self.server.web.create({"role": "admin"})
-            else:
-                context = self.server.api.authenticate(supplied)
-                if (
-                    context is None
-                    and self.server.oidc_provider is not None
-                ):
-                    try:
-                        context = self.server.oidc_provider.validate_id_token(
-                            supplied
-                        )
-                    except RuntimeError:
-                        context = None
-                if context is None or context.role == "node":
+            if username and password:
+                try:
+                    _, login = self.server.api.post(
+                        "/v1/auth/login",
+                        {"username": username, "password": password, "label": "web"},
+                        None,
+                    )
+                except ApiError as exc:
                     self._send_html(
-                        HTTPStatus.UNAUTHORIZED,
+                        exc.status,
                         login_page(
-                            "Invalid token. Use the bootstrap token or a tenant token."
+                            str(exc.message),
+                            registration_open=self.server.api.allow_registration,
                         ),
                     )
                     return
-                _, cookie = self.server.web.create(context.to_dict())
+                user = login["user"]
+                _, cookie = self.server.web.create(
+                    {
+                        "role": user["role"],
+                        "tenant_id": user["tenant_id"],
+                        "principal_id": user["principal_id"],
+                    }
+                )
+            elif supplied:
+                if hmac.compare_digest(supplied, self.server.api_token):
+                    _, cookie = self.server.web.create({"role": "admin"})
+                else:
+                    context = self.server.api.authenticate(supplied)
+                    if context is None and self.server.oidc_provider is not None:
+                        try:
+                            context = self.server.oidc_provider.validate_id_token(
+                                supplied
+                            )
+                        except RuntimeError:
+                            context = None
+                    if context is None or context.role == "node":
+                        self._send_html(
+                            HTTPStatus.UNAUTHORIZED,
+                            login_page(
+                                "Invalid token. Use the bootstrap token or a tenant token.",
+                                registration_open=self.server.api.allow_registration,
+                            ),
+                        )
+                        return
+                    _, cookie = self.server.web.create(context.to_dict())
+            else:
+                self._send_html(
+                    HTTPStatus.BAD_REQUEST,
+                    login_page(
+                        "Enter your username and password (or an admin token).",
+                        registration_open=self.server.api.allow_registration,
+                    ),
+                )
+                return
             self.send_response(HTTPStatus.SEE_OTHER)
             self.send_header(
                 "Set-Cookie",
@@ -251,6 +326,47 @@ class WebHandlersMixin:
             self.send_header("Location", "/web")
             self.send_header("Content-Length", "0")
             self.end_headers()
+            return
+        if path == "/web/register":
+            if not self.server.api.allow_registration:
+                self._send_html(
+                    HTTPStatus.FORBIDDEN,
+                    register_page("Registration is disabled."),
+                )
+                return
+            password = (form.get("password") or [""])[0]
+            password2 = (form.get("password2") or [""])[0]
+            if password != password2:
+                self._send_html(
+                    HTTPStatus.BAD_REQUEST,
+                    register_page(
+                        "Passwords do not match.",
+                        username=(form.get("username") or [""])[0],
+                        display_name=(form.get("display_name") or [""])[0],
+                    ),
+                )
+                return
+            try:
+                self.server.api.post(
+                    "/v1/auth/register",
+                    {
+                        "username": (form.get("username") or [""])[0],
+                        "password": password,
+                        "display_name": (form.get("display_name") or [""])[0],
+                    },
+                    None,
+                )
+            except ApiError as exc:
+                self._send_html(
+                    exc.status,
+                    register_page(
+                        str(exc.message),
+                        username=(form.get("username") or [""])[0],
+                        display_name=(form.get("display_name") or [""])[0],
+                    ),
+                )
+                return
+            self._redirect("/web/login")
             return
 
         session = self._web_session()
@@ -267,6 +383,80 @@ class WebHandlersMixin:
                 HTTPStatus.FORBIDDEN,
                 "<!doctype html><h1>403</h1><p>Invalid or missing CSRF token.</p>",
             )
+            return
+
+        if path == "/web/account/change-password":
+            try:
+                self.server.api.post(
+                    "/v1/auth/change-password",
+                    {
+                        "old_password": (form.get("old_password") or [""])[0],
+                        "new_password": (form.get("new_password") or [""])[0],
+                    },
+                    context,
+                )
+            except ApiError as exc:
+                _, data = self.server.api.get("/v1/auth/me", "", context)
+                self._send_html(
+                    exc.status,
+                    account_page(
+                        data["me"],
+                        data["sessions"],
+                        data["tokens"],
+                        csrf=self.server.web.csrf(session_id),
+                        error=exc.message,
+                    ),
+                )
+                return
+            self._redirect("/web/account?changed=1")
+            return
+        if path == "/web/account/sessions/revoke":
+            try:
+                self.server.api.post(
+                    "/v1/auth/sessions/revoke",
+                    {
+                        "session_token_id": (
+                            form.get("session_token_id") or [""]
+                        )[0]
+                    },
+                    context,
+                )
+            except ApiError as exc:
+                _, data = self.server.api.get("/v1/auth/me", "", context)
+                self._send_html(
+                    exc.status,
+                    account_page(
+                        data["me"],
+                        data["sessions"],
+                        data["tokens"],
+                        csrf=self.server.web.csrf(session_id),
+                        error=exc.message,
+                    ),
+                )
+                return
+            self._redirect("/web/account")
+            return
+        if path == "/web/account/tokens/revoke":
+            try:
+                self.server.api.post(
+                    "/v1/auth/tokens/revoke",
+                    {"token_id": (form.get("token_id") or [""])[0]},
+                    context,
+                )
+            except ApiError as exc:
+                _, data = self.server.api.get("/v1/auth/me", "", context)
+                self._send_html(
+                    exc.status,
+                    account_page(
+                        data["me"],
+                        data["sessions"],
+                        data["tokens"],
+                        csrf=self.server.web.csrf(session_id),
+                        error=exc.message,
+                    ),
+                )
+                return
+            self._redirect("/web/account")
             return
 
         if path == "/web/logout":

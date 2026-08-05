@@ -89,6 +89,31 @@ class TokenStore:
                 ).fetchall()
             return [self._token_record(str(row["token_id"])) for row in rows]
 
+    def list_principal_tokens(self, principal_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT token_id FROM hub_auth_tokens
+                WHERE principal_id=? ORDER BY created_at DESC
+                """,
+                (principal_id,),
+            ).fetchall()
+            return [self._token_record(str(row["token_id"])) for row in rows]
+
+    def revoke_principal_token(
+        self, token_id: str, principal_id: str
+    ) -> dict[str, Any]:
+        now = time.time()
+        with self._condition, self._connection:
+            record = self._token_record(token_id)
+            if record["principal_id"] != principal_id:
+                raise LookupError("token not found")
+            self._connection.execute(
+                "UPDATE hub_auth_tokens SET revoked_at=? WHERE token_id=?",
+                (now, token_id),
+            )
+            return self._token_record(token_id)
+
     def revoke_auth_token(
         self, token_id: str, *, tenant_id: str | None = None
     ) -> dict[str, Any]:
@@ -180,4 +205,3 @@ class TokenStore:
                 tenant_id=str(row["tenant_id"]),
                 principal_id=str(row["principal_id"]),
             )
-

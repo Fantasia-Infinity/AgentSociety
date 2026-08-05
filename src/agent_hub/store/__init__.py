@@ -8,6 +8,7 @@ from .stats import StatsStore
 from .tasks import TaskStore
 from .tenants import TenantStore
 from .tokens import TokenStore
+from .users import UserStore
 
 
 class AgentHubStore(
@@ -18,6 +19,7 @@ class AgentHubStore(
     ArtifactStore,
     TenantStore,
     TokenStore,
+    UserStore,
     StatsStore,
 ):
     """Durable local-first coordination state shared by Agent Hosts.

@@ -17,6 +17,8 @@ TENANT_TABLES = (
     "hub_task_events",
     "hub_artifacts",
     "hub_task_controls",
+    "hub_user_accounts",
+    "hub_auth_sessions",
 )
 
 
@@ -277,6 +279,31 @@ class StoreBase:
                     role TEXT NOT NULL,
                     created_at REAL NOT NULL,
                     PRIMARY KEY (provider, subject)
+                );
+
+                CREATE TABLE IF NOT EXISTS hub_user_accounts (
+                    username TEXT PRIMARY KEY,
+                    password_hash TEXT NOT NULL,
+                    principal_id TEXT UNIQUE NOT NULL REFERENCES hub_principals(principal_id),
+                    tenant_id TEXT NOT NULL REFERENCES hub_tenants(tenant_id),
+                    role TEXT NOT NULL,
+                    display_name TEXT NOT NULL,
+                    failed_attempts INTEGER NOT NULL DEFAULT 0,
+                    locked_until REAL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS hub_auth_sessions (
+                    session_token_hash TEXT PRIMARY KEY,
+                    principal_id TEXT NOT NULL REFERENCES hub_principals(principal_id),
+                    tenant_id TEXT NOT NULL REFERENCES hub_tenants(tenant_id),
+                    role TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    revoked_at REAL,
+                    last_seen_at REAL
                 );
                 """
             )

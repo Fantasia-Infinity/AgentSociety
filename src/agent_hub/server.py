@@ -150,6 +150,18 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
                 HTTPStatus.OK, response, content_type="application/a2a+json"
             )
             return
+        if AgentHubApi.is_public_auth_post(parsed.path):
+            try:
+                payload = self._read_json()
+                response = self.server.api.post(parsed.path, payload, None)
+            except (json.JSONDecodeError, ApiError) as exc:
+                self._send_api_error(exc)
+                return
+            if response is None:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+                return
+            self._send_json(*response)
+            return
         if not AgentHubApi.matches(parsed.path):
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
             return
@@ -180,6 +192,9 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
             context = self.server.api.authenticate(raw)
             if context is not None:
                 return context
+            session_context = self.server.api.store.authenticate_session(raw)
+            if session_context is not None:
+                return session_context
             if self.server.oidc_provider is not None:
                 try:
                     context = self.server.oidc_provider.validate_id_token(raw)
@@ -286,7 +301,11 @@ def main() -> None:
         raise SystemExit(f"Configuration error: {exc}") from exc
 
     store = AgentHubStore(settings.database_url or settings.state_db)
-    api = AgentHubApi(store, build_object_store(settings.object_store_url))
+    api = AgentHubApi(
+        store,
+        build_object_store(settings.object_store_url),
+        allow_registration=settings.allow_registration,
+    )
     oidc_provider = None
     if settings.oidc_issuer is not None:
         from .oidc import JwksOidcProvider
