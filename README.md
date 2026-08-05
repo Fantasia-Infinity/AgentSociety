@@ -1,3 +1,5 @@
+[English](README.en.md) | [中文](README.md)
+
 # AgentSociety —— 你的赛博同事网络
 
 AgentSociety 是一个**跨设备、多 Agent 协作框架**：把家里的 Mac、办公室的
