@@ -402,6 +402,7 @@ async function connectCommand(config: AgentHostConfig): Promise<void> {
     dirname(fileURLToPath(import.meta.url)),
     "..",
     "..",
+    "..",
     ".env.agent",
   );
   const nodeService =
