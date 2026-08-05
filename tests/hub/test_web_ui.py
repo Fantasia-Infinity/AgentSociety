@@ -153,9 +153,11 @@ class WebUiIntegrationTests(unittest.TestCase):
                         with opener.open(request, timeout=2) as response:
                             return response.read().decode()
 
-                    # Unauthenticated /web redirects to login.
+                    # Unauthenticated /web shows the public landing page.
                     with urlopen(f"{base}/web/", timeout=2) as response:
-                        self.assertIn("/web/login", response.geturl())
+                        body = response.read().decode()
+                        self.assertIn("How it works", body)
+                        self.assertIn("/web/login", body)
 
                     # Login with the raw bootstrap token.
                     dashboard = post("/web/login", {"token": "standalone-hub-token-123456789"})

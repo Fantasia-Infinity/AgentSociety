@@ -14,6 +14,7 @@ from .pages import (
     account_page,
     artifacts_page,
     dashboard_page,
+    landing_page,
     login_page,
     nodes_page,
     not_found_page,
@@ -35,6 +36,16 @@ class WebHandlersMixin:
     """
 
     def _web_get(self, path: str, query_string: str) -> None:
+        if path in ("/web", "/web/"):
+            session = self._web_session()
+            if session is None:
+                self._send_html(
+                    HTTPStatus.OK,
+                    landing_page(
+                        registration_open=self.server.api.allow_registration
+                    ),
+                )
+                return
         if path == "/web/login":
             self._send_html(
                 HTTPStatus.OK,
@@ -70,12 +81,24 @@ class WebHandlersMixin:
                 "/v1/hub/tasks", "limit=20", context
             )
             _, runs = self.server.api.get("/v1/hub/runs", "limit=10", context)
+            user = None
+            if context.principal_id:
+                try:
+                    _, me = self.server.api.get("/v1/auth/me", "", context)
+                    user = {
+                        "username": (me["me"]["account"] or {}).get("username"),
+                        "display_name": me["me"]["principal"].get("display_name"),
+                        "role": context.role,
+                    }
+                except ApiError:
+                    user = {"username": None, "display_name": None, "role": context.role}
             self._send_html(
                 HTTPStatus.OK,
                 dashboard_page(
                     stats,
                     tasks["tasks"],
                     runs["runs"],
+                    user=user,
                 ),
             )
             return
@@ -186,11 +209,15 @@ class WebHandlersMixin:
                     "",
                     context,
                 )
-                _, tokens = self.server.api.get(
-                    f"/v1/hub/tenants/{quote(requested_tenant, safe='')}/tokens",
-                    "",
-                    context,
-                )
+                can_manage_tokens = is_admin or context.role == "tenant_admin"
+                if can_manage_tokens:
+                    _, tokens = self.server.api.get(
+                        f"/v1/hub/tenants/{quote(requested_tenant, safe='')}/tokens",
+                        "",
+                        context,
+                    )
+                else:
+                    tokens = {"tokens": []}
                 tenant_scope = (
                     f"tenant_id={quote(requested_tenant)}" if is_admin else ""
                 )
@@ -664,11 +691,14 @@ class WebHandlersMixin:
             "",
             context,
         )
-        _, tokens = self.server.api.get(
-            f"/v1/hub/tenants/{quote(requested_tenant, safe='')}/tokens",
-            "",
-            context,
-        )
+        if is_admin or context.role == "tenant_admin":
+            _, tokens = self.server.api.get(
+                f"/v1/hub/tenants/{quote(requested_tenant, safe='')}/tokens",
+                "",
+                context,
+            )
+        else:
+            tokens = {"tokens": []}
         scope = f"tenant_id={quote(requested_tenant)}" if is_admin else ""
         _, principals = self.server.api.get(
             "/v1/hub/principals", scope, context

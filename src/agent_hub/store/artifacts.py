@@ -70,11 +70,36 @@ class ArtifactStore:
             return self._artifact(artifact_id)
 
     def list_artifacts(
-        self, *, limit: int = 100, tenant_id: str | None = None
+        self,
+        *,
+        limit: int = 100,
+        tenant_id: str | None = None,
+        principal_id: str | None = None,
     ) -> list[dict[str, Any]]:
         limit = min(max(limit, 1), 500)
         with self._lock:
-            if tenant_id is None:
+            if principal_id is not None:
+                if tenant_id is None:
+                    rows = self._connection.execute(
+                        """
+                        SELECT hub_artifacts.artifact_id FROM hub_artifacts
+                        JOIN hub_actors ON hub_actors.actor_id = hub_artifacts.created_by_actor_id
+                        WHERE hub_actors.principal_id=?
+                        ORDER BY hub_artifacts.created_at DESC LIMIT ?
+                        """,
+                        (principal_id, limit),
+                    ).fetchall()
+                else:
+                    rows = self._connection.execute(
+                        """
+                        SELECT hub_artifacts.artifact_id FROM hub_artifacts
+                        JOIN hub_actors ON hub_actors.actor_id = hub_artifacts.created_by_actor_id
+                        WHERE hub_actors.principal_id=? AND hub_artifacts.tenant_id=?
+                        ORDER BY hub_artifacts.created_at DESC LIMIT ?
+                        """,
+                        (principal_id, tenant_id, limit),
+                    ).fetchall()
+            elif tenant_id is None:
                 rows = self._connection.execute(
                     """
                     SELECT artifact_id FROM hub_artifacts
@@ -91,4 +116,3 @@ class ArtifactStore:
                     (tenant_id, limit),
                 ).fetchall()
             return [self._artifact(str(row["artifact_id"])) for row in rows]
-

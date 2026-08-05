@@ -58,7 +58,33 @@ button { background: var(--accent); color: #fff; border: 0; padding: 0.5rem 1rem
 button.secondary { background: #64748b; }
 .error { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca;
          padding: 0.75rem; border-radius: 6px; }
+.notice { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0;
+          padding: 0.75rem; border-radius: 6px; }
 .muted { color: #64748b; font-size: 0.85rem; }
+.hero { background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%);
+        color: #f8fafc; padding: 2.5rem 1.5rem; border-radius: 10px;
+        margin: 1.5rem 0; }
+.hero h1 { margin: 0 0 0.5rem; font-size: 1.8rem; }
+.hero p { margin: 0.25rem 0; color: #cbd5e1; max-width: 760px; }
+.hero .tag { display: inline-block; margin-top: 0.75rem; background: #2563eb;
+             padding: 0.2rem 0.7rem; border-radius: 999px; font-size: 0.75rem; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 0.9rem; margin: 1rem 0; }
+.panel { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px;
+         padding: 1rem; }
+.panel h3 { margin: 0 0 0.5rem; font-size: 1rem; }
+.panel code, code { background: #f1f5f9; padding: 0.1rem 0.35rem;
+                    border-radius: 4px; font-size: 0.85rem; }
+.cta { display: flex; gap: 0.75rem; margin-top: 1.25rem; flex-wrap: wrap; }
+.cta a { background: var(--accent); color: #fff; text-decoration: none;
+         padding: 0.55rem 1.1rem; border-radius: 6px; }
+.cta a.secondary { background: #64748b; }
+.steps { counter-reset: step; list-style: none; padding: 0; margin: 0.75rem 0 0; }
+.steps li { position: relative; padding: 0 0 0.9rem 2.2rem; }
+.steps li::before { counter-increment: step; content: counter(step);
+                    position: absolute; left: 0; top: 0; width: 1.5rem; height: 1.5rem;
+                    background: var(--accent); color: #fff; border-radius: 999px;
+                    text-align: center; font-size: 0.85rem; line-height: 1.5rem; }
 """
 
 
@@ -85,6 +111,53 @@ def _layout(title: str, body: str, *, csrf: str | None = None) -> str:
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
         f"<title>{_esc(title)}</title><style>{_CSS}</style></head>"
+        f"<body>{nav}<main class=\"content\">{body}</main></body></html>"
+    )
+
+
+def landing_page(*, registration_open: bool = True) -> str:
+    register_link = (
+        '<a href="/web/register">Create account</a>'
+        if registration_open
+        else ""
+    )
+    nav = (
+        '<div class="topbar">'
+        '<a href="/web"><b>AgentSociety Hub</b></a>'
+        '<a href="/web/login" style="margin-left:auto">Sign in</a>'
+        f"{register_link}</div>"
+    )
+    body = (
+        '<div class="hero">'
+        "<h1>AgentSociety Hub</h1>"
+        "<p>A shared coordination center for your agents. Register with your "
+        "own account, connect your local agents, and delegate tasks between "
+        "machines — securely, over TLS, with per-user isolation.</p>"
+        '<span class="tag">password accounts · per-user isolation · REST / MCP / Web</span>'
+        "</div>"
+        "<h2>How it works</h2>"
+        '<div class="grid">'
+        '<div class="panel"><h3>1. Create your account</h3>'
+        "<p>Sign up with a username and password. Your credentials are stored "
+        "as a one-way hash; the web UI and API authenticate with the password "
+        "only.</p></div>"
+        '<div class="panel"><h3>2. Connect your agents</h3>'
+        "<p>On each machine run <code>agent connect</code> and enter your "
+        "username and password once. The Hub issues a per-node credential for "
+        "that machine — your password never touches disk.</p></div>"
+        '<div class="panel"><h3>3. Create and track tasks</h3>'
+        "<p>Submit tasks from this dashboard, the REST API, or the Hub MCP "
+        "tools (<code>hub_create_task</code>, <code>hub_list_tasks</code>, "
+        "<code>hub_cancel_task</code>), then watch runs and artifacts.</p></div>"
+        "</div>"
+        '<div class="cta"><a href="/web/login">Sign in</a>'
+        f"{'<a class=secondary href=\"/web/register\">Create account</a>' if registration_open else ''}"
+        "</div>"
+    )
+    return (
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        f"<title>AgentSociety Hub</title><style>{_CSS}</style></head>"
         f"<body>{nav}<main class=\"content\">{body}</main></body></html>"
     )
 
@@ -224,8 +297,25 @@ def account_page(
 
 
 def dashboard_page(
-    stats: dict[str, int], tasks: list[dict[str, Any]], runs: list[dict[str, Any]]
+    stats: dict[str, int],
+    tasks: list[dict[str, Any]],
+    runs: list[dict[str, Any]],
+    *,
+    user: dict[str, Any] | None = None,
 ) -> str:
+    if user:
+        identity = (
+            f"{_esc(user.get('username') or user.get('display_name') or '')} "
+            f'<span class="pill">{_esc(user.get("role") or "")}</span>'
+        )
+    else:
+        identity = '<span class="pill">admin</span>'
+    welcome = (
+        '<div class="hero"><h1>Dashboard</h1>'
+        f"<p>Signed in as {identity}</p>"
+        "<p>This view only shows data you are allowed to see: your own "
+        "agents, tasks, runs, and artifacts.</p></div>"
+    )
     cards = "".join(
         f'<div class="card"><b>{_esc(stats.get(key, 0))}</b>'
         f"<span>{_esc(label)}</span></div>"
@@ -259,8 +349,19 @@ def dashboard_page(
     if not run_rows:
         run_rows = '<tr><td colspan="5" class="muted">No runs yet.</td></tr>'
     body = (
-        "<h1>Dashboard</h1>"
+        f"{welcome}"
         f'<div class="cards">{cards}</div>'
+        '<div class="panel"><h3>Quick start</h3>'
+        '<ol class="steps">'
+        "<li>Sign in with your password account (or create one).</li>"
+        "<li>On each agent machine run <code>./agent setup</code> then "
+        "<code>./agent connect</code>, entering your username and password.</li>"
+        "<li>Create a task from <a href=\"/web/tasks\">Tasks</a> or with "
+        "<code>hub_create_task</code> (MCP); only your own agents appear in "
+        "the assignee list.</li>"
+        "<li>Watch progress under <a href=\"/web/runs\">Runs</a> and collect "
+        "outputs under <a href=\"/web/artifacts\">Artifacts</a>.</li>"
+        "</ol></div>"
         "<h2>Recent tasks</h2>"
         "<table><tr><th>Task</th><th>Status</th><th>Objective</th><th>Created</th></tr>"
         f"{task_rows}</table>"

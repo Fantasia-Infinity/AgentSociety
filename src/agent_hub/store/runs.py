@@ -69,11 +69,33 @@ class RunStore:
             return run
 
     def list_runs(
-        self, *, limit: int = 100, tenant_id: str | None = None
+        self,
+        *,
+        limit: int = 100,
+        tenant_id: str | None = None,
+        principal_id: str | None = None,
     ) -> list[dict[str, Any]]:
         limit = min(max(limit, 1), 500)
         with self._lock:
-            if tenant_id is None:
+            if principal_id is not None:
+                if tenant_id is None:
+                    rows = self._connection.execute(
+                        """
+                        SELECT run_id FROM hub_runs
+                        WHERE principal_id=? ORDER BY started_at DESC LIMIT ?
+                        """,
+                        (principal_id, limit),
+                    ).fetchall()
+                else:
+                    rows = self._connection.execute(
+                        """
+                        SELECT run_id FROM hub_runs
+                        WHERE principal_id=? AND tenant_id=?
+                        ORDER BY started_at DESC LIMIT ?
+                        """,
+                        (principal_id, tenant_id, limit),
+                    ).fetchall()
+            elif tenant_id is None:
                 rows = self._connection.execute(
                     "SELECT run_id FROM hub_runs ORDER BY started_at DESC LIMIT ?",
                     (limit,),
@@ -115,4 +137,3 @@ class RunStore:
                 (status.value, _json(result), error, now, completed_at, run_id),
             )
             return self._run(run_id)
-

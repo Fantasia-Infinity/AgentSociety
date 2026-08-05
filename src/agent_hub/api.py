@@ -113,6 +113,7 @@ class AgentHubApi:
         context: AuthenticatedContext | None = None,
     ) -> tuple[HTTPStatus, dict[str, Any]] | None:
         tenant_id = self._tenant_scope(context)
+        principal_scope = self._principal_scope(context)
         if context is not None and context.is_admin:
             requested = (parse_qs(query_string).get("tenant_id") or [None])[0]
             if requested:
@@ -120,7 +121,9 @@ class AgentHubApi:
         if path == self.prefix:
             return HTTPStatus.OK, {
                 "status": "ok",
-                **self.store.stats(tenant_id=tenant_id),
+                **self.store.stats(
+                    tenant_id=tenant_id, principal_id=principal_scope
+                ),
             }
         if path == f"{self.prefix}/tenants":
             if context is not None and not context.is_admin:
@@ -134,15 +137,21 @@ class AgentHubApi:
             }
         if path == f"{self.prefix}/principals":
             return HTTPStatus.OK, {
-                "principals": self.store.list_principals(tenant_id=tenant_id)
+                "principals": self.store.list_principals(
+                    tenant_id=tenant_id, principal_id=principal_scope
+                )
             }
         if path == f"{self.prefix}/actors":
             return HTTPStatus.OK, {
-                "actors": self.store.list_actors(tenant_id=tenant_id)
+                "actors": self.store.list_actors(
+                    tenant_id=tenant_id, principal_id=principal_scope
+                )
             }
         if path == f"{self.prefix}/nodes":
             return HTTPStatus.OK, {
-                "nodes": self.store.list_nodes(tenant_id=tenant_id)
+                "nodes": self.store.list_nodes(
+                    tenant_id=tenant_id, principal_id=principal_scope
+                )
             }
         if path == f"{self.prefix}/tasks":
             query = parse_qs(query_string)
@@ -153,7 +162,10 @@ class AgentHubApi:
                 raise ValueError("limit must be an integer") from exc
             return HTTPStatus.OK, {
                 "tasks": self.store.list_tasks(
-                    status=status, limit=limit, tenant_id=tenant_id
+                    status=status,
+                    limit=limit,
+                    tenant_id=tenant_id,
+                    principal_id=principal_scope,
                 )
             }
         if path == f"{self.prefix}/runs":
@@ -164,7 +176,9 @@ class AgentHubApi:
                 raise ValueError("limit must be an integer") from exc
             return HTTPStatus.OK, {
                 "runs": self.store.list_runs(
-                    limit=limit, tenant_id=tenant_id
+                    limit=limit,
+                    tenant_id=tenant_id,
+                    principal_id=principal_scope,
                 )
             }
         if path == f"{self.prefix}/artifacts":
@@ -175,7 +189,9 @@ class AgentHubApi:
                 raise ValueError("limit must be an integer") from exc
             return HTTPStatus.OK, {
                 "artifacts": self.store.list_artifacts(
-                    limit=limit, tenant_id=tenant_id
+                    limit=limit,
+                    tenant_id=tenant_id,
+                    principal_id=principal_scope,
                 )
             }
 
@@ -187,15 +203,17 @@ class AgentHubApi:
             return HTTPStatus.OK, {"tenant": self.store.get_tenant(parts[1])}
         if len(parts) == 3 and parts[0] == "tenants" and parts[2] == "tokens":
             if context is not None and not context.is_admin:
+                if context.role != "tenant_admin":
+                    raise PermissionError("tenant_admin role required")
                 if parts[1] != (context.tenant_id or "default"):
                     raise PermissionError("cannot access another tenant")
             return HTTPStatus.OK, {
                 "tokens": self.store.list_auth_tokens(tenant_id=parts[1])
             }
         if len(parts) == 2 and parts[0] == "tasks":
-            return HTTPStatus.OK, {
-                "task": self.store.get_task(parts[1], tenant_id=tenant_id)
-            }
+            task = self.store.get_task(parts[1], tenant_id=tenant_id)
+            self._assert_principal_owner(context, task)
+            return HTTPStatus.OK, {"task": task}
         if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "events":
             query = parse_qs(query_string)
             try:
@@ -212,9 +230,9 @@ class AgentHubApi:
                 )
             }
         if len(parts) == 2 and parts[0] == "runs":
-            return HTTPStatus.OK, {
-                "run": self.store.get_run(parts[1], tenant_id=tenant_id)
-            }
+            run = self.store.get_run(parts[1], tenant_id=tenant_id)
+            self._assert_principal_owner(context, run)
+            return HTTPStatus.OK, {"run": run}
         if path == f"{self.auth_prefix}/me":
             if context is None or not context.principal_id:
                 raise ApiError("authentication required", HTTPStatus.UNAUTHORIZED)
@@ -250,7 +268,7 @@ class AgentHubApi:
                 username=str(payload.get("username", "")),
                 password=str(payload.get("password", "")),
                 display_name=str(payload.get("display_name", "")).strip(),
-                tenant_id=tenant_id,
+                tenant_id="default",
             )
             return HTTPStatus.CREATED, {"user": account}
         if path == f"{self.auth_prefix}/login":
@@ -369,8 +387,24 @@ class AgentHubApi:
                     raise PermissionError("node token cannot heartbeat another node")
             return HTTPStatus.OK, {"node": self.store.heartbeat_node(node_id)}
         if path == f"{self.prefix}/tasks":
+            scoped = dict(payload)
+            scope_principal = self._principal_scope(context)
+            if scope_principal is not None:
+                scoped["principal_id"] = scope_principal
+                delegator = str(scoped.get("delegator_actor_id", "")).strip()
+                if not delegator:
+                    raise ValueError("delegator_actor_id is required")
+                actor = self.store._actor(delegator)
+                if actor["principal_id"] != scope_principal:
+                    raise PermissionError(
+                        "delegator actor must belong to your account"
+                    )
+                if context.actor_id is not None and context.actor_id != delegator:
+                    raise PermissionError(
+                        "node token can only delegate as its own actor"
+                    )
             task, created = self.store.create_task(
-                TaskSubmission.from_dict(payload), tenant_id=tenant_id
+                TaskSubmission.from_dict(scoped), tenant_id=tenant_id
             )
             return (
                 HTTPStatus.CREATED if created else HTTPStatus.OK,
@@ -407,8 +441,13 @@ class AgentHubApi:
                     raise PermissionError("node token cannot start a run for another actor")
                 if context.node_id != required_text(payload, "node_id", maximum=200):
                     raise PermissionError("node token cannot start a run for another node")
+                scoped_run = dict(payload)
+                scoped_run["principal_id"] = context.principal_id
+                run_payload = RunSubmission.from_dict(scoped_run)
+            else:
+                run_payload = RunSubmission.from_dict(payload)
             run = self.store.start_run(
-                RunSubmission.from_dict(payload), tenant_id=tenant_id
+                run_payload, tenant_id=tenant_id
             )
             return HTTPStatus.CREATED, {"run": run}
         if path == f"{self.prefix}/artifacts":
@@ -464,6 +503,8 @@ class AgentHubApi:
             )
             return HTTPStatus.OK, {"task": task}
         if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "cancel":
+            task = self.store.get_task(parts[1], tenant_id=tenant_id)
+            self._assert_principal_owner(context, task)
             task = self.store.cancel_task(
                 parts[1],
                 actor_id=required_text(payload, "actor_id", maximum=200),
@@ -472,6 +513,8 @@ class AgentHubApi:
             )
             return HTTPStatus.OK, {"task": task}
         if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "controls":
+            task = self.store.get_task(parts[1], tenant_id=tenant_id)
+            self._assert_principal_owner(context, task)
             control = self.store.create_task_control(
                 parts[1],
                 actor_id=required_text(payload, "actor_id", maximum=200),
@@ -530,6 +573,26 @@ class AgentHubApi:
         if context is not None and not context.is_admin:
             return context.tenant_id or "default"
         return None
+
+    def _principal_scope(
+        self, context: AuthenticatedContext | None
+    ) -> str | None:
+        if context is None or context.is_admin:
+            return None
+        if context.role == "tenant_admin":
+            return None
+        return context.principal_id
+
+    def _assert_principal_owner(
+        self,
+        context: AuthenticatedContext | None,
+        record: dict[str, Any],
+    ) -> None:
+        scope = self._principal_scope(context)
+        if scope is None:
+            return
+        if record.get("principal_id") != scope:
+            raise LookupError("record not found")
 
     def _resolve_tenant(
         self, payload: dict[str, Any], context: AuthenticatedContext | None

@@ -131,9 +131,16 @@ class IdentityStore:
                 raise LookupError("node not found")
             return self._node(node_id)
 
-    def list_principals(self, *, tenant_id: str | None = None) -> list[dict[str, Any]]:
+    def list_principals(
+        self, *, tenant_id: str | None = None, principal_id: str | None = None
+    ) -> list[dict[str, Any]]:
         with self._lock:
-            if tenant_id is None:
+            if principal_id is not None:
+                rows = self._connection.execute(
+                    "SELECT principal_id FROM hub_principals WHERE principal_id=?",
+                    (principal_id,),
+                ).fetchall()
+            elif tenant_id is None:
                 rows = self._connection.execute(
                     "SELECT principal_id FROM hub_principals ORDER BY principal_id"
                 ).fetchall()
@@ -147,9 +154,19 @@ class IdentityStore:
                 ).fetchall()
             return [self._principal(str(row["principal_id"])) for row in rows]
 
-    def list_actors(self, *, tenant_id: str | None = None) -> list[dict[str, Any]]:
+    def list_actors(
+        self, *, tenant_id: str | None = None, principal_id: str | None = None
+    ) -> list[dict[str, Any]]:
         with self._lock:
-            if tenant_id is None:
+            if principal_id is not None:
+                rows = self._connection.execute(
+                    """
+                    SELECT actor_id FROM hub_actors
+                    WHERE principal_id=? ORDER BY actor_id
+                    """,
+                    (principal_id,),
+                ).fetchall()
+            elif tenant_id is None:
                 rows = self._connection.execute(
                     "SELECT actor_id FROM hub_actors ORDER BY actor_id"
                 ).fetchall()
@@ -163,10 +180,21 @@ class IdentityStore:
                 ).fetchall()
             return [self._actor(str(row["actor_id"])) for row in rows]
 
-    def list_nodes(self, *, tenant_id: str | None = None) -> list[dict[str, Any]]:
+    def list_nodes(
+        self, *, tenant_id: str | None = None, principal_id: str | None = None
+    ) -> list[dict[str, Any]]:
         with self._lock, self._connection:
             self._mark_stale_nodes_offline()
-            if tenant_id is None:
+            if principal_id is not None:
+                rows = self._connection.execute(
+                    """
+                    SELECT hub_nodes.node_id FROM hub_nodes
+                    JOIN hub_actors ON hub_actors.actor_id = hub_nodes.actor_id
+                    WHERE hub_actors.principal_id=? ORDER BY hub_nodes.node_id
+                    """,
+                    (principal_id,),
+                ).fetchall()
+            elif tenant_id is None:
                 rows = self._connection.execute(
                     "SELECT node_id FROM hub_nodes ORDER BY node_id"
                 ).fetchall()
@@ -179,4 +207,3 @@ class IdentityStore:
                     (tenant_id,),
                 ).fetchall()
             return [self._node(str(row["node_id"])) for row in rows]
-

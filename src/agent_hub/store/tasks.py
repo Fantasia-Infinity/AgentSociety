@@ -97,10 +97,29 @@ class TaskStore:
         status: str | None = None,
         limit: int = 100,
         tenant_id: str | None = None,
+        principal_id: str | None = None,
     ) -> list[dict[str, Any]]:
         limit = min(max(limit, 1), 500)
         with self._lock:
-            if status is None and tenant_id is None:
+            if principal_id is not None:
+                params: list[Any] = [principal_id]
+                where = ["principal_id=?"]
+                if status is not None:
+                    TaskStatus(status)
+                    where.append("status=?")
+                    params.append(status)
+                if tenant_id is not None:
+                    where.append("tenant_id=?")
+                    params.append(tenant_id)
+                params.append(limit)
+                rows = self._connection.execute(
+                    f"""
+                    SELECT task_id FROM hub_tasks
+                    WHERE {" AND ".join(where)} ORDER BY created_at DESC LIMIT ?
+                    """,
+                    tuple(params),
+                ).fetchall()
+            elif status is None and tenant_id is None:
                 rows = self._connection.execute(
                     "SELECT task_id FROM hub_tasks ORDER BY created_at DESC LIMIT ?",
                     (limit,),
@@ -612,4 +631,3 @@ class TaskStore:
                 now=now,
             )
             return self._control(control_id)
-
