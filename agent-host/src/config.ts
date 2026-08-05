@@ -211,6 +211,7 @@ export function loadConfig(): AgentHostConfig {
     hubToken,
     hubUsername,
     hubPassword,
+    hubNodeToken,
   );
 
   const piProvider = process.env.PI_PROVIDER?.trim() || undefined;
@@ -324,23 +325,26 @@ export function resolveHubConfig(
   hubToken?: string,
   hubUsername?: string,
   hubPassword?: string,
+  hubNodeToken?: string,
 ): { hubEnabled: false } | {
   hubEnabled: true;
   hubUrl: string;
   hubToken?: string;
   hubUsername?: string;
   hubPassword?: string;
+  hubNodeToken?: string;
 } {
   const hasToken = Boolean(hubToken);
   const hasPassword = Boolean(hubUsername && hubPassword);
-  if ((hubUrl === undefined && (hasToken || hasPassword)) ||
-      (hubUrl !== undefined && !hasToken && !hasPassword)) {
+  const hasNodeToken = Boolean(hubNodeToken);
+  if ((hubUrl === undefined && (hasToken || hasPassword || hasNodeToken)) ||
+      (hubUrl !== undefined && !hasToken && !hasPassword && !hasNodeToken)) {
     throw new Error(
       "AGENT_HUB_URL and Hub credentials must be configured together",
     );
   }
   if (!hubUrl) return { hubEnabled: false };
-  if (hasToken) {
+  if (hasToken && !hasPassword && !hasNodeToken) {
     console.warn(
       "Hub token mode is deprecated; register a password account and run `agent setup` to switch.",
     );
@@ -352,6 +356,7 @@ export function resolveHubConfig(
     ...(hasPassword
       ? { hubUsername: hubUsername!, hubPassword: hubPassword! }
       : {}),
+    ...(hasNodeToken ? { hubNodeToken: hubNodeToken! } : {}),
   };
 }
 

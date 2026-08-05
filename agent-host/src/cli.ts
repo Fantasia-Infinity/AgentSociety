@@ -98,7 +98,14 @@ async function main(): Promise<void> {
       `The ${command} command requires Hub configuration. Run ./agent setup to add one.`,
     );
   }
-  if (hub && command !== "bridge") await registerHost(config, hub);
+  if (
+    hub &&
+    command !== "bridge" &&
+    config.hubToken &&
+    !config.hubUsername
+  ) {
+    await registerHost(config, hub);
+  }
 
   if (command === "register") {
     console.log(`Registered ${config.actorId} on ${config.nodeId}`);
@@ -314,6 +321,11 @@ async function resolveNodeCredential(
       metadata: {
         origin: "worker-boot",
         workspace_root: config.workspaceRoot,
+        runtime: "pi",
+        runtime_version: "0.83.0",
+        remote_tool_policy: config.remoteToolPolicy,
+        builtin_capabilities: config.builtinCapabilitiesEnabled,
+        worker_session_mode: config.workerSessionMode,
       },
     });
     const service =
@@ -379,7 +391,6 @@ async function connectCommand(config: AgentHostConfig): Promise<void> {
   const resolved = { ...config, hubUsername: username, hubPassword: password };
   const { token, saved } = await resolveNodeCredential(resolved);
   const hub = new HubClient(resolved.hubUrl!, token);
-  await registerHost(resolved, hub);
   console.log(
     `Connected to Hub as ${username} on node ${config.nodeId} (${config.actorId})`,
   );
