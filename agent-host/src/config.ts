@@ -189,7 +189,7 @@ export function loadConfig(): AgentHostConfig {
   const hubPassword = hubRuntimeDisabled
     ? undefined
     : process.env.AGENT_HUB_PASSWORD?.trim() ||
-      configuredCredential(
+      optionalConfiguredCredential(
         process.env.AGENT_HUB_PASSWORD_CREDENTIAL_SERVICE?.trim(),
         process.env.AGENT_HUB_PASSWORD_CREDENTIAL_ACCOUNT?.trim(),
         process.env.AGENT_HUB_PASSWORD_KEYCHAIN_SERVICE?.trim(),
@@ -199,7 +199,7 @@ export function loadConfig(): AgentHostConfig {
   const hubNodeToken = hubRuntimeDisabled
     ? undefined
     : process.env.AGENT_HUB_NODE_TOKEN?.trim() ||
-      configuredCredential(
+      optionalConfiguredCredential(
         process.env.AGENT_HUB_NODE_TOKEN_CREDENTIAL_SERVICE?.trim(),
         process.env.AGENT_HUB_NODE_TOKEN_CREDENTIAL_ACCOUNT?.trim(),
         process.env.AGENT_HUB_NODE_TOKEN_KEYCHAIN_SERVICE?.trim(),
@@ -320,6 +320,26 @@ function configuredCredential(
   return readLegacyMacKeychainCredential(legacyService, legacyAccount, label);
 }
 
+function optionalConfiguredCredential(
+  service: string | undefined,
+  account: string | undefined,
+  legacyService: string | undefined,
+  legacyAccount: string | undefined,
+  label: string,
+): string | undefined {
+  try {
+    return configuredCredential(
+      service,
+      account,
+      legacyService,
+      legacyAccount,
+      label,
+    );
+  } catch {
+    return undefined;
+  }
+}
+
 export function resolveHubConfig(
   hubUrl?: string,
   hubToken?: string,
@@ -337,8 +357,9 @@ export function resolveHubConfig(
   const hasToken = Boolean(hubToken);
   const hasPassword = Boolean(hubUsername && hubPassword);
   const hasNodeToken = Boolean(hubNodeToken);
-  if ((hubUrl === undefined && (hasToken || hasPassword || hasNodeToken)) ||
-      (hubUrl !== undefined && !hasToken && !hasPassword && !hasNodeToken)) {
+  const hasPartialUsername = Boolean(hubUsername && !hubPassword);
+  if ((hubUrl === undefined && (hasToken || hasPassword || hasNodeToken || hasPartialUsername)) ||
+      (hubUrl !== undefined && !hasToken && !hasPassword && !hasNodeToken && !hasPartialUsername)) {
     throw new Error(
       "AGENT_HUB_URL and Hub credentials must be configured together",
     );
@@ -353,9 +374,8 @@ export function resolveHubConfig(
     hubEnabled: true,
     hubUrl: assertHttpUrl(hubUrl, "AGENT_HUB_URL"),
     ...(hasToken ? { hubToken: secureHubToken(hubToken!) } : {}),
-    ...(hasPassword
-      ? { hubUsername: hubUsername!, hubPassword: hubPassword! }
-      : {}),
+    ...(hubUsername ? { hubUsername } : {}),
+    ...(hasPassword ? { hubPassword: hubPassword! } : {}),
     ...(hasNodeToken ? { hubNodeToken: hubNodeToken! } : {}),
   };
 }
