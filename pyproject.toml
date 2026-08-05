@@ -6,8 +6,15 @@ build-backend = "setuptools.build_meta"
 name = "agent-society"
 version = "0.4.0"
 description = "AgentSociety local-first agents, optional collaboration hub, and channel adapters"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "Fantasia-Infinity"}]
 requires-python = ">=3.11"
 dependencies = ["argon2-cffi>=23.1,<24"]
+
+[project.urls]
+Homepage = "https://github.com/Fantasia-Infinity/AgentSociety"
+Repository = "https://github.com/Fantasia-Infinity/AgentSociety"
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.2,<4"]

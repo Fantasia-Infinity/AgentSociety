@@ -212,3 +212,7 @@ npm --prefix agent-host test
   improvements, more Agent adapters, tenant self-service in the web UI.
 
 To dig deeper, start with the [architecture doc](docs/architecture.md).
+
+## License
+
+MIT License. See [LICENSE](LICENSE).

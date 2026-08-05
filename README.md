@@ -192,3 +192,7 @@ npm --prefix agent-host test
 - 开发中：一键安装与发布、微信通道完善、更多 Agent 适配器、Web 租户自助管理。
 
 想深入了解，从 [架构文档](docs/architecture.md) 开始。
+
+## License
+
+MIT License，详见 [LICENSE](LICENSE)。
