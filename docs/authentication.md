@@ -8,8 +8,8 @@
 旧模式（将被废弃的路径）：
 
 - `AGENT_HUB_TOKEN` 共享 bootstrap token 不再用于 agent 连接和普通用户访问；
-  仅保留为**部署管理员紧急入口**（迁移期可继续登录 Web，之后可用
-  `AGENT_HUB_DISABLE_BOOTSTRAP=1` 关闭）。
+  生产部署已设置 `AGENT_HUB_DISABLE_BOOTSTRAP=1` 停用（token 仅存在于
+  VPS `.env.hub`，且不接受登录/API 使用）；管理员日常操作走密码账户。
 - 手工创建/分发长期 tenant/node API token 的方式不再作为推荐路径；
   API 保留兼容但标记 deprecated。
 
@@ -24,6 +24,9 @@
 - 无系统钥匙串的主机（如无头 Linux）：`agent connect` 会提示把
   `AGENT_HUB_NODE_TOKEN` 写入 `.env.agent`（文件权限 600）；该凭据由密码
   登录签发、可单独吊销，不等同于旧的共享 bootstrap token。
+- Codex MCP 客户端通过 `agent-host/scripts/mcp-hub-wrapper.mjs` 从系统
+  钥匙串读取**本机节点凭据**再桥接 mcp-remote，配置文件里不落任何 token；
+  运行 `agent connect` 之后 MCP 工具即恢复可用。
 
 ## 2. 数据模型（新增表）
 
