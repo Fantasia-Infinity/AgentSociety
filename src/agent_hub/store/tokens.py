@@ -114,6 +114,18 @@ class TokenStore:
             )
             return self._token_record(token_id)
 
+    def revoke_principal_tokens(self, principal_id: str) -> int:
+        now = time.time()
+        with self._condition, self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE hub_auth_tokens SET revoked_at=?
+                WHERE principal_id=? AND revoked_at IS NULL
+                """,
+                (now, principal_id),
+            )
+            return int(cursor.rowcount)
+
     def revoke_auth_token(
         self, token_id: str, *, tenant_id: str | None = None
     ) -> dict[str, Any]:

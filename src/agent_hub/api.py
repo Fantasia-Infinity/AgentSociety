@@ -332,6 +332,7 @@ class AgentHubApi:
             self.store.revoke_principal_sessions(
                 principal_id=context.principal_id, except_hash=context.session_id
             )
+            self.store.revoke_principal_tokens(context.principal_id)
             return HTTPStatus.OK, {"changed": True}
         if path == f"{self.auth_prefix}/sessions/revoke":
             if context is None or not context.principal_id:

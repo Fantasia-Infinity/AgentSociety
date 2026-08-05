@@ -311,23 +311,33 @@ async function resolveNodeCredential(
     return { token: config.hubNodeToken, saved: true };
   }
   if (config.hubUsername && config.hubPassword) {
-    const login = await new HubClient(config.hubUrl!, "").agentLogin({
-      username: config.hubUsername,
-      password: config.hubPassword,
-      node_id: config.nodeId,
-      actor_id: config.actorId,
-      display_name: config.nodeDisplayName,
-      capabilities: hostCapabilities(config),
-      metadata: {
-        origin: "worker-boot",
-        workspace_root: config.workspaceRoot,
-        runtime: "pi",
-        runtime_version: "0.83.0",
-        remote_tool_policy: config.remoteToolPolicy,
-        builtin_capabilities: config.builtinCapabilitiesEnabled,
-        worker_session_mode: config.workerSessionMode,
-      },
-    });
+    let login;
+    try {
+      login = await new HubClient(config.hubUrl!, "").agentLogin({
+        username: config.hubUsername,
+        password: config.hubPassword,
+        node_id: config.nodeId,
+        actor_id: config.actorId,
+        display_name: config.nodeDisplayName,
+        capabilities: hostCapabilities(config),
+        metadata: {
+          origin: "worker-boot",
+          workspace_root: config.workspaceRoot,
+          runtime: "pi",
+          runtime_version: "0.83.0",
+          remote_tool_policy: config.remoteToolPolicy,
+          builtin_capabilities: config.builtinCapabilitiesEnabled,
+          worker_session_mode: config.workerSessionMode,
+        },
+      });
+    } catch (error) {
+      if (error instanceof HubError && error.status === 401) {
+        throw new Error(
+          "Hub rejected your credentials. If you changed your password, run `agent connect` and enter the new password.",
+        );
+      }
+      throw error;
+    }
     const service =
       process.env.AGENT_HUB_NODE_TOKEN_CREDENTIAL_SERVICE?.trim() ||
       "AgentSociety Hub Node";
@@ -367,26 +377,25 @@ async function connectCommand(config: AgentHostConfig): Promise<void> {
   let username = config.hubUsername ?? "";
   let password = config.hubPassword ?? "";
   const interactive = Boolean(stdin.isTTY && stdout.isTTY);
-  if (!username || !password) {
-    if (!interactive) {
-      throw new Error(
-        "Hub password account is not configured. Run ./agent setup.",
-      );
-    }
+  if (interactive) {
     const muted = new Writable({
       write(_chunk, _encoding, callback) {
         callback();
       },
     });
     const rl = createInterface({ input: stdin, output: muted, terminal: true });
-    if (!username) {
-      username = (await rl.question("Hub username: ")).trim();
-    }
-    if (!password) {
-      password = await rl.question("Hub password: ");
-      process.stdout.write("\n");
-    }
+    const answer = (
+      await rl.question(`Hub username [${username || "required"}]: `)
+    ).trim();
+    if (answer) username = answer;
+    password = await rl.question("Hub password: ");
+    process.stdout.write("\n");
     rl.close();
+  }
+  if (!username || !password) {
+    throw new Error(
+      "Hub username and password are required. Run `agent connect` interactively or set AGENT_HUB_USERNAME/AGENT_HUB_PASSWORD.",
+    );
   }
   const resolved = { ...config, hubUsername: username, hubPassword: password };
   const { token, saved } = await resolveNodeCredential(resolved);

@@ -139,6 +139,19 @@ class PasswordAuthTests(unittest.TestCase):
             {"username": "dave", "password": "correct-horse-666", "label": "test2"},
         )
         other_ctx = self.store.authenticate_session(other["session_token"])
+        _, node_login = self.post(
+            "/v1/auth/agent-login",
+            {
+                "username": "dave",
+                "password": "correct-horse-666",
+                "node_id": "dave-node",
+                "display_name": "Dave Node",
+                "capabilities": ["pi", "hub-task"],
+                "metadata": {"platform": "test"},
+            },
+        )
+        node_token = node_login["node_token"]
+        self.assertIsNotNone(self.store.authenticate_token(node_token))
 
         status, _ = self.post(
             "/v1/auth/change-password",
@@ -152,6 +165,8 @@ class PasswordAuthTests(unittest.TestCase):
         # Current session survives; the other session is revoked.
         self.assertIsNotNone(self.store.authenticate_session(login["session_token"]))
         self.assertIsNone(self.store.authenticate_session(other["session_token"]))
+        # Node credentials are revoked after a password change.
+        self.assertIsNone(self.store.authenticate_token(node_token))
         status, _ = self.post(
             "/v1/auth/login",
             {"username": "dave", "password": "brand-new-password-1", "label": "test3"},
