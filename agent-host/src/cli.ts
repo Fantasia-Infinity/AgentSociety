@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { dirname, resolve } from "node:path";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
@@ -397,6 +398,34 @@ async function connectCommand(config: AgentHostConfig): Promise<void> {
   const resolved = { ...config, hubUsername: username, hubPassword: password };
   const { token, saved } = await resolveNodeCredential(resolved);
   const hub = new HubClient(resolved.hubUrl!, token);
+  const envPath = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "..",
+    ".env.agent",
+  );
+  const nodeService =
+    process.env.AGENT_HUB_NODE_TOKEN_CREDENTIAL_SERVICE?.trim() ||
+    "AgentSociety Hub Node";
+  const nodeAccount =
+    process.env.AGENT_HUB_NODE_TOKEN_CREDENTIAL_ACCOUNT?.trim() ||
+    userInfo().username;
+  ensureEnvLine(
+    envPath,
+    "AGENT_HUB_NODE_TOKEN_CREDENTIAL_SERVICE",
+    nodeService,
+  );
+  ensureEnvLine(envPath, "AGENT_HUB_NODE_TOKEN_CREDENTIAL_ACCOUNT", nodeAccount);
+  try {
+    const passwordService =
+      process.env.AGENT_HUB_PASSWORD_CREDENTIAL_SERVICE?.trim() ||
+      "AgentSociety Hub Password";
+    writeSystemCredential(passwordService, username, password, "Hub password");
+  } catch (error) {
+    console.warn(
+      `Could not save the Hub password to the system store (${error instanceof Error ? error.message : String(error)}); worker restarts may need to run connect again.`,
+    );
+  }
   console.log(
     `Connected to Hub as ${username} on node ${config.nodeId} (${config.actorId})`,
   );
@@ -408,6 +437,27 @@ async function connectCommand(config: AgentHostConfig): Promise<void> {
         `Set AGENT_HUB_NODE_TOKEN=${token} in .env.agent to persist the node credential.`,
     );
   }
+}
+
+function ensureEnvLine(path: string, key: string, value: string): void {
+  const text = existsSync(path) ? readFileSync(path, "utf8") : "";
+  const lines = text.split(/\r?\n/u);
+  const out: string[] = [];
+  let replaced = false;
+  for (const line of lines) {
+    const match = line.match(/^([A-Z][A-Z0-9_]*)\s*=/u);
+    if (match && match[1] === key) {
+      out.push(`${key}="${value}"`);
+      replaced = true;
+    } else {
+      out.push(line);
+    }
+  }
+  if (!replaced) out.push(`${key}="${value}"`);
+  writeFileSync(path, `${out.join("\n").replace(/\n+$/u, "")}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
 }
 
 class MutedOutput extends Writable {
