@@ -66,6 +66,15 @@ async function main(): Promise<void> {
 
   const config = loadConfig();
   const hubRuntimeDisabled = process.env.AGENT_HUB_RUNTIME_DISABLED === "1";
+  if (
+    process.env.AGENT_HUB_RECEIVE_DISABLED?.trim() === "1" &&
+    new Set(["worker", "bridge", "once"]).has(command)
+  ) {
+    throw new Error(
+      "Receiving tasks is disabled on this host (AGENT_HUB_RECEIVE_DISABLED=1). " +
+        "This machine is configured as dispatch-only.",
+    );
+  }
   if (command === "connect") {
     await connectCommand(config);
     return;

@@ -168,6 +168,12 @@ REST first.
   [authentication doc](docs/authentication.md) and the
   [Agent platform doc](docs/agent-platform.md).
 
+### Dispatch-only mode
+
+If a device only dispatches tasks to other devices and never receives them,
+set `AGENT_HUB_RECEIVE_DISABLED=1`: `agent worker` and `agent bridge` refuse to
+start. Dispatching (Web / REST / MCP) is unaffected.
+
 ## Optional integration: WeChat channel (experimental, in development)
 
 WeChat is not the core of AgentSociety — it is an **optional communication

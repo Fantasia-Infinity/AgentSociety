@@ -153,6 +153,12 @@ AGENT_WORKER_SESSION_MODE=continuous
   不在 worker 中执行。详见 [认证文档](docs/authentication.md) 和
   [Agent 平台文档](docs/agent-platform.md)。
 
+### 仅派发模式（dispatch-only）
+
+如果某台设备只负责给其他设备派发任务、自己从不接收任务，可以设置
+`AGENT_HUB_RECEIVE_DISABLED=1`：此时手动运行 `agent worker` 或
+`agent bridge` 会被拒绝启动。派发能力（Web / REST / MCP）不受影响。
+
 ## 可选接入：微信通道（实验性，开发中）
 
 微信不是 AgentSociety 的核心，而是**一个正在开发的可选通信工具**：通过 Windows
