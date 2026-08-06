@@ -132,6 +132,13 @@ class AgentHubApi:
                 }
             return HTTPStatus.OK, {"tenants": self.store.list_tenants()}
         if path == f"{self.prefix}/tokens":
+            if context is not None and not context.is_admin:
+                if context.role != "tenant_admin":
+                    return HTTPStatus.OK, {
+                        "tokens": self.store.list_auth_tokens(
+                            principal_id=context.principal_id
+                        )
+                    }
             return HTTPStatus.OK, {
                 "tokens": self.store.list_auth_tokens(tenant_id=tenant_id)
             }

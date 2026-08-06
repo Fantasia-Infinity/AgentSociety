@@ -12,6 +12,7 @@ import unittest
 
 from agent_hub.api import AgentHubApi
 from agent_hub.config import HubSettings
+from agent_hub.ratelimit import AuthRateLimiter
 from agent_hub.server import HubHttpServer
 from agent_hub.store import AgentHubStore
 
@@ -30,7 +31,7 @@ class HubSettingsTests(unittest.TestCase):
         )
         self.assertEqual(settings.api_host, "127.0.0.1")
         self.assertEqual(settings.api_port, 8090)
-        self.assertEqual(settings.state_db, Path("hub-state.sqlite3"))
+        self.assertEqual(settings.state_db, Path(".private/state/hub-state.sqlite3"))
         self.assertFalse(settings.allow_non_loopback_bind)
 
     def test_rejects_short_token(self) -> None:
@@ -59,6 +60,18 @@ class HubSettingsTests(unittest.TestCase):
 
 
 class HubHttpServerTests(unittest.TestCase):
+    def _serve(self, store, limiter=None, web_secret=None):
+        server = HubHttpServer(
+            ("127.0.0.1", 0),
+            AgentHubApi(store),
+            "standalone-hub-token-123456789",
+            web_secret=web_secret,
+            rate_limiter=limiter,
+        )
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        return server, thread
+
     def test_health_is_public_but_hub_api_requires_its_own_token(self) -> None:
         with TemporaryDirectory() as temporary:
             store = AgentHubStore(Path(temporary) / "hub.sqlite3")
@@ -123,6 +136,69 @@ class HubHttpServerTests(unittest.TestCase):
                         result["result"]["task"]["status"]["state"],
                         "TASK_STATE_SUBMITTED",
                     )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+                store.close()
+
+    def test_security_headers_on_html_and_json(self) -> None:
+        with TemporaryDirectory() as temporary:
+            store = AgentHubStore(Path(temporary) / "hub.sqlite3")
+            server, thread = self._serve(
+                store, web_secret="a-secure-web-secret-1234567890-abcdef"
+            )
+            port = server.server_address[1]
+            try:
+                with urlopen(f"http://127.0.0.1:{port}/web/login", timeout=2) as response:
+                    self.assertEqual(
+                        response.headers.get("X-Content-Type-Options"), "nosniff"
+                    )
+                    self.assertEqual(
+                        response.headers.get("X-Frame-Options"), "DENY"
+                    )
+                    self.assertIn(
+                        "frame-ancestors 'none'",
+                        response.headers.get("Content-Security-Policy", ""),
+                    )
+                with urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as response:
+                    self.assertEqual(
+                        response.headers.get("X-Content-Type-Options"), "nosniff"
+                    )
+                    self.assertEqual(
+                        response.headers.get("Referrer-Policy"), "no-referrer"
+                    )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+                store.close()
+
+    def test_auth_endpoints_are_rate_limited(self) -> None:
+        with TemporaryDirectory() as temporary:
+            store = AgentHubStore(Path(temporary) / "hub.sqlite3")
+            server, thread = self._serve(
+                store,
+                AuthRateLimiter(auth_per_minute=2, register_per_hour=10),
+            )
+            port = server.server_address[1]
+            try:
+                body = json.dumps(
+                    {"username": "alice", "password": "wrong-password-1"}
+                ).encode()
+                for expected in (401, 401, 429):
+                    request = Request(
+                        f"http://127.0.0.1:{port}/v1/auth/login",
+                        data=body,
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    try:
+                        with urlopen(request, timeout=2) as response:
+                            self.assertEqual(response.status, expected)
+                    except HTTPError as raised:
+                        self.assertEqual(raised.code, expected)
+                        raised.close()
             finally:
                 server.shutdown()
                 server.server_close()

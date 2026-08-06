@@ -88,6 +88,36 @@ class PrincipalIsolationTests(unittest.TestCase):
             ["human-bob"],
         )
 
+    def test_tenant_user_only_sees_own_tokens(self) -> None:
+        self._register("alice", "correct-horse-222")
+        self._register("bob", "correct-horse-333")
+        self._agent_login("alice", "correct-horse-222", "node-alice")
+        self._agent_login("bob", "correct-horse-333", "node-bob")
+        alice = self._login("alice", "correct-horse-222")
+        bob = self._login("bob", "correct-horse-333")
+
+        status, created = self.api.post(
+            "/v1/hub/tenants/default/tokens",
+            {
+                "tenant_id": "default",
+                "role": "tenant_user",
+                "principal_id": "human-alice",
+                "label": "alice-app-token",
+            },
+            alice,
+        )
+        self.assertEqual(status, HTTPStatus.CREATED)
+
+        _, alice_tokens = self.api.get("/v1/hub/tokens", "", alice)
+        alice_labels = {t["label"] for t in alice_tokens["tokens"]}
+        self.assertIn("alice-app-token", alice_labels)
+        self.assertIn("agent-login node-bob", alice_labels)
+        _, bob_tokens = self.api.get("/v1/hub/tokens", "", bob)
+        self.assertEqual(
+            [t["label"] for t in bob_tokens["tokens"]],
+            ["agent-login node-bob"],
+        )
+
         # Alice (tenant_admin) sees everything in the tenant.
         _, nodes = self.api.get("/v1/hub/nodes", "", alice)
         self.assertEqual(

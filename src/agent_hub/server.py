@@ -14,6 +14,7 @@ from .a2a import A2AApi
 from .config import HubSettings
 from .errors import ApiError, map_error
 from .mcp import MCP_PROTOCOL_VERSION, McpService
+from .ratelimit import AuthRateLimiter
 from .store import AgentHubStore
 from .object_store import build_object_store
 from .web import WebSession
@@ -37,6 +38,7 @@ class HubHttpServer(ThreadingHTTPServer):
         disable_bootstrap: bool = False,
         oidc_provider: OIDCIdentityProvider | None = None,
         enable_mcp: bool = True,
+        rate_limiter: AuthRateLimiter | None = None,
     ) -> None:
         super().__init__(address, HubRequestHandler)
         self.api = api
@@ -48,6 +50,7 @@ class HubHttpServer(ThreadingHTTPServer):
         self.web_cookie_secure = web_cookie_secure
         self.disable_bootstrap = disable_bootstrap
         self.oidc_provider = oidc_provider
+        self.rate_limiter = rate_limiter
 
 
 class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
@@ -93,6 +96,12 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if self._rate_limited(parsed.path):
+            self._send_json(
+                HTTPStatus.TOO_MANY_REQUESTS,
+                {"error": "rate limited; try again later"},
+            )
+            return
         if self.server.web is not None and parsed.path.startswith("/web"):
             self._web_post(parsed.path)
             return
@@ -184,6 +193,22 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         logger.info("http %s", format % args)
 
+    def _rate_limited(self, path: str) -> bool:
+        limiter = self.server.rate_limiter
+        if limiter is None or not limiter.enabled:
+            return False
+        ip = self.client_address[0] if self.client_address else "unknown"
+        if path in ("/v1/auth/register", "/web/register"):
+            return not limiter.allow_register(ip)
+        if path in (
+            "/v1/auth/login",
+            "/v1/auth/agent-login",
+            "/v1/auth/change-password",
+            "/web/login",
+        ):
+            return not limiter.allow_auth(ip)
+        return False
+
     def _authorized(self) -> AuthenticatedContext | None:
         supplied = self.headers.get("Authorization", "")
         expected = f"Bearer {self.server.api_token}"
@@ -224,6 +249,7 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
         self.send_header("Cache-Control", "no-store")
+        self._send_security_headers(html=True)
         self.end_headers()
         self.wfile.write(encoded)
 
@@ -258,6 +284,7 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
         self.send_header("Content-Type", f"{content_type}; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", cache_control)
+        self._send_security_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -268,6 +295,7 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
         self.send_header("MCP-Protocol-Version", MCP_PROTOCOL_VERSION)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._send_security_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -277,8 +305,21 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
+        self._send_security_headers()
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_security_headers(self, *, html: bool = False) -> None:
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        if html:
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+                "script-src 'self'; img-src 'self' data:; base-uri 'none'; "
+                "form-action 'self'; frame-ancestors 'none'",
+            )
 
     def _base_url(self) -> str:
         if self.server.public_url:
@@ -329,6 +370,11 @@ def main() -> None:
         settings.disable_bootstrap,
         oidc_provider,
         settings.enable_mcp,
+        AuthRateLimiter(
+            enabled=settings.rate_limit_enabled,
+            auth_per_minute=settings.rate_limit_auth_per_minute,
+            register_per_hour=settings.rate_limit_register_per_hour,
+        ),
     )
     logger.info(
         "agent_hub_started host=%s port=%s storage=%s",

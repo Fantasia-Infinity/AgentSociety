@@ -72,21 +72,25 @@ class TokenStore:
             return raw_token, self._token_record(token_id)
 
     def list_auth_tokens(
-        self, *, tenant_id: str | None = None
+        self, *, tenant_id: str | None = None, principal_id: str | None = None
     ) -> list[dict[str, Any]]:
         with self._lock:
-            if tenant_id is None:
-                rows = self._connection.execute(
-                    "SELECT token_id FROM hub_auth_tokens ORDER BY created_at DESC"
-                ).fetchall()
-            else:
-                rows = self._connection.execute(
-                    """
-                    SELECT token_id FROM hub_auth_tokens
-                    WHERE tenant_id=? ORDER BY created_at DESC
-                    """,
-                    (tenant_id,),
-                ).fetchall()
+            clauses: list[str] = []
+            params: list[Any] = []
+            if tenant_id is not None:
+                clauses.append("tenant_id=?")
+                params.append(tenant_id)
+            if principal_id is not None:
+                clauses.append("principal_id=?")
+                params.append(principal_id)
+            where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+            rows = self._connection.execute(
+                f"""
+                SELECT token_id FROM hub_auth_tokens{where}
+                ORDER BY created_at DESC
+                """,
+                tuple(params),
+            ).fetchall()
             return [self._token_record(str(row["token_id"])) for row in rows]
 
     def list_principal_tokens(self, principal_id: str) -> list[dict[str, Any]]:

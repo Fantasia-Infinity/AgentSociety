@@ -51,6 +51,13 @@ def _bool(name: str, default: bool) -> bool:
     raise ValueError(f"{name} must be a boolean")
 
 
+def _positive_int(name: str, default: int) -> int:
+    value = int(os.environ.get(name, default))
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
 def _loopback_host(host: str) -> bool:
     normalized = host.strip().rstrip(".").lower()
     if normalized == "localhost":
@@ -73,6 +80,9 @@ class HubSettings:
     allow_non_loopback_bind: bool
     allow_registration: bool
     enable_mcp: bool
+    rate_limit_enabled: bool
+    rate_limit_auth_per_minute: int
+    rate_limit_register_per_hour: int
     web_secret: str | None
     web_cookie_secure: bool
     disable_bootstrap: bool
@@ -106,6 +116,13 @@ class HubSettings:
             ),
             allow_registration=_bool("AGENT_HUB_ALLOW_REGISTRATION", True),
             enable_mcp=_bool("AGENT_HUB_ENABLE_MCP", True),
+            rate_limit_enabled=_bool("AGENT_HUB_RATE_LIMIT", True),
+            rate_limit_auth_per_minute=_positive_int(
+                "AGENT_HUB_RATE_LIMIT_AUTH_PER_MINUTE", 20
+            ),
+            rate_limit_register_per_hour=_positive_int(
+                "AGENT_HUB_RATE_LIMIT_REGISTER_PER_HOUR", 10
+            ),
             web_secret=os.environ.get("AGENT_HUB_WEB_SECRET", "").strip() or None,
             web_cookie_secure=_bool("AGENT_HUB_WEB_COOKIE_SECURE", True),
             disable_bootstrap=_bool("AGENT_HUB_DISABLE_BOOTSTRAP", False),

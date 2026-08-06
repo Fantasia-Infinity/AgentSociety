@@ -254,3 +254,24 @@ S3 bucket 开启版本控制，并按需做跨区复制。SQLite 本地部署的
 - 多租户隔离由 `tenant_id` 在存储层强制；跨租户任务委派不支持。
 - Hub 只做协调，不为租户任务提供沙箱；租户 worker 由设备所有者控制。
 - 逐节点 token 吊销/重签已支持；公网开放前仍需：审计保留、速率限制、Run 隔离。
+
+## 9. 公网部署前加固清单
+
+- **先注册管理员**：默认租户的第一个注册用户会成为 `tenant_admin`。全新部署时
+  先用管理员账号完成注册，再把 `AGENT_HUB_ALLOW_REGISTRATION=false`（个人/团队
+  部署），或保留 `true` 面向公众开放注册（每个用户仍互相隔离）。
+- **速率限制**：认证接口默认按来源 IP 限流
+  （`AGENT_HUB_RATE_LIMIT_AUTH_PER_MINUTE=20`、注册每小时 10 次），可用
+  `AGENT_HUB_RATE_LIMIT=false` 关闭，公网不建议关闭。
+- **关闭 bootstrap**：生产环境必须 `AGENT_HUB_DISABLE_BOOTSTRAP=1`，共享
+  `AGENT_HUB_TOKEN` 不再作为 API 凭据。
+- **TLS**：Hub 保持只监听 loopback，由 Caddy/Cloudflare 终止 TLS；不要直接对外
+  暴露 8090，也不要设置 `AGENT_HUB_ALLOW_NON_LOOPBACK_BIND=true`。
+- **凭据卫生**：`.env.hub` 权限保持 600；`AGENT_HUB_TOKEN`/`AGENT_HUB_WEB_SECRET`/
+  Postgres 密码不要出现在日志、issue 或聊天中；泄露后立即轮换。
+- **对象存储**：默认不配置对象存储时 Artifact 只能登记元数据；启用 S3/文件存储
+  前确认桶权限为私有。
+- **备份**：PostgreSQL 数据卷没有内置备份，公网部署前配置每日 `pg_dump`（或
+  Volume 快照）并验证可恢复。
+- **Worker 安全**：只有你信任的设备才应运行 worker 并接入 Hub；远程任务默认
+  `AGENT_REMOTE_TOOL_POLICY=full`，必要时设为 `read_only`/`no_tools`。
