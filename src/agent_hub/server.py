@@ -5,6 +5,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
+import time
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -300,14 +301,29 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _send_mcp_endpoint(self) -> None:
-        body = f"event: endpoint\ndata: /mcp\n\n".encode("utf-8")
+        # MCP streamable HTTP expects GET /mcp to open a long-lived SSE stream.
+        # Closing it right after the endpoint event makes clients reconnect
+        # continuously (observed ~2 GET/s per client), so keep the stream open
+        # with periodic keep-alive comments and a reconnect backoff hint.
+        self.protocol_version = "HTTP/1.1"
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(body)))
         self._send_security_headers()
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(b"retry: 30000\n\n")
+            self.wfile.write(b"event: endpoint\ndata: /mcp\n\n")
+            self.wfile.flush()
+            keep_alive_until = time.monotonic() + 6 * 60 * 60
+            while time.monotonic() < keep_alive_until:
+                time.sleep(15)
+                self.wfile.write(b": keep-alive\n\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            logger.info("mcp_sse_disconnected")
+        finally:
+            self.close_connection = True
 
     def _send_security_headers(self, *, html: bool = False) -> None:
         self.send_header("X-Content-Type-Options", "nosniff")

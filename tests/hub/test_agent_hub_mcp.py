@@ -251,6 +251,33 @@ class McpHttpTests(unittest.TestCase):
             finally:
                 server.server_close()
 
+    def test_http_mcp_sse_stream_stays_open(self) -> None:
+        with TemporaryDirectory() as temporary:
+            server, port, _ = self.start_server(temporary)
+            try:
+                request = Request(
+                    f"http://127.0.0.1:{port}/mcp",
+                    headers={
+                        "Authorization": "Bearer mcp-http-token-123456789"
+                    },
+                )
+                with urlopen(request, timeout=3) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(
+                        response.headers.get_content_type(), "text/event-stream"
+                    )
+                    self.assertIsNone(response.headers.get("Content-Length"))
+                    raw = [
+                        response.readline().decode("utf-8").strip()
+                        for _ in range(5)
+                    ]
+                    lines = [line for line in raw if line]
+                    self.assertEqual(lines[0], "retry: 30000")
+                    self.assertEqual(lines[1], "event: endpoint")
+                    self.assertEqual(lines[2], "data: /mcp")
+            finally:
+                server.server_close()
+
     def test_http_initialize_and_create_task(self) -> None:
         with TemporaryDirectory() as temporary:
             server, port, _ = self.start_server(temporary)
