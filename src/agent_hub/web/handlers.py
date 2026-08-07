@@ -312,11 +312,22 @@ class WebHandlersMixin:
                     )
                     return
                 user = login["user"]
+                account = self.server.api.store.account_for_principal(
+                    user["principal_id"]
+                )
+                rev = (
+                    self.server.web.revocation_marker(
+                        str(account["password_hash"])
+                    )
+                    if account is not None
+                    else ""
+                )
                 _, cookie = self.server.web.create(
                     {
                         "role": user["role"],
                         "tenant_id": user["tenant_id"],
                         "principal_id": user["principal_id"],
+                        **({"rev": rev} if rev else {}),
                     }
                 )
             elif supplied:
@@ -750,6 +761,15 @@ class WebHandlersMixin:
         if morsel is None:
             return None
         try:
-            return self.server.web.verify(morsel.value)
+            session_id, claims = self.server.web.verify(morsel.value)
         except WebSessionError:
             return None
+        if claims.get("principal_id") and claims.get("rev"):
+            account = self.server.api.store.account_for_principal(
+                claims["principal_id"]
+            )
+            if account is None or not self.server.web.session_valid_for_account(
+                claims, str(account["password_hash"])
+            ):
+                return None
+        return session_id, claims

@@ -61,6 +61,29 @@ class WebSession:
             self._secret, f"csrf:{session_id}".encode("utf-8"), hashlib.sha256
         ).hexdigest()
 
+    def revocation_marker(self, password_hash: str) -> str:
+        """Session-scoped marker derived from the current password hash."""
+
+        return hmac.new(
+            self._secret,
+            f"rev:{password_hash}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()[:24]
+
+    def session_valid_for_account(
+        self, claims: dict[str, Any], password_hash: str | None
+    ) -> bool:
+        """Reject stateless web cookies issued before a password change."""
+
+        rev = claims.get("rev")
+        if not rev:
+            return True
+        if not password_hash:
+            return False
+        return hmac.compare_digest(
+            str(rev), self.revocation_marker(password_hash)
+        )
+
     def set_cookie(self, value: str, *, secure: bool) -> str:
         attributes = [
             f"{SESSION_COOKIE}={value}",

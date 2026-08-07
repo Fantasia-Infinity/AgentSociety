@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from agent_hub.ratelimit import AuthRateLimiter, SlidingWindowLimiter
+from agent_hub.server import forwarded_client_ip
 
 
 class SlidingWindowLimiterTests(unittest.TestCase):
@@ -38,6 +39,22 @@ class AuthRateLimiterTests(unittest.TestCase):
         limiter = AuthRateLimiter(enabled=False)
         self.assertTrue(limiter.allow_auth("ip"))
         self.assertTrue(limiter.allow_register("ip"))
+
+
+class ForwardedClientIpTests(unittest.TestCase):
+    def test_prefers_first_forwarded_hop(self) -> None:
+        self.assertEqual(
+            forwarded_client_ip(
+                {"X-Forwarded-For": "203.0.113.7, 10.0.0.2"},
+                ("127.0.0.1", 1234),
+            ),
+            "203.0.113.7",
+        )
+        self.assertEqual(
+            forwarded_client_ip({}, ("127.0.0.1", 1234)),
+            "127.0.0.1",
+        )
+        self.assertEqual(forwarded_client_ip({}, None), "unknown")
 
 
 if __name__ == "__main__":

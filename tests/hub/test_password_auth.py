@@ -8,6 +8,7 @@ import unittest
 from agent_hub.api import AgentHubApi
 from agent_hub.errors import ApiError
 from agent_hub.store import AgentHubStore
+from agent_hub.web.session import WebSession
 
 
 class PasswordAuthTests(unittest.TestCase):
@@ -188,6 +189,49 @@ class PasswordAuthTests(unittest.TestCase):
                 None,
             )
         self.assertEqual(caught.exception.status, HTTPStatus.FORBIDDEN)
+
+    def test_web_session_cookie_revoked_after_password_change(self) -> None:
+        web = WebSession("s" * 40)
+        self.post(
+            "/v1/auth/register",
+            {
+                "username": "frank",
+                "password": "correct-horse-999",
+                "display_name": "Frank",
+            },
+        )
+        before = self.store.account_for_principal("human-frank")
+        _, login = self.post(
+            "/v1/auth/login",
+            {"username": "frank", "password": "correct-horse-999", "label": "test"},
+        )
+        ctx = self.store.authenticate_session(login["session_token"])
+        _, cookie = web.create(
+            {
+                "role": ctx.role,
+                "tenant_id": ctx.tenant_id,
+                "principal_id": ctx.principal_id,
+                "rev": web.revocation_marker(str(before["password_hash"])),
+            }
+        )
+        _, claims = web.verify(cookie)
+        self.assertTrue(
+            web.session_valid_for_account(claims, str(before["password_hash"]))
+        )
+
+        status, _ = self.post(
+            "/v1/auth/change-password",
+            {
+                "old_password": "correct-horse-999",
+                "new_password": "brand-new-password-2",
+            },
+            ctx,
+        )
+        self.assertEqual(status, HTTPStatus.OK)
+        after = self.store.account_for_principal("human-frank")
+        self.assertFalse(
+            web.session_valid_for_account(claims, str(after["password_hash"]))
+        )
 
 
 if __name__ == "__main__":

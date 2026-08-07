@@ -28,6 +28,17 @@ LOCK_SECONDS = 15 * 60
 DEFAULT_SESSION_TTL_SECONDS = 24 * 60 * 60
 DEFAULT_NODE_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60
 
+_DUMMY_PASSWORD_HASH: str | None = None
+
+
+def _dummy_password_hash() -> str:
+    """Argon2 hash used to equalize timing for unknown usernames."""
+
+    global _DUMMY_PASSWORD_HASH
+    if _DUMMY_PASSWORD_HASH is None:
+        _DUMMY_PASSWORD_HASH = hash_password("timing-equalizer-000000")
+    return _DUMMY_PASSWORD_HASH
+
 
 class UserStore:
     """Password accounts, sessions, and password-based agent logins."""
@@ -128,6 +139,7 @@ class UserStore:
                 (username,),
             ).fetchone()
             if row is None:
+                verify_password(_dummy_password_hash(), password)
                 return None
             account = dict(row)
             if account.get("locked_until") is not None and float(

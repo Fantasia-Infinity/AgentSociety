@@ -25,6 +25,22 @@ from .web.handlers import WebHandlersMixin
 logger = logging.getLogger(__name__)
 
 
+def forwarded_client_ip(
+    headers, client_address: tuple[str, int] | None
+) -> str:
+    """Return the real client IP seen through the trusted loopback proxy.
+
+    Caddy overwrites X-Forwarded-For with the direct client address before
+    proxying to the loopback-bound Hub, so the first hop is trustworthy here.
+    """
+
+    forwarded = headers.get("X-Forwarded-For", "")
+    first = forwarded.split(",")[0].strip() if forwarded else ""
+    if first:
+        return first
+    return client_address[0] if client_address else "unknown"
+
+
 class HubHttpServer(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -198,7 +214,7 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
         limiter = self.server.rate_limiter
         if limiter is None or not limiter.enabled:
             return False
-        ip = self.client_address[0] if self.client_address else "unknown"
+        ip = forwarded_client_ip(self.headers, self.client_address)
         if path in ("/v1/auth/register", "/web/register"):
             return not limiter.allow_register(ip)
         if path in (
