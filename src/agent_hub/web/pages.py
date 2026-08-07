@@ -48,6 +48,8 @@ h2 { font-size: 1.1rem; margin-top: 1.5rem; }
 .card span { font-size: 0.8rem; color: #64748b; }
 .pill { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px;
         font-size: 0.75rem; background: #e0e7ff; color: #3730a3; }
+.pill.status-online { background: #dcfce7; color: #166534; }
+.pill.status-offline { background: #e2e8f0; color: #475569; }
 pre { background: #0f172a; color: #e2e8f0; padding: 0.75rem; overflow-x: auto;
       border-radius: 6px; font-size: 0.8rem; }
 input, textarea, select { width: 100%; padding: 0.45rem 0.6rem; margin: 0.25rem 0 0.75rem;
@@ -528,7 +530,8 @@ def nodes_page(
     node_rows = "".join(
         f"<tr><td>{_esc(n['node_id'])}</td><td>{_esc(n['actor_id'])}</td>"
         f"<td>{_esc(n['display_name'])}</td>"
-        f"<td><span class=\"pill\">{_esc(n['status'])}</span></td>"
+        f"<td><span class=\"pill status-{_esc(n['status'])}\">"
+        f"{_esc(n['status'])}</span></td>"
         f"<td>{_fmt(n['last_seen_at'])}</td></tr>"
         for n in nodes
     )
