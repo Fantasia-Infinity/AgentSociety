@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from html import escape
 import json
+import time
 from typing import Any
 
 
@@ -15,6 +16,38 @@ def _fmt(timestamp: float | None) -> str:
         return "-"
     return datetime.fromtimestamp(float(timestamp), timezone.utc).strftime(
         "%Y-%m-%d %H:%M:%S UTC"
+    )
+
+
+def _fmt_relative(timestamp: float | None) -> str:
+    """Short human-friendly time: 'just now', '5 min ago', or a date."""
+
+    if timestamp is None:
+        return "-"
+    value = float(timestamp)
+    delta = time.time() - value
+    if delta < 0:
+        return _fmt(value)
+    if delta < 60:
+        return "just now"
+    if delta < 3600:
+        return f"{int(delta // 60)} min ago"
+    if delta < 86400:
+        return f"{int(delta // 3600)} h ago"
+    if delta < 7 * 86400:
+        return f"{int(delta // 86400)} d ago"
+    return datetime.fromtimestamp(value, timezone.utc).strftime("%Y-%m-%d")
+
+
+def _short_id(value: Any, width: int = 12) -> str:
+    text = "" if value is None else str(value)
+    return text if len(text) <= width else f"{text[:width]}…"
+
+
+def _status_pill(status: Any) -> str:
+    return (
+        f'<span class="pill status-{_esc(status)}" '
+        f'title="status">{_esc(status)}</span>'
     )
 
 
@@ -31,8 +64,10 @@ body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; margin: 0;
           display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
 .topbar a { color: #cbd5e1; text-decoration: none; margin-right: 0.75rem; }
 .topbar a:hover { color: #fff; }
+.topbar a.active { color: #fff; border-bottom: 2px solid var(--accent); }
 .topbar form { margin: 0; }
 .content { max-width: 1100px; margin: 1.5rem auto; padding: 0 1.25rem; }
+.table-wrap { overflow-x: auto; }
 table { border-collapse: collapse; width: 100%; background: #fff; }
 th, td { border: 1px solid #e2e8f0; padding: 0.5rem 0.65rem; text-align: left;
          font-size: 0.9rem; vertical-align: top; }
@@ -50,6 +85,17 @@ h2 { font-size: 1.1rem; margin-top: 1.5rem; }
         font-size: 0.75rem; background: #e0e7ff; color: #3730a3; }
 .pill.status-online { background: #dcfce7; color: #166534; }
 .pill.status-offline { background: #e2e8f0; color: #475569; }
+.pill.status-submitted { background: #fef3c7; color: #92400e; }
+.pill.status-working { background: #dbeafe; color: #1d4ed8; }
+.pill.status-completed { background: #dcfce7; color: #166534; }
+.pill.status-failed { background: #fee2e2; color: #991b1b; }
+.pill.status-cancelled { background: #e2e8f0; color: #475569; }
+.pill.status-active { background: #dbeafe; color: #1d4ed8; }
+.short-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 0.82rem; }
+.time { white-space: nowrap; color: #64748b; font-size: 0.82rem; }
+details { margin: 0.75rem 0; }
+details summary { cursor: pointer; color: var(--accent); }
 pre { background: #0f172a; color: #e2e8f0; padding: 0.75rem; overflow-x: auto;
       border-radius: 6px; font-size: 0.8rem; }
 input, textarea, select { width: 100%; padding: 0.45rem 0.6rem; margin: 0.25rem 0 0.75rem;
@@ -90,7 +136,14 @@ button.secondary { background: #64748b; }
 """
 
 
-def _layout(title: str, body: str, *, csrf: str | None = None) -> str:
+def _layout(
+    title: str,
+    body: str,
+    *,
+    csrf: str | None = None,
+    active: str | None = None,
+    admin: bool = False,
+) -> str:
     logout = ""
     if csrf is not None:
         logout = (
@@ -98,15 +151,22 @@ def _layout(title: str, body: str, *, csrf: str | None = None) -> str:
             f'<input type="hidden" name="csrf_token" value="{_esc(csrf)}">'
             f'<button class="secondary">Logout</button></form>'
         )
+    tenants_link = (
+        '<a href="/web/tenants" class="active" '
+        'aria-current="page">Tenants</a>'
+        if admin and active == "tenants"
+        else '<a href="/web/tenants">Tenants</a>'
+        if admin
+        else ""
+    )
     nav = (
         '<div class="topbar">'
         '<a href="/web"><b>AgentSociety Hub</b></a>'
-        '<a href="/web/tasks">Tasks</a>'
-        '<a href="/web/runs">Runs</a>'
-        '<a href="/web/artifacts">Artifacts</a>'
-        '<a href="/web/nodes">Nodes &amp; Identities</a>'
-        '<a href="/web/tenants">Tenants</a>'
-        '<a href="/web/account">Account</a>'
+        f'<a href="/web"{" class=\"active\" aria-current=\"page\"" if active == "dashboard" else ""}>Dashboard</a>'
+        f'<a href="/web/tasks"{" class=\"active\" aria-current=\"page\"" if active == "tasks" else ""}>Tasks</a>'
+        f'<a href="/web/nodes"{" class=\"active\" aria-current=\"page\"" if active == "nodes" else ""}>Devices</a>'
+        f'{tenants_link}'
+        f'<a href="/web/account"{" class=\"active\" aria-current=\"page\"" if active == "account" else ""}>Account</a>'
         f"{logout}</div>"
     )
     return (
@@ -231,6 +291,7 @@ def account_page(
     csrf: str,
     error: str | None = None,
     notice: str | None = None,
+    admin: bool = False,
 ) -> str:
     error_html = f'<div class="error">{_esc(error)}</div>' if error else ""
     notice_html = (
@@ -242,8 +303,10 @@ def account_page(
         "<tr>"
         f"<td>{_esc(session.get('label'))}</td>"
         f"<td>{_esc(session.get('role'))}</td>"
-        f"<td>{_fmt(session.get('created_at'))}</td>"
-        f"<td>{_fmt(session.get('expires_at'))}</td>"
+        f'<td class="time" title="{_fmt(session.get("created_at"))}">'
+        f"{_fmt_relative(session.get('created_at'))}</td>"
+        f'<td class="time" title="{_fmt(session.get("expires_at"))}">'
+        f"{_fmt_relative(session.get('expires_at'))}</td>"
         f"<td>{'revoked' if session.get('revoked_at') else 'active'}</td>"
         f"<td><form method=\"post\" action=\"/web/account/sessions/revoke\">"
         f'<input type="hidden" name="csrf_token" value="{_esc(csrf)}">'
@@ -257,9 +320,11 @@ def account_page(
         "<tr>"
         f"<td>{_esc(token.get('label'))}</td>"
         f"<td>{_esc(token.get('role'))}</td>"
-        f"<td>{_esc(token.get('node_id') or '-')}</td>"
-        f"<td>{_fmt(token.get('created_at'))}</td>"
-        f"<td>{_fmt(token.get('expires_at'))}</td>"
+        f'<td class="short-id">{_esc(_short_id(token.get("node_id") or "-"))}</td>'
+        f'<td class="time" title="{_fmt(token.get("created_at"))}">'
+        f"{_fmt_relative(token.get('created_at'))}</td>"
+        f'<td class="time" title="{_fmt(token.get("expires_at"))}">'
+        f"{_fmt_relative(token.get('expires_at'))}</td>"
         f"<td>{'revoked' if token.get('revoked_at') else 'active'}</td>"
         f"<td><form method=\"post\" action=\"/web/account/tokens/revoke\">"
         f'<input type="hidden" name="csrf_token" value="{_esc(csrf)}">'
@@ -289,13 +354,15 @@ def account_page(
         'autocomplete="new-password">'
         '<button type="submit">Change password</button></form>'
         "<h2>Sessions</h2>"
-        f"<table><tr><th>Label</th><th>Role</th><th>Created</th><th>Expires</th>"
-        f"<th>Status</th><th></th></tr>{session_rows}</table>"
+        '<div class="table-wrap"><table><tr><th>Label</th><th>Role</th>'
+        "<th>Created</th><th>Expires</th><th>Status</th><th></th></tr>"
+        f"{session_rows}</table></div>"
         "<h2>Node credentials</h2>"
-        f"<table><tr><th>Label</th><th>Role</th><th>Node</th><th>Created</th>"
-        f"<th>Expires</th><th>Status</th><th></th></tr>{token_rows}</table>"
+        '<div class="table-wrap"><table><tr><th>Label</th><th>Role</th>'
+        "<th>Node</th><th>Created</th><th>Expires</th><th>Status</th>"
+        f"<th></th></tr>{token_rows}</table></div>"
     )
-    return _layout("Account", body)
+    return _layout("Account", body, csrf=csrf, active="account", admin=admin)
 
 
 def dashboard_page(
@@ -304,6 +371,7 @@ def dashboard_page(
     runs: list[dict[str, Any]],
     *,
     user: dict[str, Any] | None = None,
+    admin: bool = False,
 ) -> str:
     if user:
         identity = (
@@ -318,38 +386,51 @@ def dashboard_page(
         "<p>This view only shows data you are allowed to see: your own "
         "agents, tasks, runs, and artifacts.</p></div>"
     )
-    cards = "".join(
-        f'<div class="card"><b>{_esc(stats.get(key, 0))}</b>'
-        f"<span>{_esc(label)}</span></div>"
-        for key, label in (
-            ("principals", "Principals"),
-            ("actors", "Actors"),
-            ("nodes", "Nodes"),
-            ("tasks", "Tasks"),
-            ("runs", "Runs"),
-            ("artifacts", "Artifacts"),
-        )
+    active_tasks = int(stats.get("tasks_submitted", 0)) + int(
+        stats.get("tasks_working", 0)
+    )
+    failed_tasks = int(stats.get("tasks_failed", 0)) + int(
+        stats.get("tasks_cancelled", 0)
+    )
+    cards = (
+        f'<div class="card"><b>{_esc(stats.get("nodes_online", 0))}'
+        f' / {_esc(stats.get("nodes", 0))}</b>'
+        "<span>Devices online</span></div>"
+        f'<div class="card"><b>{_esc(active_tasks)}</b>'
+        "<span>Active tasks</span></div>"
+        f'<div class="card"><b>{_esc(stats.get("tasks_completed", 0))}</b>'
+        "<span>Completed tasks</span></div>"
+        f'<div class="card"><b>{_esc(failed_tasks)}</b>'
+        "<span>Failed / cancelled</span></div>"
     )
     task_rows = "".join(
         f"<tr><td><a href=\"/web/tasks/{_esc(task['task_id'])}\">"
-        f"{_esc(task['task_id'])}</a></td>"
-        f"<td><span class=\"pill\">{_esc(task['status'])}</span></td>"
+        f'<span class="short-id">{_esc(_short_id(task["task_id"]))}</span></a></td>'
+        f"<td>{_status_pill(task['status'])}</td>"
         f"<td>{_esc(task['objective'][:120])}</td>"
-        f"<td>{_fmt(task['created_at'])}</td></tr>"
+        f'<td class="time" title="{_fmt(task["created_at"])}">'
+        f"{_fmt_relative(task['created_at'])}</td></tr>"
         for task in tasks[:20]
     )
     if not task_rows:
-        task_rows = '<tr><td colspan="4" class="muted">No tasks yet.</td></tr>'
+        task_rows = (
+            '<tr><td colspan="4" class="muted">No tasks yet. Create your '
+            'first task below or from the Tasks page.</td></tr>'
+        )
     run_rows = "".join(
-        f"<tr><td>{_esc(run['run_id'])}</td>"
-        f"<td>{_esc(run.get('task_id') or '-')}</td>"
-        f"<td><span class=\"pill\">{_esc(run['status'])}</span></td>"
+        f'<tr><td class="short-id">{_esc(_short_id(run["run_id"]))}</td>'
+        f'<td class="short-id">{_esc(_short_id(run.get("task_id") or "-"))}</td>'
+        f"<td>{_status_pill(run['status'])}</td>"
         f"<td>{_esc(run['node_id'])}</td>"
-        f"<td>{_fmt(run['started_at'])}</td></tr>"
+        f'<td class="time" title="{_fmt(run["started_at"])}">'
+        f"{_fmt_relative(run['started_at'])}</td></tr>"
         for run in runs[:10]
     )
     if not run_rows:
-        run_rows = '<tr><td colspan="5" class="muted">No runs yet.</td></tr>'
+        run_rows = (
+            '<tr><td colspan="5" class="muted">No runs yet. Runs appear '
+            "once a task starts executing.</td></tr>"
+        )
     body = (
         f"{welcome}"
         f'<div class="cards">{cards}</div>'
@@ -365,13 +446,17 @@ def dashboard_page(
         "outputs under <a href=\"/web/artifacts\">Artifacts</a>.</li>"
         "</ol></div>"
         "<h2>Recent tasks</h2>"
-        "<table><tr><th>Task</th><th>Status</th><th>Objective</th><th>Created</th></tr>"
-        f"{task_rows}</table>"
+        '<div class="table-wrap"><table><tr><th>Task</th><th>Status</th>'
+        "<th>Objective</th><th>Created</th></tr>"
+        f"{task_rows}</table></div>"
         "<h2>Recent runs</h2>"
-        "<table><tr><th>Run</th><th>Task</th><th>Status</th><th>Node</th>"
-        f"<th>Started</th></tr>{run_rows}</table>"
+        '<div class="table-wrap"><table><tr><th>Run</th><th>Task</th>'
+        "<th>Status</th><th>Node</th><th>Started</th></tr>"
+        f"{run_rows}</table></div>"
+        '<p class="muted"><a href="/web/runs">View all runs</a> · '
+        '<a href="/web/artifacts">View artifacts</a></p>'
     )
-    return _layout("Dashboard", body)
+    return _layout("Dashboard", body, active="dashboard", admin=admin)
 
 
 def tasks_page(
@@ -382,60 +467,81 @@ def tasks_page(
     actors: list[dict[str, Any]],
     csrf: str,
     error: str | None = None,
+    admin: bool = False,
 ) -> str:
     error_html = f'<div class="error">{_esc(error)}</div>' if error else ""
+    default_principal = principals[0]["principal_id"] if principals else ""
+    default_actor = actors[0]["actor_id"] if actors else ""
     principal_options = "".join(
-        f'<option value="{_esc(p["principal_id"])}">{_esc(p["principal_id"])}</option>'
+        f'<option value="{_esc(p["principal_id"])}"'
+        f'{" selected" if p["principal_id"] == default_principal else ""}>'
+        f'{_esc(p["principal_id"])}</option>'
         for p in principals
     )
     actor_options = "".join(
-        f'<option value="{_esc(a["actor_id"])}">{_esc(a["actor_id"])}</option>'
+        f'<option value="{_esc(a["actor_id"])}"'
+        f'{" selected" if a["actor_id"] == default_actor else ""}>'
+        f'{_esc(a["actor_id"])}</option>'
         for a in actors
     )
     filters = "".join(
-        f'<a href="/web/tasks?status={status}">{status}</a>&nbsp;'
+        (
+            f'<a href="/web/tasks?status={status}"'
+            f'{" style=\"font-weight:bold\"" if status_filter == status else ""}>'
+            f"{status}</a>"
+        )
+        + "&nbsp;"
         for status in ("submitted", "working", "completed", "failed", "cancelled")
     )
     rows = "".join(
         f"<tr><td><a href=\"/web/tasks/{_esc(task['task_id'])}\">"
-        f"{_esc(task['task_id'])}</a></td>"
-        f"<td><span class=\"pill\">{_esc(task['status'])}</span></td>"
+        f'<span class="short-id">{_esc(_short_id(task["task_id"]))}</span></a></td>'
+        f"<td>{_status_pill(task['status'])}</td>"
         f"<td>{_esc(task['principal_id'])}</td>"
         f"<td>{_esc(task['objective'][:160])}</td>"
-        f"<td>{_fmt(task['created_at'])}</td></tr>"
+        f'<td class="time" title="{_fmt(task["created_at"])}">'
+        f"{_fmt_relative(task['created_at'])}</td></tr>"
         for task in tasks
     )
     if not rows:
-        rows = '<tr><td colspan="5" class="muted">No tasks found.</td></tr>'
+        rows = (
+            '<tr><td colspan="5" class="muted">No tasks found. Create one '
+            "below to get started.</td></tr>"
+        )
     body = (
         "<h1>Tasks</h1>"
         f"{error_html}"
-        "<p class=\"muted\">Filter: <a href=\"/web/tasks\">all</a>&nbsp;"
+        '<p class="muted">Filter: <a href="/web/tasks"'
+        f'{" style=\"font-weight:bold\"" if status_filter is None else ""}>all</a>&nbsp;'
         f"{filters}</p>"
         "<h2>Create task</h2>"
         '<form method="post" action="/web/tasks/create">'
         f'<input type="hidden" name="csrf_token" value="{_esc(csrf)}">'
+        "<label>What should the agent do?</label>"
+        '<textarea name="objective" rows="4" required '
+        'placeholder="Describe the task in plain language…"></textarea>'
+        "<label>Assignee actor (optional)</label><select name=\"assignee_actor_id\">"
+        '<option value="">(any capable node)</option>'
+        f"{actor_options}</select>"
+        '<details><summary>Advanced options</summary>'
         "<label>Principal</label><select name=\"principal_id\" required>"
         f"{principal_options}</select>"
         "<label>Delegator actor</label><select name=\"delegator_actor_id\" required>"
         f"{actor_options}</select>"
-        "<label>Assignee actor (optional)</label><select name=\"assignee_actor_id\">"
-        '<option value="">(any capable node)</option>'
-        f"{actor_options}</select>"
-        "<label>Objective</label><textarea name=\"objective\" rows=\"4\" required>"
-        "</textarea>"
         "<label>Required capabilities (comma-separated)</label>"
         '<input name="required_capabilities" placeholder="code,pi">'
         "<label>Input JSON (optional)</label>"
         '<textarea name="input_json" rows="3" placeholder=\'{"workspace":"."}\'></textarea>'
         "<label>Idempotency key (optional)</label>"
         '<input name="idempotency_key">'
+        "</details>"
         '<button type="submit">Create task</button></form>'
         "<h2>Task list</h2>"
-        "<table><tr><th>Task</th><th>Status</th><th>Principal</th>"
-        f"<th>Objective</th><th>Created</th></tr>{rows}</table>"
+        '<div class="table-wrap"><table><tr><th>Task</th><th>Status</th>'
+        "<th>Principal</th><th>Objective</th><th>Created</th></tr>"
+        f"{rows}</table></div>"
     )
-    return _layout("Tasks", body, csrf=csrf)
+    return _layout("Tasks", body, csrf=csrf, active="tasks", admin=admin)
 
 
 def task_detail_page(
@@ -444,33 +550,55 @@ def task_detail_page(
     events: list[dict[str, Any]],
     runs: list[dict[str, Any]],
     csrf: str,
+    admin: bool = False,
 ) -> str:
     artifacts = task.get("artifacts") or []
     artifact_rows = "".join(
-        f"<tr><td>{_esc(a['artifact_id'])}</td><td>{_esc(a['name'])}</td>"
+        f'<tr><td class="short-id">{_esc(_short_id(a["artifact_id"]))}</td>'
+        f"<td>{_esc(a['name'])}</td>"
         f"<td>{_esc(a['media_type'])}</td><td>{_esc(a['size_bytes'] or '-')}</td>"
-        f"<td>{_esc(a['sha256'] or '-')}</td><td>{_fmt(a['created_at'])}</td></tr>"
+        f'<td class="short-id">{_esc(_short_id(a["sha256"] or "-", 8))}</td>'
+        f'<td class="time" title="{_fmt(a["created_at"])}">'
+        f"{_fmt_relative(a['created_at'])}</td></tr>"
         for a in artifacts
     )
     if not artifact_rows:
-        artifact_rows = '<tr><td colspan="6" class="muted">No artifacts.</td></tr>'
+        artifact_rows = (
+            '<tr><td colspan="6" class="muted">No artifacts produced '
+            "yet.</td></tr>"
+        )
     event_rows = "".join(
         f"<tr><td>{_esc(event['seq'])}</td><td>{_esc(event['type'])}</td>"
-        f"<td>{_esc(event.get('actor_id') or '-')}</td>"
+        f'<td class="short-id">{_esc(_short_id(event.get("actor_id") or "-"))}</td>'
         f"<td>{_esc(event.get('message') or '-')}</td>"
-        f"<td>{_fmt(event['created_at'])}</td></tr>"
+        f'<td class="time" title="{_fmt(event["created_at"])}">'
+        f"{_fmt_relative(event['created_at'])}</td></tr>"
         for event in events
     )
     if not event_rows:
-        event_rows = '<tr><td colspan="5" class="muted">No events.</td></tr>'
+        event_rows = (
+            '<tr><td colspan="5" class="muted">No events yet. Progress '
+            "appears here once a worker claims the task.</td></tr>"
+        )
     run_rows = "".join(
-        f"<tr><td>{_esc(run['run_id'])}</td><td>{_esc(run['node_id'])}</td>"
-        f"<td><span class=\"pill\">{_esc(run['status'])}</span></td>"
-        f"<td>{_fmt(run['started_at'])}</td></tr>"
+        f'<tr><td class="short-id">{_esc(_short_id(run["run_id"]))}</td>'
+        f"<td>{_esc(run['node_id'])}</td>"
+        f"<td>{_status_pill(run['status'])}</td>"
+        f'<td class="time" title="{_fmt(run["started_at"])}">'
+        f"{_fmt_relative(run['started_at'])}</td></tr>"
         for run in runs
     )
     if not run_rows:
-        run_rows = '<tr><td colspan="4" class="muted">No runs.</td></tr>'
+        run_rows = (
+            '<tr><td colspan="4" class="muted">No runs yet.</td></tr>'
+        )
+    result_text = (task.get("result") or {}).get("text") or ""
+    result_panel = (
+        '<div class="panel"><h3>Result</h3>'
+        f'<p style="white-space:pre-wrap">{_esc(result_text)}</p></div>'
+        if result_text
+        else ""
+    )
     cancel_form = ""
     if task["status"] not in {"completed", "failed", "cancelled"}:
         cancel_form = (
@@ -484,107 +612,143 @@ def task_detail_page(
             '<button class="secondary" type="submit">Cancel task</button></form>'
         )
     body = (
-        f"<h1>Task {_esc(task['task_id'])}</h1>"
+        f"<h1>Task <span class=\"short-id\">{_esc(_short_id(task['task_id'], 16))}</span></h1>"
         f"<p><a href=\"/web/tasks\">&larr; Back to tasks</a></p>"
-        "<table><tr><th>Status</th><td><span class=\"pill\">"
-        f"{_esc(task['status'])}</span></td></tr>"
+        "<table><tr><th>Status</th><td>"
+        f"{_status_pill(task['status'])}</td></tr>"
         f"<tr><th>Principal</th><td>{_esc(task['principal_id'])}</td></tr>"
         f"<tr><th>Delegator</th><td>{_esc(task['delegator_actor_id'])}</td></tr>"
         f"<tr><th>Assignee</th><td>{_esc(task.get('assignee_actor_id') or '-')}</td></tr>"
-        f"<tr><th>Created</th><td>{_fmt(task['created_at'])}</td></tr>"
-        f"<tr><th>Updated</th><td>{_fmt(task['updated_at'])}</td></tr>"
+        f'<tr><th>Created</th><td class="time" title="{_fmt(task["created_at"])}">'
+        f"{_fmt_relative(task['created_at'])}</td></tr>"
+        f'<tr><th>Updated</th><td class="time" title="{_fmt(task["updated_at"])}">'
+        f"{_fmt_relative(task['updated_at'])}</td></tr>"
         f"<tr><th>Objective</th><td>{_esc(task['objective'])}</td></tr>"
-        f"<tr><th>Input</th><td><pre>{_json_text(task['input'])}</pre></td></tr>"
-        f"<tr><th>Result</th><td><pre>{_json_text(task['result'])}</pre></td></tr>"
         f"<tr><th>Error</th><td>{_esc(task.get('error') or '-')}</td></tr>"
         f"<tr><th>Attempts</th><td>{_esc(task['attempts'])}</td></tr></table>"
+        f"{result_panel}"
+        "<details><summary>Raw input / result JSON</summary>"
+        f"<h3>Input</h3><pre>{_json_text(task['input'])}</pre>"
+        f"<h3>Result</h3><pre>{_json_text(task['result'])}</pre></details>"
         f"{cancel_form}"
         "<h2>Events</h2>"
-        "<table><tr><th>Seq</th><th>Type</th><th>Actor</th><th>Message</th>"
-        f"<th>Time</th></tr>{event_rows}</table>"
+        '<div class="table-wrap"><table><tr><th>Seq</th><th>Type</th>'
+        "<th>Actor</th><th>Message</th><th>Time</th></tr>"
+        f"{event_rows}</table></div>"
         "<h2>Runs</h2>"
-        "<table><tr><th>Run</th><th>Node</th><th>Status</th><th>Started</th></tr>"
-        f"{run_rows}</table>"
+        '<div class="table-wrap"><table><tr><th>Run</th><th>Node</th>'
+        "<th>Status</th><th>Started</th></tr>"
+        f"{run_rows}</table></div>"
         "<h2>Artifacts</h2>"
-        "<table><tr><th>Artifact</th><th>Name</th><th>Type</th><th>Size</th>"
-        f"<th>SHA-256</th><th>Created</th></tr>{artifact_rows}</table>"
+        '<div class="table-wrap"><table><tr><th>Artifact</th><th>Name</th>'
+        "<th>Type</th><th>Size</th><th>SHA-256</th><th>Created</th></tr>"
+        f"{artifact_rows}</table></div>"
     )
-    return _layout(f"Task {task['task_id']}", body, csrf=csrf)
+    return _layout(
+        f"Task {task['task_id']}", body, csrf=csrf, active="tasks", admin=admin
+    )
 
 
 def nodes_page(
     principals: list[dict[str, Any]],
     actors: list[dict[str, Any]],
     nodes: list[dict[str, Any]],
+    *,
+    admin: bool = False,
 ) -> str:
     principal_rows = "".join(
-        f"<tr><td>{_esc(p['principal_id'])}</td><td>{_esc(p['kind'])}</td>"
+        f'<tr><td class="short-id">{_esc(p["principal_id"])}</td>'
+        f"<td>{_esc(p['kind'])}</td>"
         f"<td>{_esc(p['display_name'])}</td></tr>"
         for p in principals
     )
     actor_rows = "".join(
-        f"<tr><td>{_esc(a['actor_id'])}</td><td>{_esc(a['principal_id'])}</td>"
+        f'<tr><td class="short-id">{_esc(a["actor_id"])}</td>'
+        f'<td class="short-id">{_esc(a["principal_id"])}</td>'
         f"<td>{_esc(a['kind'])}</td><td>{_esc(', '.join(a['capabilities']))}</td></tr>"
         for a in actors
     )
     node_rows = "".join(
-        f"<tr><td>{_esc(n['node_id'])}</td><td>{_esc(n['actor_id'])}</td>"
+        f'<tr><td class="short-id">{_esc(n["node_id"])}</td>'
+        f'<td class="short-id">{_esc(n["actor_id"])}</td>'
         f"<td>{_esc(n['display_name'])}</td>"
         f"<td><span class=\"pill status-{_esc(n['status'])}\">"
         f"{_esc(n['status'])}</span></td>"
-        f"<td>{_fmt(n['last_seen_at'])}</td></tr>"
+        f'<td class="time" title="{_fmt(n["last_seen_at"])}">'
+        f"{_fmt_relative(n['last_seen_at'])}</td></tr>"
         for n in nodes
     )
+    if not node_rows:
+        node_rows = (
+            '<tr><td colspan="5" class="muted">No devices connected yet. '
+            'Run <code>agent connect</code> on a machine to add one.</td></tr>'
+        )
     body = (
-        "<h1>Nodes &amp; Identities</h1>"
+        "<h1>Devices</h1>"
+        '<div class="table-wrap"><table><tr><th>Node</th><th>Actor</th>'
+        "<th>Name</th><th>Status</th><th>Last seen</th></tr>"
+        f"{node_rows}</table></div>"
+        "<details><summary>Identities (advanced)</summary>"
         "<h2>Principals</h2>"
-        "<table><tr><th>Principal</th><th>Kind</th><th>Name</th></tr>"
-        f"{principal_rows}</table>"
+        '<div class="table-wrap"><table><tr><th>Principal</th><th>Kind</th>'
+        f"<th>Name</th></tr>{principal_rows}</table></div>"
         "<h2>Actors</h2>"
-        "<table><tr><th>Actor</th><th>Principal</th><th>Kind</th>"
-        f"<th>Capabilities</th></tr>{actor_rows}</table>"
-        "<h2>Nodes</h2>"
-        "<table><tr><th>Node</th><th>Actor</th><th>Name</th><th>Status</th>"
-        f"<th>Last seen</th></tr>{node_rows}</table>"
+        '<div class="table-wrap"><table><tr><th>Actor</th><th>Principal</th>'
+        "<th>Kind</th><th>Capabilities</th></tr>"
+        f"{actor_rows}</table></div></details>"
     )
-    return _layout("Nodes & Identities", body)
+    return _layout("Devices", body, active="nodes", admin=admin)
 
 
-def runs_page(runs: list[dict[str, Any]]) -> str:
+def runs_page(runs: list[dict[str, Any]], *, admin: bool = False) -> str:
     rows = "".join(
-        f"<tr><td>{_esc(run['run_id'])}</td><td>{_esc(run.get('task_id') or '-')}</td>"
+        f'<tr><td class="short-id">{_esc(_short_id(run["run_id"]))}</td>'
+        f'<td class="short-id">{_esc(_short_id(run.get("task_id") or "-"))}</td>'
         f"<td>{_esc(run['principal_id'])}</td><td>{_esc(run['node_id'])}</td>"
-        f"<td><span class=\"pill\">{_esc(run['status'])}</span></td>"
-        f"<td>{_fmt(run['started_at'])}</td>"
-        f"<td>{_fmt(run.get('completed_at'))}</td></tr>"
+        f"<td>{_status_pill(run['status'])}</td>"
+        f'<td class="time" title="{_fmt(run["started_at"])}">'
+        f"{_fmt_relative(run['started_at'])}</td>"
+        f'<td class="time" title="{_fmt(run.get("completed_at"))}">'
+        f"{_fmt_relative(run.get('completed_at'))}</td></tr>"
         for run in runs
     )
     if not rows:
-        rows = '<tr><td colspan="7" class="muted">No runs.</td></tr>'
+        rows = (
+            '<tr><td colspan="7" class="muted">No runs yet. Runs appear '
+            "once a worker starts a task.</td></tr>"
+        )
     body = (
         "<h1>Runs</h1>"
-        "<table><tr><th>Run</th><th>Task</th><th>Principal</th><th>Node</th>"
-        f"<th>Status</th><th>Started</th><th>Completed</th></tr>{rows}</table>"
+        '<div class="table-wrap"><table><tr><th>Run</th><th>Task</th>'
+        "<th>Principal</th><th>Node</th><th>Status</th><th>Started</th>"
+        f"<th>Completed</th></tr>{rows}</table></div>"
     )
-    return _layout("Runs", body)
+    return _layout("Runs", body, admin=admin)
 
 
-def artifacts_page(artifacts: list[dict[str, Any]]) -> str:
+def artifacts_page(artifacts: list[dict[str, Any]], *, admin: bool = False) -> str:
     rows = "".join(
-        f"<tr><td>{_esc(a['artifact_id'])}</td><td>{_esc(a['name'])}</td>"
-        f"<td>{_esc(a.get('task_id') or '-')}</td><td>{_esc(a.get('run_id') or '-')}</td>"
+        f'<tr><td class="short-id">{_esc(_short_id(a["artifact_id"]))}</td>'
+        f"<td>{_esc(a['name'])}</td>"
+        f'<td class="short-id">{_esc(_short_id(a.get("task_id") or "-"))}</td>'
+        f'<td class="short-id">{_esc(_short_id(a.get("run_id") or "-"))}</td>'
         f"<td>{_esc(a['media_type'])}</td><td>{_esc(a['size_bytes'] or '-')}</td>"
-        f"<td>{_fmt(a['created_at'])}</td></tr>"
+        f'<td class="time" title="{_fmt(a["created_at"])}">'
+        f"{_fmt_relative(a['created_at'])}</td></tr>"
         for a in artifacts
     )
     if not rows:
-        rows = '<tr><td colspan="7" class="muted">No artifacts.</td></tr>'
+        rows = (
+            '<tr><td colspan="7" class="muted">No artifacts yet. Artifacts '
+            "appear when a task uploads files or objects.</td></tr>"
+        )
     body = (
         "<h1>Artifacts</h1>"
-        "<table><tr><th>Artifact</th><th>Name</th><th>Task</th><th>Run</th>"
-        f"<th>Type</th><th>Size</th><th>Created</th></tr>{rows}</table>"
+        '<div class="table-wrap"><table><tr><th>Artifact</th><th>Name</th>'
+        "<th>Task</th><th>Run</th><th>Type</th><th>Size</th><th>Created</th></tr>"
+        f"{rows}</table></div>"
     )
-    return _layout("Artifacts", body)
+    return _layout("Artifacts", body, admin=admin)
 
 
 def tenants_page(
@@ -592,13 +756,15 @@ def tenants_page(
     *,
     csrf: str,
     error: str | None = None,
+    admin: bool = True,
 ) -> str:
     error_html = f'<div class="error">{_esc(error)}</div>' if error else ""
     rows = "".join(
         f"<tr><td><a href=\"/web/tenants/{_esc(t['tenant_id'])}\">"
-        f"{_esc(t['tenant_id'])}</a></td>"
+        f'{_esc(_short_id(t["tenant_id"], 20))}</a></td>'
         f"<td>{_esc(t['display_name'])}</td>"
-        f"<td>{_fmt(t['created_at'])}</td></tr>"
+        f'<td class="time" title="{_fmt(t["created_at"])}">'
+        f"{_fmt_relative(t['created_at'])}</td></tr>"
         for t in tenants
     )
     if not rows:
@@ -613,9 +779,10 @@ def tenants_page(
         "<label>Display name</label><input name=\"display_name\" required>"
         '<button type="submit">Create tenant</button></form>'
         "<h2>Tenant list</h2>"
-        f"<table><tr><th>Tenant</th><th>Name</th><th>Created</th></tr>{rows}</table>"
+        '<div class="table-wrap"><table><tr><th>Tenant</th><th>Name</th>'
+        f"<th>Created</th></tr>{rows}</table></div>"
     )
-    return _layout("Tenants", body, csrf=csrf)
+    return _layout("Tenants", body, csrf=csrf, active="tenants", admin=admin)
 
 
 def tenant_detail_page(
@@ -628,6 +795,7 @@ def tenant_detail_page(
     csrf: str,
     error: str | None = None,
     created_raw_token: str | None = None,
+    admin: bool = True,
 ) -> str:
     error_html = f'<div class="error">{_esc(error)}</div>' if error else ""
     raw_html = ""
@@ -650,10 +818,12 @@ def tenant_detail_page(
         for n in nodes
     )
     token_rows = "".join(
-        f"<tr><td>{_esc(t['token_id'])}</td><td>{_esc(t['role'])}</td>"
+        f'<tr><td class="short-id">{_esc(_short_id(t["token_id"]))}</td>'
+        f"<td>{_esc(t['role'])}</td>"
         f"<td>{_esc(t['label'])}</td><td>{_esc(t.get('actor_id') or '-')}</td>"
         f"<td>{_esc(t.get('node_id') or '-')}</td>"
-        f"<td>{_fmt(t['created_at'])}</td>"
+        f'<td class="time" title="{_fmt(t["created_at"])}">'
+        f"{_fmt_relative(t['created_at'])}</td>"
         f"<td>{'revoked' if t.get('revoked_at') else 'active'}</td>"
         "<td>"
         + (
@@ -690,11 +860,18 @@ def tenant_detail_page(
         f"<select name=\"node_id\"><option value=\"\">-</option>{node_options}</select>"
         '<button type="submit">Create token</button></form>'
         "<h2>Tokens</h2>"
-        "<table><tr><th>Token</th><th>Role</th><th>Label</th><th>Actor</th>"
-        f"<th>Node</th><th>Created</th><th>Status</th><th>Action</th></tr>"
-        f"{token_rows}</table>"
+        '<div class="table-wrap"><table><tr><th>Token</th><th>Role</th>'
+        "<th>Label</th><th>Actor</th><th>Node</th><th>Created</th>"
+        f"<th>Status</th><th>Action</th></tr>"
+        f"{token_rows}</table></div>"
     )
-    return _layout(f"Tenant {tenant['tenant_id']}", body, csrf=csrf)
+    return _layout(
+        f"Tenant {tenant['tenant_id']}",
+        body,
+        csrf=csrf,
+        active="tenants",
+        admin=admin,
+    )
 
 
 def not_found_page() -> str:

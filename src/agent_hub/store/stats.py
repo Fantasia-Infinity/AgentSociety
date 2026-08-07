@@ -57,4 +57,60 @@ class StatsStore:
                         (tenant_id,),
                     ).fetchone()
                 result[name] = int(row["count"]) if row is not None else 0
+            if principal_id is not None:
+                node_rows = self._connection.execute(
+                    """
+                    SELECT status, COUNT(*) AS n FROM hub_nodes
+                    JOIN hub_actors ON hub_actors.actor_id = hub_nodes.actor_id
+                    WHERE hub_actors.principal_id=? GROUP BY status
+                    """,
+                    (principal_id,),
+                ).fetchall()
+                task_rows = self._connection.execute(
+                    """
+                    SELECT status, COUNT(*) AS n FROM hub_tasks
+                    WHERE principal_id=? GROUP BY status
+                    """,
+                    (principal_id,),
+                ).fetchall()
+            elif tenant_id is None:
+                node_rows = self._connection.execute(
+                    "SELECT status, COUNT(*) AS n FROM hub_nodes GROUP BY status"
+                ).fetchall()
+                task_rows = self._connection.execute(
+                    "SELECT status, COUNT(*) AS n FROM hub_tasks GROUP BY status"
+                ).fetchall()
+            else:
+                node_rows = self._connection.execute(
+                    """
+                    SELECT status, COUNT(*) AS n FROM hub_nodes
+                    WHERE tenant_id=? GROUP BY status
+                    """,
+                    (tenant_id,),
+                ).fetchall()
+                task_rows = self._connection.execute(
+                    """
+                    SELECT status, COUNT(*) AS n FROM hub_tasks
+                    WHERE tenant_id=? GROUP BY status
+                    """,
+                    (tenant_id,),
+                ).fetchall()
+            result["nodes_online"] = sum(
+                int(row["n"]) for row in node_rows if row["status"] == "online"
+            )
+            for status in (
+                "submitted",
+                "working",
+                "completed",
+                "failed",
+                "cancelled",
+            ):
+                result[f"tasks_{status}"] = next(
+                    (
+                        int(row["n"])
+                        for row in task_rows
+                        if row["status"] == status
+                    ),
+                    0,
+                )
             return result

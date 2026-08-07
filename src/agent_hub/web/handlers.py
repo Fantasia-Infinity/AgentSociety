@@ -99,6 +99,7 @@ class WebHandlersMixin:
                     tasks["tasks"],
                     runs["runs"],
                     user=user,
+                    admin=is_admin,
                 ),
             )
             return
@@ -121,6 +122,7 @@ class WebHandlersMixin:
                     principals=principals["principals"],
                     actors=actors["actors"],
                     csrf=self.server.web.csrf(session_id),
+                    admin=is_admin,
                 ),
             )
             return
@@ -128,7 +130,7 @@ class WebHandlersMixin:
             _, runs = self.server.api.get("/v1/hub/runs", "limit=200", context)
             self._send_html(
                 HTTPStatus.OK,
-                runs_page(runs["runs"]),
+                runs_page(runs["runs"], admin=is_admin),
             )
             return
         if path == "/web/artifacts":
@@ -137,7 +139,7 @@ class WebHandlersMixin:
             )
             self._send_html(
                 HTTPStatus.OK,
-                artifacts_page(artifacts["artifacts"]),
+                artifacts_page(artifacts["artifacts"], admin=is_admin),
             )
             return
         if path == "/web/nodes":
@@ -152,6 +154,7 @@ class WebHandlersMixin:
                     principals["principals"],
                     actors["actors"],
                     nodes["nodes"],
+                    admin=is_admin,
                 ),
             )
             return
@@ -174,6 +177,7 @@ class WebHandlersMixin:
                     data["tokens"],
                     csrf=self.server.web.csrf(session_id),
                     notice=notice,
+                    admin=is_admin,
                 ),
             )
             return
@@ -187,6 +191,7 @@ class WebHandlersMixin:
                     tenants_page(
                         tenants["tenants"],
                         csrf=self.server.web.csrf(session_id),
+                        admin=is_admin,
                     ),
                 )
             else:
@@ -245,6 +250,7 @@ class WebHandlersMixin:
                     nodes=nodes["nodes"],
                     csrf=self.server.web.csrf(session_id),
                     created_raw_token=created_raw,
+                    admin=is_admin,
                 ),
             )
             return
@@ -277,6 +283,7 @@ class WebHandlersMixin:
                     events=events["events"],
                     runs=runs,
                     csrf=self.server.web.csrf(session_id),
+                    admin=is_admin,
                 ),
             )
             return
@@ -435,6 +442,7 @@ class WebHandlersMixin:
                         data["tokens"],
                         csrf=self.server.web.csrf(session_id),
                         error=exc.message,
+                        admin=is_admin,
                     ),
                 )
                 return
@@ -461,6 +469,7 @@ class WebHandlersMixin:
                         data["tokens"],
                         csrf=self.server.web.csrf(session_id),
                         error=exc.message,
+                        admin=is_admin,
                     ),
                 )
                 return
@@ -483,6 +492,7 @@ class WebHandlersMixin:
                         data["tokens"],
                         csrf=self.server.web.csrf(session_id),
                         error=exc.message,
+                        admin=is_admin,
                     ),
                 )
                 return
@@ -549,6 +559,7 @@ class WebHandlersMixin:
                         actors=actors["actors"],
                         csrf=self.server.web.csrf(session_id),
                         error=error.message,
+                        admin=is_admin,
                     ),
                 )
                 return
@@ -580,6 +591,7 @@ class WebHandlersMixin:
                         tenants["tenants"],
                         csrf=self.server.web.csrf(session_id),
                         error=exc.message,
+                        admin=is_admin,
                     ),
                 )
                 return
@@ -624,11 +636,25 @@ class WebHandlersMixin:
                         nodes=data["nodes"],
                         csrf=self.server.web.csrf(session_id),
                         error=exc.message,
+                        admin=is_admin,
                     ),
                 )
                 return
-            self._redirect(
-                f"/web/tenants/{requested_tenant}?created={raw}"
+            data = self._web_tenant_detail_data(
+                context, requested_tenant, is_admin
+            )
+            self._send_html(
+                HTTPStatus.OK,
+                tenant_detail_page(
+                    data["tenant"],
+                    tokens=data["tokens"],
+                    principals=data["principals"],
+                    actors=data["actors"],
+                    nodes=data["nodes"],
+                    csrf=self.server.web.csrf(session_id),
+                    created_raw_token=raw,
+                    admin=is_admin,
+                ),
             )
             return
         if (
