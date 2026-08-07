@@ -6,7 +6,13 @@ import hashlib
 from typing import Any
 
 from ..auth import AuthenticatedContext
-from ..domain import ActorRegistration, AuthTokenCreation, NodeRegistration, PrincipalRegistration
+from ..domain import (
+    ActorRegistration,
+    AuthTokenCreation,
+    NodeRegistration,
+    PrincipalRegistration,
+    TenantRegistration,
+)
 from ..passwords import (
     hash_password,
     needs_rehash,
@@ -25,6 +31,37 @@ DEFAULT_NODE_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60
 
 class UserStore:
     """Password accounts, sessions, and password-based agent logins."""
+
+    def register_user_personal(
+        self,
+        *,
+        username: str,
+        password: str,
+        display_name: str,
+    ) -> dict[str, Any]:
+        """Register a user in a private tenant of their own.
+
+        Public self-registration must never land in an existing shared tenant:
+        a stranger there could submit tasks that the tenant's workers would
+        execute. Each account gets a dedicated ``user-<username>`` tenant and
+        becomes its tenant_admin.
+        """
+
+        username = validate_username(username)
+        tenant_id = f"user-{username}"
+        self.create_tenant(
+            TenantRegistration(
+                tenant_id=tenant_id,
+                display_name=f"{display_name.strip() or username} workspace",
+                metadata={"kind": "personal", "owner_username": username},
+            )
+        )
+        return self.register_user(
+            username=username,
+            password=password,
+            display_name=display_name,
+            tenant_id=tenant_id,
+        )
 
     def register_user(
         self,

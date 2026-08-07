@@ -271,11 +271,10 @@ class AgentHubApi:
         if path == f"{self.auth_prefix}/register":
             if not self.allow_registration:
                 raise ApiError("registration is disabled", HTTPStatus.FORBIDDEN)
-            account = self.store.register_user(
+            account = self.store.register_user_personal(
                 username=str(payload.get("username", "")),
                 password=str(payload.get("password", "")),
                 display_name=str(payload.get("display_name", "")).strip(),
-                tenant_id="default",
             )
             return HTTPStatus.CREATED, {"user": account}
         if path == f"{self.auth_prefix}/login":
@@ -402,6 +401,25 @@ class AgentHubApi:
         if path == f"{self.prefix}/tasks":
             scoped = dict(payload)
             scope_principal = self._principal_scope(context)
+            if context is not None and not context.is_admin:
+                assignee = str(scoped.get("assignee_actor_id", "")).strip()
+                if assignee:
+                    assignee_actor = self.store._actor(assignee)
+                    if assignee_actor["tenant_id"] != (
+                        context.tenant_id or "default"
+                    ):
+                        raise PermissionError(
+                            "assignee actor does not belong to your tenant"
+                        )
+                    if context.role != "tenant_admin":
+                        if assignee_actor["principal_id"] != scope_principal:
+                            raise PermissionError(
+                                "assignee actor must belong to your account"
+                            )
+                elif context.role == "tenant_user":
+                    raise PermissionError(
+                        "assignee_actor_id is required for tenant users"
+                    )
             if scope_principal is not None:
                 scoped["principal_id"] = scope_principal
                 delegator = str(scoped.get("delegator_actor_id", "")).strip()
@@ -416,6 +434,8 @@ class AgentHubApi:
                     raise PermissionError(
                         "node token can only delegate as its own actor"
                     )
+            elif context is not None and context.role == "tenant_admin":
+                scoped.setdefault("principal_id", context.principal_id)
             task, created = self.store.create_task(
                 TaskSubmission.from_dict(scoped), tenant_id=tenant_id
             )

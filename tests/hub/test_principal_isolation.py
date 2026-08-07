@@ -52,7 +52,7 @@ class PrincipalIsolationTests(unittest.TestCase):
         self.assertEqual(status, HTTPStatus.OK)
         return res
 
-    def test_registration_ignores_custom_tenant(self) -> None:
+    def test_registration_creates_private_tenant(self) -> None:
         status, res = self.api.post(
             "/v1/auth/register",
             {
@@ -64,7 +64,19 @@ class PrincipalIsolationTests(unittest.TestCase):
             None,
         )
         self.assertEqual(status, HTTPStatus.CREATED)
-        self.assertEqual(res["user"]["tenant_id"], "default")
+        self.assertEqual(res["user"]["tenant_id"], "user-mallory")
+        self.assertEqual(res["user"]["role"], "tenant_admin")
+
+    def test_registration_isolates_each_user_in_own_tenant(self) -> None:
+        self._register("alice", "correct-horse-222")
+        self._register("bob", "correct-horse-333")
+        alice = self._login("alice", "correct-horse-222")
+        bob = self._login("bob", "correct-horse-333")
+        self.assertEqual(alice.tenant_id, "user-alice")
+        self.assertEqual(bob.tenant_id, "user-bob")
+        self.assertNotEqual(alice.tenant_id, bob.tenant_id)
+        self.assertEqual(alice.role, "tenant_admin")
+        self.assertEqual(bob.role, "tenant_admin")
 
     def test_tenant_user_only_sees_own_data(self) -> None:
         self._register("alice", "correct-horse-222")
@@ -74,9 +86,9 @@ class PrincipalIsolationTests(unittest.TestCase):
 
         alice = self._login("alice", "correct-horse-222")
         bob = self._login("bob", "correct-horse-333")
-        # First user is tenant_admin; bob is a plain tenant_user.
+        # Each registration owns a private tenant, so both are tenant_admins.
         self.assertEqual(alice.role, "tenant_admin")
-        self.assertEqual(bob.role, "tenant_user")
+        self.assertEqual(bob.role, "tenant_admin")
 
         _, nodes = self.api.get("/v1/hub/nodes", "", bob)
         self.assertEqual([n["node_id"] for n in nodes["nodes"]], ["node-bob"])
@@ -97,9 +109,9 @@ class PrincipalIsolationTests(unittest.TestCase):
         bob = self._login("bob", "correct-horse-333")
 
         status, created = self.api.post(
-            "/v1/hub/tenants/default/tokens",
+            "/v1/hub/tenants/user-alice/tokens",
             {
-                "tenant_id": "default",
+                "tenant_id": "user-alice",
                 "role": "tenant_user",
                 "principal_id": "human-alice",
                 "label": "alice-app-token",
@@ -111,17 +123,21 @@ class PrincipalIsolationTests(unittest.TestCase):
         _, alice_tokens = self.api.get("/v1/hub/tokens", "", alice)
         alice_labels = {t["label"] for t in alice_tokens["tokens"]}
         self.assertIn("alice-app-token", alice_labels)
-        self.assertIn("agent-login node-bob", alice_labels)
+        self.assertIn("agent-login node-alice", alice_labels)
         _, bob_tokens = self.api.get("/v1/hub/tokens", "", bob)
         self.assertEqual(
             [t["label"] for t in bob_tokens["tokens"]],
             ["agent-login node-bob"],
         )
 
-        # Alice (tenant_admin) sees everything in the tenant.
+        # Each tenant_admin sees only their own private tenant.
         _, nodes = self.api.get("/v1/hub/nodes", "", alice)
         self.assertEqual(
-            {n["node_id"] for n in nodes["nodes"]}, {"node-alice", "node-bob"}
+            {n["node_id"] for n in nodes["nodes"]}, {"node-alice"}
+        )
+        _, nodes = self.api.get("/v1/hub/nodes", "", bob)
+        self.assertEqual(
+            {n["node_id"] for n in nodes["nodes"]}, {"node-bob"}
         )
 
     def test_tenant_user_cannot_impersonate_another_principal(self) -> None:
@@ -144,7 +160,10 @@ class PrincipalIsolationTests(unittest.TestCase):
                 },
                 bob,
             )
-        self.assertIn(caught.exception.status, (HTTPStatus.CONFLICT, HTTPStatus.BAD_REQUEST))
+        self.assertIn(
+            caught.exception.status,
+            (HTTPStatus.CONFLICT, HTTPStatus.BAD_REQUEST, HTTPStatus.FORBIDDEN),
+        )
 
         # Bob cannot delegate with Alice's actor even with his own principal.
         with self.assertRaises(ApiError):
@@ -192,6 +211,58 @@ class PrincipalIsolationTests(unittest.TestCase):
         # Bob cannot list tenant tokens.
         with self.assertRaises(ApiError):
             self.api.get("/v1/hub/tenants/default/tokens", "", bob)
+
+    def test_tenant_user_cannot_target_others_or_open_tasks(self) -> None:
+        self._register("alice", "correct-horse-222")
+        self._agent_login("alice", "correct-horse-222", "node-alice")
+        # Add a plain tenant_user into Alice's private tenant.
+        self.store.register_user(
+            username="charlie",
+            password="correct-horse-444",
+            display_name="Charlie",
+            tenant_id="user-alice",
+        )
+        self._agent_login("charlie", "correct-horse-444", "node-charlie")
+        charlie = self._login("charlie", "correct-horse-444")
+        self.assertEqual(charlie.role, "tenant_user")
+
+        # Charlie cannot assign a task to Alice's actor.
+        with self.assertRaises(ApiError) as caught:
+            self.api.post(
+                "/v1/hub/tasks",
+                {
+                    "delegator_actor_id": "pi-node-charlie",
+                    "objective": "target alice",
+                    "assignee_actor_id": "pi-node-alice",
+                },
+                charlie,
+            )
+        self.assertEqual(caught.exception.status, HTTPStatus.CONFLICT)
+
+        # Charlie cannot create an open (unassigned) task.
+        with self.assertRaises(ApiError) as caught:
+            self.api.post(
+                "/v1/hub/tasks",
+                {
+                    "delegator_actor_id": "pi-node-charlie",
+                    "objective": "open task",
+                },
+                charlie,
+            )
+        self.assertEqual(caught.exception.status, HTTPStatus.CONFLICT)
+
+        # Charlie can create a task assigned to his own actor.
+        status, res = self.api.post(
+            "/v1/hub/tasks",
+            {
+                "delegator_actor_id": "pi-node-charlie",
+                "objective": "charlie task",
+                "assignee_actor_id": "pi-node-charlie",
+            },
+            charlie,
+        )
+        self.assertEqual(status, HTTPStatus.CREATED)
+        self.assertEqual(res["task"]["principal_id"], "human-charlie")
 
 
 if __name__ == "__main__":

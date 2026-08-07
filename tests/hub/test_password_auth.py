@@ -36,6 +36,7 @@ class PasswordAuthTests(unittest.TestCase):
         )
         self.assertEqual(status, HTTPStatus.CREATED)
         self.assertEqual(res["user"]["role"], "tenant_admin")
+        self.assertEqual(res["user"]["tenant_id"], "user-alice")
 
         status, res = self.post(
             "/v1/auth/register",
@@ -45,7 +46,8 @@ class PasswordAuthTests(unittest.TestCase):
                 "display_name": "Bob",
             },
         )
-        self.assertEqual(res["user"]["role"], "tenant_user")
+        self.assertEqual(res["user"]["role"], "tenant_admin")
+        self.assertEqual(res["user"]["tenant_id"], "user-bob")
 
         with self.assertRaises(ApiError) as caught:
             self.post(

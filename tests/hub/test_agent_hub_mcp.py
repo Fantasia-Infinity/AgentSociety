@@ -142,11 +142,14 @@ class McpServiceTests(unittest.TestCase):
                     metadata={},
                 )
             )
+            tenant_admin = AuthenticatedContext(
+                role="tenant_admin", tenant_id="team-a"
+            )
             created = mcp_call(
                 service,
                 "tools/call",
                 {"name": "hub_create_task", "arguments": {"objective": "team task"}},
-                context=tenant_user,
+                context=tenant_admin,
             )
             self.assertFalse(created["result"]["isError"])
             task_id = json.loads(created["result"]["content"][0]["text"])["task"][
@@ -165,7 +168,7 @@ class McpServiceTests(unittest.TestCase):
                 service,
                 "tools/call",
                 {"name": "hub_list_tasks", "arguments": {}},
-                context=tenant_user,
+                context=tenant_admin,
             )
             tasks = json.loads(listed["result"]["content"][0]["text"])["tasks"]
             self.assertEqual([task["task_id"] for task in tasks], [task_id])
