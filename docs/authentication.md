@@ -27,7 +27,9 @@
   登录签发、可单独吊销，不等同于旧的共享 bootstrap token。
 - Codex MCP 客户端通过 `agent-host/scripts/mcp-hub-wrapper.mjs` 从系统
   钥匙串读取**本机节点凭据**再桥接 mcp-remote，配置文件里不落任何 token；
-  运行 `agent connect` 之后 MCP 工具即恢复可用。
+  运行 `agent connect` 之后 MCP 工具即恢复可用。wrapper 会自动读取
+  `.private/env/agent.env` 中的 `AGENT_HUB_URL` 与钥匙串凭据名（`AGENT_HUB_NODE_TOKEN_CREDENTIAL_*`），
+  无需额外环境变量；`AGENT_HUB_MCP_URL` 仅用于覆盖默认的 `<AGENT_HUB_URL>/mcp`。
 
 ## 2. 数据模型（新增表）
 

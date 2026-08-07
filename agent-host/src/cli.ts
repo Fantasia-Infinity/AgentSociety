@@ -392,11 +392,16 @@ async function connectCommand(config: AgentHostConfig): Promise<void> {
       await rl.question(`Hub username [${username || "required"}]: `)
     ).trim();
     if (answer) username = answer;
-    process.stdout.write("Hub password: ");
+    process.stdout.write(
+      password
+        ? "Hub password [configured; Enter keeps it]: "
+        : "Hub password: ",
+    );
     muted.muted = true;
-    password = await rl.question("");
+    const entered = await rl.question("");
     muted.muted = false;
     process.stdout.write("\n");
+    if (entered) password = entered;
     rl.close();
   }
   if (!username || !password) {

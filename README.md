@@ -95,12 +95,17 @@ Secret Service），配置文件里没有明文密钥。
 - **本机 TUI**：通过 Hub 工具在对话里派发。
 - **REST API**：`/v1/hub/tasks`，适合脚本和自动化。
 
-用 Codex 连接 Hub 的 MCP 示例：
+用 Codex 连接 Hub 的 MCP（推荐走系统钥匙串，先运行 `agent connect` 保存节点凭据）：
 
-```bash
-codex mcp add hub --url https://hub.example.com/mcp \
-  --header "Authorization: Bearer <你的节点凭据>"
+```toml
+[mcp_servers.hub]
+command = "node"
+args = ["/path/to/AgentSociety/agent-host/scripts/mcp-hub-wrapper.mjs"]
+enabled = true
 ```
+
+也可以直接用 URL + 节点凭据直连：`codex mcp add hub --url https://hub.example.com/mcp
+--header "Authorization: Bearer <你的节点凭据>"`（凭据会写在 Codex 配置里，不推荐）。
 
 ### 4. 观察和干预
 
