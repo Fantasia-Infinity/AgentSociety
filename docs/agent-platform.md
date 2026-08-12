@@ -157,7 +157,7 @@ PYTHONPATH=src python3 -m agent_hub.server
 Hub 默认监听 `127.0.0.1:8090`，状态写入 `hub-state.sqlite3`。微信 Core 是否运行不影响 Hub。
 macOS 后台服务模板见 `deploy/macos/com.fantasia.agent-hub.plist.example`；模板从 Login
 Keychain 读取 Hub token，避免把凭据写进 plist。
-微信 Core 默认继续使用远程 OpenAI-compatible API：
+微信 Core 已弃用（保留的旧自动回复服务可参考，默认继续使用远程 OpenAI-compatible API）：
 
 ```bash
 LLM_BACKEND=remote PYTHONPATH=src python3 -m wechat_core.api
@@ -348,7 +348,8 @@ curl -X POST http://127.0.0.1:8090/v1/hub/tasks \
 Artifact 内容时设置 `AGENT_HUB_OBJECT_STORE_URL=file:///...` 或安装 `.[s3]` 后使用
 `s3://bucket/prefix`，并在 Artifact 请求中传 `content_base64`。未配置时仍只保存 URI 元数据。
 
-Channel MCP 默认读取 `BOT_STATE_DB`，也可用 `AGENT_CHANNEL_STATE_DB` 单独指定：
+Channel MCP 通过本地 `wechatd` 服务收发消息，可用 `AGENT_CHANNEL_HTTP_URL`
+（默认 `http://127.0.0.1:8742`）与 `AGENT_CHANNEL_HTTP_TOKEN` 指定连接方式：
 
 ```bash
 PYTHONPATH=src python3 -m agent_channel.mcp_server

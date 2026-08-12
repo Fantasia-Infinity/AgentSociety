@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import sys
 from typing import Any, TextIO
 
-from .service import SqliteChannelService
+from .service import HttpChannelService
 
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -14,6 +13,18 @@ SUPPORTED_PROTOCOL_VERSIONS = frozenset({"2025-03-26", PROTOCOL_VERSION})
 
 
 TOOLS: list[dict[str, Any]] = [
+    {
+        "name": "channel_status",
+        "title": "Show channel status",
+        "description": "Show the local channel daemon status, including WeChat login/connection state.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "channel": {"type": "string", "default": "wechat"},
+            },
+        },
+        "annotations": {"readOnlyHint": True},
+    },
     {
         "name": "channel_list_conversations",
         "title": "List channel conversations",
@@ -98,7 +109,7 @@ TOOLS: list[dict[str, Any]] = [
 
 
 class ChannelMcpServer:
-    def __init__(self, service: SqliteChannelService) -> None:
+    def __init__(self, service: HttpChannelService) -> None:
         self._service = service
         self._initialize_seen = False
         self._initialized = False
@@ -154,6 +165,7 @@ class ChannelMcpServer:
         if not isinstance(arguments, dict):
             return self._error(request_id, -32602, "arguments must be an object")
         methods = {
+            "channel_status": self._service.status,
             "channel_list_conversations": self._service.list_conversations,
             "channel_read_messages": self._service.read_messages,
             "channel_send": self._service.send,
@@ -188,7 +200,6 @@ class ChannelMcpServer:
                     "isError": True,
                 },
             )
-
     @staticmethod
     def _result(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
         return {"jsonrpc": "2.0", "id": request_id, "result": result}
@@ -202,7 +213,7 @@ class ChannelMcpServer:
         }
 
 
-def serve(input_stream: TextIO, output_stream: TextIO, service: SqliteChannelService) -> None:
+def serve(input_stream: TextIO, output_stream: TextIO, service: HttpChannelService) -> None:
     server = ChannelMcpServer(service)
     for line in input_stream:
         if not line.strip():
@@ -220,12 +231,12 @@ def serve(input_stream: TextIO, output_stream: TextIO, service: SqliteChannelSer
 
 
 def main() -> None:
-    path = Path(os.environ.get("AGENT_CHANNEL_STATE_DB", os.environ.get("BOT_STATE_DB", "core-state.sqlite3"))).expanduser()
-    service = SqliteChannelService(path)
-    try:
-        serve(sys.stdin, sys.stdout, service)
-    finally:
-        service.close()
+    base_url = os.environ.get(
+        "AGENT_CHANNEL_HTTP_URL", "http://127.0.0.1:8742"
+    ).strip().rstrip("/")
+    token = os.environ.get("AGENT_CHANNEL_HTTP_TOKEN", "").strip() or None
+    service = HttpChannelService(base_url=base_url, token=token)
+    serve(sys.stdin, sys.stdout, service)
 
 
 if __name__ == "__main__":

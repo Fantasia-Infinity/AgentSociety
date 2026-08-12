@@ -147,6 +147,14 @@ class WxAutoAdapter:
                 f"wxauto send failed: {_response_message(result)}"
             )
 
+    def status(self) -> dict[str, Any]:
+        return {
+            "driver": self._module_name,
+            "connected": self._wechat is not None,
+            "mode": "callback" if self._poller is None else "polling",
+            "listen_chats": list(self._listen_chats),
+        }
+
     def stop(self) -> None:
         self._stop.set()
         poller = self._poller

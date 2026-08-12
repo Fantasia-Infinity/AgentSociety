@@ -24,12 +24,17 @@ Windows 微信设备                       平台无关的 Bot/模型服务器
 
 ## 运行边界
 
-- Windows 设备只运行微信客户端与 `wechat-gateway`，不保存 LLM 密钥。
-- macOS 或服务器可分别运行 `wechat-core` 和 `agent-hub`；两者使用独立端口、状态库和
-  Bearer token。
-- 微信 Gateway 与 Core 只共享版本化消息协议；Agent Host 与 Hub 只共享协作任务协议。
+- Windows 设备只运行微信客户端与 `wechatd`，不保存 LLM 密钥。
+- macOS 或服务器可分别运行 `wechat-core`（已弃用，仅作参考）和 `agent-hub`；两者使用
+  独立端口、状态库和 Bearer token。
+- 本地 Agent 通过 `agent_channel` MCP 工具直接操作 wechatd；Agent Host 与 Hub 只共享
+  协作任务协议。
 
 ## 为什么采用事件与动作队列
+
+> 本节及“回复投递语义”一节描述已弃用的 `wechat-core` / `wechat-gateway` 自动回复链路，
+> 仅作历史参考。当前微信接入由 `wechatd` 常驻服务与 `agent_channel` MCP 工具承担，见
+> [Windows 微信守护进程指南](windows-wechatd.md)。
 
 模型推理不应阻塞微信的消息接收线程。Gateway 上报事件后立即得到接受结果，再通过
 长轮询取得发送动作。未来本地模型变慢、服务器短暂断线或增加多账号时，微信侧仍可
@@ -58,6 +63,8 @@ Gateway 会保留待上传 Inbox 并持续重试；Gateway 正常重启后会从
 时依靠租约恢复，仍应通过实机故障测试验证极端崩溃窗口。
 
 ## 模型抽象
+
+> 本节描述已弃用的 `wechat-core` 模型路由，仅作历史参考。
 
 业务层只依赖 `ModelProvider.complete(ModelRequest) -> ModelResponse`。
 `OpenAICompatibleProvider` 调用 `/chat/completions`，可以连接远程 API 或本机

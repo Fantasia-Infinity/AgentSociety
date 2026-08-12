@@ -1,55 +1,46 @@
 from __future__ import annotations
 
-import hashlib
 import json
-from pathlib import Path
-import sqlite3
-from threading import Lock
-import uuid
+import logging
+import urllib.error
+import urllib.parse
+import urllib.request
 from typing import Any
 
-from wechat_core.domain import ChatType, ContentType, OutgoingAction
-from wechat_core.persistence import SqliteActionOutbox
+
+logger = logging.getLogger(__name__)
+
+
+class ChannelUnavailableError(RuntimeError):
+    """Raised when the local wechatd service cannot be reached."""
 
 
 class ChannelCapabilityError(RuntimeError):
     pass
 
 
-class SqliteChannelService:
-    """Channel facade over the Core event archive and durable action outbox.
+class HttpChannelService:
+    """Channel facade over the local wechatd HTTP API.
 
     The first adapter is WeChat, but no MCP method exposes wxauto or Windows
-    implementation details. Additional adapters can implement the same data
-    model without changing agent prompts or tools.
+    implementation details. Agent-side reads are cursor based: the first read
+    of a chat returns messages from the beginning of the archive, and every
+    read advances the cursor so the next call only returns new messages.
     """
 
-    def __init__(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(
-            str(path), check_same_thread=False, timeout=30
-        )
-        self._connection.row_factory = sqlite3.Row
-        self._connection.execute("PRAGMA busy_timeout=30000")
-        self._lock = Lock()
-        self._outbox = SqliteActionOutbox(path)
-        with self._connection:
-            self._connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS core_inbox (
-                    message_id TEXT PRIMARY KEY,
-                    payload_json TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'pending',
-                    attempts INTEGER NOT NULL DEFAULT 0,
-                    next_attempt_at REAL NOT NULL DEFAULT 0,
-                    lease_until REAL NOT NULL DEFAULT 0,
-                    last_error TEXT,
-                    received_at REAL NOT NULL,
-                    completed_at REAL,
-                    reason TEXT
-                )
-                """
-            )
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        token: str | None = None,
+        timeout_seconds: float = 30,
+    ) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._token = token
+        self._timeout = timeout_seconds
+
+    def status(self) -> dict[str, Any]:
+        return self._request("GET", "/v1/status")
 
     def capabilities(self, channel: str) -> dict[str, bool]:
         self._require_channel(channel)
@@ -71,24 +62,21 @@ class SqliteChannelService:
     ) -> list[dict[str, Any]]:
         self._require_channel(channel)
         limit = min(max(limit, 1), 500)
-        messages = self._messages(account_id=account_id, row_limit=5000)
-        conversations: dict[tuple[str, str], dict[str, Any]] = {}
-        for message in messages:
-            key = (str(message["account_id"]), str(message["chat_id"]))
-            if key in conversations:
-                continue
-            conversations[key] = {
-                "channel": channel,
-                "account_id": key[0],
-                "conversation_id": key[1],
-                "chat_type": message["chat_type"],
-                "last_message_at": message["timestamp"],
-                "last_message_preview": str(message["content"])[:200],
-                "capabilities": self.capabilities(channel),
-            }
-            if len(conversations) >= limit:
-                break
-        return list(conversations.values())
+        payload = self._request("GET", f"/v1/chats?limit={limit}")
+        conversations = []
+        for chat in payload.get("chats", []):
+            conversations.append(
+                {
+                    "channel": channel,
+                    "account_id": account_id or "",
+                    "conversation_id": str(chat.get("chat_id", "")),
+                    "chat_type": chat.get("chat_type", "direct"),
+                    "last_message_at": chat.get("last_message_at"),
+                    "last_message_preview": str(chat.get("last_message_preview", "")),
+                    "capabilities": self.capabilities(channel),
+                }
+            )
+        return conversations
 
     def read_messages(
         self,
@@ -101,16 +89,31 @@ class SqliteChannelService:
     ) -> list[dict[str, Any]]:
         self._require_channel(channel)
         limit = min(max(limit, 1), 500)
-        result = []
-        for message in self._messages(account_id=account_id, row_limit=5000):
-            if str(message["chat_id"]) != conversation_id:
-                continue
-            if before_timestamp is not None and int(message["timestamp"]) >= before_timestamp:
-                continue
-            result.append({"channel": channel, **message})
-            if len(result) >= limit:
-                break
-        return list(reversed(result))
+        if before_timestamp is not None:
+            payload = self._request(
+                "GET",
+                f"/v1/messages?chat_id={self._quote(conversation_id)}"
+                f"&before_timestamp={before_timestamp}&limit={limit}",
+            )
+            return [
+                {"channel": channel, **message}
+                for message in payload.get("messages", [])
+            ]
+        cursor = self._agent_cursor(conversation_id)
+        suffix = f"&after_message_id={self._quote(cursor)}" if cursor else ""
+        payload = self._request(
+            "GET",
+            f"/v1/messages?chat_id={self._quote(conversation_id)}"
+            f"{suffix}&limit={limit}",
+        )
+        messages = [
+            {"channel": channel, **message}
+            for message in payload.get("messages", [])
+        ]
+        next_cursor = payload.get("next_cursor")
+        if next_cursor:
+            self._set_agent_cursor(conversation_id, str(next_cursor))
+        return messages
 
     def send(
         self,
@@ -129,21 +132,20 @@ class SqliteChannelService:
             raise ValueError("content is required")
         if len(content) > 50_000:
             raise ValueError("content exceeds 50000 characters")
-        action_id = self._action_id(channel, idempotency_key)
-        action = OutgoingAction(
-            action_id=action_id,
-            account_id=account_id,
-            chat_id=conversation_id,
-            chat_type=ChatType(chat_type),
-            content_type=ContentType.TEXT,
-            content=content,
-            reply_to_message_id=reply_to_message_id,
+        result = self._request(
+            "POST",
+            "/v1/send",
+            {
+                "chat_id": conversation_id,
+                "content": content,
+                "chat_type": chat_type,
+                "idempotency_key": idempotency_key or "",
+            },
         )
-        self._outbox.push(action)
         return {
             "channel": channel,
-            "action_id": action_id,
-            "status": "queued",
+            "action_id": result.get("action_id", ""),
+            "status": "sent" if result.get("sent") else "duplicate",
             "account_id": account_id,
             "conversation_id": conversation_id,
             "reply_to_message_id": reply_to_message_id,
@@ -158,12 +160,15 @@ class SqliteChannelService:
         content: str,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        original = self._message(message_id, account_id)
+        payload = self._request("GET", f"/v1/message?message_id={self._quote(message_id)}")
+        message = payload.get("message")
+        if not isinstance(message, dict) or not message.get("chat_id"):
+            raise LookupError("message not found")
         return self.send(
             channel=channel,
             account_id=account_id,
-            conversation_id=str(original["chat_id"]),
-            chat_type=str(original["chat_type"]),
+            conversation_id=str(message["chat_id"]),
+            chat_type=str(message.get("chat_type", "direct")),
             content=content,
             reply_to_message_id=message_id,
             idempotency_key=idempotency_key,
@@ -175,51 +180,72 @@ class SqliteChannelService:
     def download(self, **_: Any) -> dict[str, Any]:
         raise ChannelCapabilityError("wechat attachment download is not implemented yet")
 
-    def close(self) -> None:
-        self._outbox.close()
-        with self._lock:
-            self._connection.close()
+    def _agent_cursor(self, conversation_id: str) -> str | None:
+        payload = self._request(
+            "GET", f"/v1/agent_cursor?chat_id={self._quote(conversation_id)}"
+        )
+        cursor = payload.get("cursor")
+        return None if not cursor else str(cursor)
 
-    def _messages(
-        self, *, account_id: str | None, row_limit: int
-    ) -> list[dict[str, Any]]:
-        with self._lock:
-            rows = self._connection.execute(
-                "SELECT payload_json FROM core_inbox ORDER BY received_at DESC LIMIT ?",
-                (row_limit,),
-            ).fetchall()
-        messages = [json.loads(str(row[0])) for row in rows]
-        if account_id:
-            messages = [
-                message
-                for message in messages
-                if str(message.get("account_id", "")) == account_id
-            ]
-        return messages
+    def _set_agent_cursor(self, conversation_id: str, cursor: str) -> None:
+        self._request("PUT", "/v1/agent_cursor", {"chat_id": conversation_id, "cursor": cursor})
 
-    def _message(self, message_id: str, account_id: str) -> dict[str, Any]:
-        with self._lock:
-            row = self._connection.execute(
-                "SELECT payload_json FROM core_inbox WHERE message_id=?",
-                (message_id,),
-            ).fetchone()
-        if row is None:
-            raise LookupError("message not found")
-        message = json.loads(str(row[0]))
-        if str(message.get("account_id", "")) != account_id:
-            raise LookupError("message not found")
-        return message
+    def _request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        headers = {"Accept": "application/json"}
+        body = None
+        if payload is not None:
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            headers["Content-Type"] = "application/json; charset=utf-8"
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+        request = urllib.request.Request(
+            f"{self._base_url}{path}",
+            data=body,
+            headers=headers,
+            method=method,
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self._timeout) as response:
+                raw = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            message = self._error_message(exc)
+            if exc.code == 401:
+                raise ChannelUnavailableError("wechatd rejected the channel token") from exc
+            if exc.code == 404:
+                raise LookupError(message or "not found") from exc
+            raise ChannelUnavailableError(f"wechatd returned HTTP {exc.code}: {message}") from exc
+        except urllib.error.URLError as exc:
+            raise ChannelUnavailableError(
+                f"cannot reach wechatd at {self._base_url}: {exc.reason}"
+            ) from exc
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ChannelUnavailableError("wechatd returned invalid JSON") from exc
+        if not isinstance(parsed, dict):
+            raise ChannelUnavailableError("wechatd returned an unexpected response")
+        return parsed
+
+    @staticmethod
+    def _error_message(exc: urllib.error.HTTPError) -> str:
+        try:
+            payload = json.loads(exc.read().decode("utf-8"))
+            if isinstance(payload, dict):
+                return str(payload.get("message", ""))
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+            return ""
+        return ""
+
+    @staticmethod
+    def _quote(value: str) -> str:
+        return urllib.parse.quote(value, safe="")
 
     @staticmethod
     def _require_channel(channel: str) -> None:
         if channel != "wechat":
             raise ValueError("unsupported channel")
-
-    @staticmethod
-    def _action_id(channel: str, idempotency_key: str | None) -> str:
-        if not idempotency_key:
-            return f"channel:{channel}:{uuid.uuid4().hex}"
-        digest = hashlib.sha256(
-            f"{channel}\0{idempotency_key}".encode("utf-8")
-        ).hexdigest()
-        return f"channel:{channel}:{digest}"

@@ -166,11 +166,11 @@ AGENT_WORKER_SESSION_MODE=continuous
 
 ## 可选接入：微信通道（实验性，开发中）
 
-微信不是 AgentSociety 的核心，而是**一个正在开发的可选通信工具**：通过 Windows
-上的 Gateway + 本机/服务器上的 Core，可以让你的 Agent 收发微信消息。它依赖
-wxauto 这类非官方 UI 自动化库，有客户端升级失效和账号风控风险，目前建议只做
-个人学习/研究用途。想了解细节和风险，见
-[Windows Gateway 指南](docs/windows-gateway.md)。
+微信不是 AgentSociety 的核心，而是**一个正在开发的可选通信工具**：在 Windows 上运行
+`wechatd` 常驻服务（连接微信客户端，处理重登录与历史回补），Agent 通过 Channel MCP
+工具直接收发微信消息。它依赖 wxauto 这类非官方 UI 自动化库，有客户端升级失效和账号
+风控风险，目前建议只做个人学习/研究用途。想了解细节和风险，见
+[Windows 微信守护进程指南](docs/windows-wechatd.md)。
 
 其他可选组件：本地 RWKV 推理（[指南](docs/local-rwkv.md)）、Channel MCP 通道适配。
 
@@ -178,8 +178,9 @@ wxauto 这类非官方 UI 自动化库，有客户端升级失效和账号风控
 
 ```text
 src/agent_hub/       Hub 协调中枢（REST/MCP/A2A/Web、存储、认证）
-src/wechat_core/     微信 Core（可选）
-src/wechat_gateway/  Windows 微信网关（可选）
+src/wechatd/         Windows 微信守护进程（本地 HTTP API，可选）
+src/wechat_core/     微信 Core（已弃用，仅作参考）
+src/agent_channel/   面向 Agent 的 Channel MCP 工具
 agent-host/          Agent 宿主（Pi worker、Bridge、CLI）
 deploy/              Hub 的 Docker/Caddy 部署模板
 docs/                架构、部署、适配器、认证文档

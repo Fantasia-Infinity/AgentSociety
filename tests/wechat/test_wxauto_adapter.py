@@ -5,12 +5,12 @@ from threading import Lock
 import time
 import unittest
 
-from wechat_gateway.adapters.wxauto import (
+from wechatd.adapters.wxauto import (
     WxAutoAdapter,
     _install_navigation_alias,
 )
-from wechat_gateway.adapter import WeChatAdapterError
-from wechat_gateway.domain import GatewayAction
+from wechatd.adapter import WeChatAdapterError
+from wechatd.domain import GatewayAction
 
 
 class FakeWeChat:

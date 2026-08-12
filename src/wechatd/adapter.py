@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Protocol
+from typing import Any, Protocol
 
 from .domain import GatewayAction, GatewayEvent
 
@@ -17,5 +17,7 @@ class WeChatAdapter(Protocol):
     def start(self, on_event: EventCallback) -> None: ...
 
     def send(self, action: GatewayAction) -> None: ...
+
+    def status(self) -> dict[str, Any]: ...
 
     def stop(self) -> None: ...

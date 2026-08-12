@@ -8,15 +8,14 @@ from pathlib import Path
 def _load_env_file(path: Path | None = None) -> None:
     """Load KEY=VALUE env files without overriding process variables.
 
-    With no argument, loads the legacy `.env.gateway` first and then the
-    private `.private/env/gateway.env`, so the private copy wins during
-    migration.
+    With no argument, loads the legacy `.env.wechatd` first and then the
+    private `.private/env/wechatd.env`, so the private copy wins.
     """
 
     candidates = (
         [path]
         if path is not None
-        else [Path(".env.gateway"), Path(".private/env/gateway.env")]
+        else [Path(".env.wechatd"), Path(".private/env/wechatd.env")]
     )
     for candidate in candidates:
         if not candidate.is_file():
@@ -30,6 +29,11 @@ def _load_env_file(path: Path | None = None) -> None:
             value = value.strip().strip('"').strip("'")
             if key:
                 os.environ.setdefault(key, value)
+
+
+def _optional(name: str, default: str) -> str:
+    value = os.environ.get(name, default).strip()
+    return value if value else default
 
 
 def _required(name: str) -> str:
@@ -48,54 +52,42 @@ def _csv(name: str) -> tuple[str, ...]:
 
 
 @dataclass(frozen=True, slots=True)
-class GatewaySettings:
+class WechatdSettings:
     account_id: str
-    core_url: str
-    api_token: str
+    http_host: str
+    http_port: int
+    http_token: str
     driver: str
     listen_chats: tuple[str, ...]
     bot_mention: str
     wechat_poll_interval_seconds: float
-    poll_timeout_seconds: float
-    action_lease_seconds: float
-    http_timeout_seconds: float
-    event_queue_size: int
-    retry_min_seconds: float
-    retry_max_seconds: float
+    send_min_interval_seconds: float
+    max_request_bytes: int
     state_db: Path
 
     @classmethod
-    def from_env(cls) -> "GatewaySettings":
+    def from_env(cls) -> "WechatdSettings":
         _load_env_file()
         settings = cls(
-            account_id=_required("GATEWAY_ACCOUNT_ID"),
-            core_url=_required("BOT_CORE_URL").rstrip("/"),
-            api_token=_required("BOT_API_TOKEN"),
+            account_id=_required("WECHATD_ACCOUNT_ID"),
+            http_host=_optional("WECHATD_HTTP_HOST", "127.0.0.1"),
+            http_port=int(os.environ.get("WECHATD_HTTP_PORT", "8742")),
+            http_token=os.environ.get("WECHATD_HTTP_TOKEN", "").strip(),
             driver=os.environ.get("WECHAT_DRIVER", "mock").strip().lower(),
             listen_chats=_csv("WECHAT_LISTEN_CHATS"),
             bot_mention=os.environ.get("WECHAT_BOT_MENTION", "").strip(),
             wechat_poll_interval_seconds=float(
                 os.environ.get("WECHAT_POLL_INTERVAL_SECONDS", "1")
             ),
-            poll_timeout_seconds=float(
-                os.environ.get("GATEWAY_POLL_TIMEOUT_SECONDS", "20")
+            send_min_interval_seconds=float(
+                os.environ.get("WECHATD_SEND_MIN_INTERVAL_SECONDS", "1")
             ),
-            action_lease_seconds=float(
-                os.environ.get("GATEWAY_ACTION_LEASE_SECONDS", "60")
-            ),
-            http_timeout_seconds=float(
-                os.environ.get("GATEWAY_HTTP_TIMEOUT_SECONDS", "30")
-            ),
-            event_queue_size=int(os.environ.get("GATEWAY_EVENT_QUEUE_SIZE", "500")),
-            retry_min_seconds=float(
-                os.environ.get("GATEWAY_RETRY_MIN_SECONDS", "1")
-            ),
-            retry_max_seconds=float(
-                os.environ.get("GATEWAY_RETRY_MAX_SECONDS", "30")
+            max_request_bytes=int(
+                os.environ.get("WECHATD_MAX_REQUEST_BYTES", "65536")
             ),
             state_db=Path(
                 os.environ.get(
-                    "GATEWAY_STATE_DB", ".private/state/gateway-state.sqlite3"
+                    "WECHATD_STATE_DB", ".private/state/wechatd-state.sqlite3"
                 )
             ).expanduser(),
         )
@@ -103,6 +95,8 @@ class GatewaySettings:
         return settings
 
     def validate(self) -> None:
+        if self.http_port < 1 or self.http_port > 65535:
+            raise ValueError("WECHATD_HTTP_PORT must be between 1 and 65535")
         if self.driver not in {"mock", "wxauto4", "wxautox4"}:
             raise ValueError("WECHAT_DRIVER must be mock, wxauto4, or wxautox4")
         if self.driver != "mock" and not self.listen_chats:
@@ -114,17 +108,7 @@ class GatewaySettings:
             raise ValueError(
                 "WECHAT_POLL_INTERVAL_SECONDS must be between 1 and 60"
             )
-        if self.poll_timeout_seconds < 0 or self.poll_timeout_seconds > 30:
-            raise ValueError("GATEWAY_POLL_TIMEOUT_SECONDS must be between 0 and 30")
-        if self.action_lease_seconds < 5 or self.action_lease_seconds > 300:
-            raise ValueError("GATEWAY_ACTION_LEASE_SECONDS must be between 5 and 300")
-        if self.http_timeout_seconds <= 0:
-            raise ValueError("GATEWAY_HTTP_TIMEOUT_SECONDS must be positive")
-        if self.event_queue_size < 1:
-            raise ValueError("GATEWAY_EVENT_QUEUE_SIZE must be positive")
-        if self.retry_min_seconds <= 0:
-            raise ValueError("GATEWAY_RETRY_MIN_SECONDS must be positive")
-        if self.retry_max_seconds < self.retry_min_seconds:
-            raise ValueError(
-                "GATEWAY_RETRY_MAX_SECONDS cannot be smaller than retry minimum"
-            )
+        if self.send_min_interval_seconds < 0:
+            raise ValueError("WECHATD_SEND_MIN_INTERVAL_SECONDS cannot be negative")
+        if self.max_request_bytes < 1024:
+            raise ValueError("WECHATD_MAX_REQUEST_BYTES must be at least 1024")

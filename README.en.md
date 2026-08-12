@@ -177,12 +177,13 @@ start. Dispatching (Web / REST / MCP) is unaffected.
 ## Optional integration: WeChat channel (experimental, in development)
 
 WeChat is not the core of AgentSociety — it is an **optional communication
-tool under active development**: a Gateway on Windows plus a Core on your
-machine or server lets your Agents send and receive WeChat messages. It relies
+tool under active development**: a `wechatd` daemon on Windows keeps the
+WeChat client connected (re-login recovery, history replay) and your Agents
+send and receive WeChat messages through the Channel MCP tools. It relies
 on unofficial UI-automation libraries such as wxauto, which carry risks of
 client-update breakage and account restrictions; use it for personal
 learning/research only. Details and risks are in the
-[Windows Gateway guide](docs/windows-gateway.md).
+[Windows WeChat daemon guide](docs/windows-wechatd.md).
 
 Other optional components: local RWKV inference
 ([guide](docs/local-rwkv.md)), and the Channel MCP adapter.
@@ -191,8 +192,9 @@ Other optional components: local RWKV inference
 
 ```text
 src/agent_hub/       Hub coordinator (REST/MCP/A2A/Web, storage, auth)
-src/wechat_core/     WeChat Core (optional)
-src/wechat_gateway/  Windows WeChat gateway (optional)
+src/wechatd/         Windows WeChat daemon (local HTTP API, optional)
+src/wechat_core/     WeChat Core (deprecated, reference only)
+src/agent_channel/   Channel MCP tools for agents
 agent-host/          Agent host (Pi worker, Bridge, CLI)
 deploy/              Docker/Caddy deployment templates for the Hub
 docs/                Architecture, deployment, adapters, auth docs

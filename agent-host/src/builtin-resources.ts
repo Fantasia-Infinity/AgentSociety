@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const MANAGED_CHANNEL_MARKER = "agent-society-channel-v1";
@@ -66,12 +66,10 @@ function ensureChannelMcpDefaults(diagnostics: string[]): void {
 
   const repositoryRoot = findRepositoryRoot();
   const srcRoot = join(repositoryRoot, "src");
-  const stateDb = resolve(
-    repositoryRoot,
-    process.env.AGENT_CHANNEL_STATE_DB?.trim() ||
-      process.env.BOT_STATE_DB?.trim() ||
-      "core-state.sqlite3",
-  );
+  const httpUrl = (
+    process.env.AGENT_CHANNEL_HTTP_URL?.trim() || "http://127.0.0.1:8742"
+  ).replace(/\/$/, "");
+  const httpToken = process.env.AGENT_CHANNEL_HTTP_TOKEN?.trim() || "";
   const pythonPath = process.env.PYTHONPATH
     ? `${srcRoot}${delimiter}${process.env.PYTHONPATH}`
     : srcRoot;
@@ -88,7 +86,8 @@ function ensureChannelMcpDefaults(diagnostics: string[]): void {
     cwd: repositoryRoot,
     env: {
       PYTHONPATH: pythonPath,
-      AGENT_CHANNEL_STATE_DB: stateDb,
+      AGENT_CHANNEL_HTTP_URL: httpUrl,
+      AGENT_CHANNEL_HTTP_TOKEN: httpToken,
       AGENT_SOCIETY_MANAGED_MCP: MANAGED_CHANNEL_MARKER,
     },
     lifecycle: "eager",

@@ -25,9 +25,9 @@ test("managed MCP and LSP defaults load in a remote session", async () => {
   const workspace = join(root, "workspace");
   mkdirSync(workspace);
   const previousHome = process.env.HOME;
-  const previousDb = process.env.AGENT_CHANNEL_STATE_DB;
+  const previousUrl = process.env.AGENT_CHANNEL_HTTP_URL;
   process.env.HOME = root;
-  process.env.AGENT_CHANNEL_STATE_DB = join(root, "channel.sqlite3");
+  process.env.AGENT_CHANNEL_HTTP_URL = "http://127.0.0.1:8742";
   try {
     const builtins = ensureBuiltinResourceDefaults();
     assert.deepEqual(builtins.diagnostics, []);
@@ -200,8 +200,8 @@ test("managed MCP and LSP defaults load in a remote session", async () => {
   } finally {
     if (previousHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousHome;
-    if (previousDb === undefined) delete process.env.AGENT_CHANNEL_STATE_DB;
-    else process.env.AGENT_CHANNEL_STATE_DB = previousDb;
+    if (previousUrl === undefined) delete process.env.AGENT_CHANNEL_HTTP_URL;
+    else process.env.AGENT_CHANNEL_HTTP_URL = previousUrl;
     rmSync(root, { recursive: true, force: true });
   }
 });

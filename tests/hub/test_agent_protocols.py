@@ -6,7 +6,7 @@ import sqlite3
 import unittest
 
 from agent_channel.mcp_server import ChannelMcpServer
-from agent_channel.service import SqliteChannelService
+from agent_channel.service import HttpChannelService
 from agent_hub.a2a import A2AApi
 from agent_hub.api import AgentHubApi
 from agent_hub.domain import (
@@ -43,6 +43,38 @@ def incoming(message_id: str = "message-1") -> IncomingMessage:
         content="hello",
         timestamp=123,
     )
+
+
+class FakeChannelService:
+    """In-memory stand-in for HttpChannelService used in MCP mapping tests."""
+
+    def __init__(self) -> None:
+        self._actions: dict[str, str] = {}
+
+    def status(self, **_: object) -> dict[str, object]:
+        return {"started": True, "adapter": {"driver": "mock"}}
+
+    def list_conversations(self, **_: object) -> list[dict[str, object]]:
+        return []
+
+    def read_messages(self, **_: object) -> list[dict[str, object]]:
+        return [{"content": "hello", "channel": "wechat"}]
+
+    def send(self, *, idempotency_key: str | None = None, **_: object) -> dict[str, object]:
+        if idempotency_key in self._actions:
+            return {"action_id": self._actions[idempotency_key], "status": "duplicate"}
+        action_id = f"action:{len(self._actions)}"
+        self._actions[idempotency_key or ""] = action_id
+        return {"action_id": action_id, "status": "sent"}
+
+    def reply(self, **_: object) -> dict[str, object]:
+        return {"action_id": "action:reply", "status": "sent"}
+
+    def react(self, **_: object) -> dict[str, object]:
+        raise RuntimeError("not supported")
+
+    def download(self, **_: object) -> dict[str, object]:
+        raise RuntimeError("not supported")
 
 
 class DurableProcessingTests(unittest.TestCase):
@@ -200,107 +232,118 @@ class DurableProcessingTests(unittest.TestCase):
 
 class ChannelMcpTests(unittest.TestCase):
     def test_mcp_negotiates_current_legacy_and_unknown_versions(self) -> None:
-        with TemporaryDirectory() as directory:
-            service = SqliteChannelService(Path(directory) / "core.sqlite3")
-            try:
-                for requested, expected in (
-                    ("2025-06-18", "2025-06-18"),
-                    ("2025-03-26", "2025-03-26"),
-                    ("2099-01-01", "2025-06-18"),
-                ):
-                    server = ChannelMcpServer(service)
-                    response = server.handle(
-                        {
-                            "jsonrpc": "2.0",
-                            "id": requested,
-                            "method": "initialize",
-                            "params": {
-                                "protocolVersion": requested,
-                                "capabilities": {},
-                                "clientInfo": {"name": "test", "version": "1"},
-                            },
-                        }
-                    )
-                    self.assertEqual(
-                        response["result"]["protocolVersion"], expected
-                    )
-            finally:
-                service.close()
-
-    def test_mcp_lists_reads_and_queues_idempotent_send(self) -> None:
-        with TemporaryDirectory() as directory:
-            path = Path(directory) / "core.sqlite3"
-            inbox = CoreInboxStore(path)
-            inbox.insert(incoming())
-            inbox.close()
-            service = SqliteChannelService(path)
+        service = HttpChannelService(base_url="http://127.0.0.1:1")
+        for requested, expected in (
+            ("2025-06-18", "2025-06-18"),
+            ("2025-03-26", "2025-03-26"),
+            ("2099-01-01", "2025-06-18"),
+        ):
             server = ChannelMcpServer(service)
-            try:
-                initialized = server.handle(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "initialize",
-                        "params": {
-                            "protocolVersion": "2025-06-18",
-                            "capabilities": {},
-                            "clientInfo": {"name": "test", "version": "1"},
-                        },
-                    }
-                )
-                self.assertEqual(
-                    initialized["result"]["protocolVersion"], "2025-06-18"
-                )
-                self.assertIsNone(
-                    server.handle(
-                        {
-                            "jsonrpc": "2.0",
-                            "method": "notifications/initialized",
-                        }
-                    )
-                )
-                response = server.handle(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": 2,
-                        "method": "tools/call",
-                        "params": {
-                            "name": "channel_read_messages",
-                            "arguments": {
-                                "account_id": "account-1",
-                                "conversation_id": "chat-1",
-                            },
-                        },
-                    }
-                )
-                self.assertEqual(
-                    response["result"]["structuredContent"]["result"][0]["content"],
-                    "hello",
-                )
-                send = service.send(
-                    channel="wechat",
-                    account_id="account-1",
-                    conversation_id="chat-1",
-                    content="outbound",
-                    idempotency_key="same-send",
-                )
-                repeated = service.send(
-                    channel="wechat",
-                    account_id="account-1",
-                    conversation_id="chat-1",
-                    content="outbound",
-                    idempotency_key="same-send",
-                )
-                self.assertEqual(send["action_id"], repeated["action_id"])
-                outbox = SqliteActionOutbox(path)
-                try:
-                    self.assertEqual(
-                        len(outbox.poll("account-1", timeout=0)), 1
-                    )
-                finally:
-                    outbox.close()
-            finally:
-                service.close()
+            response = server.handle(
+                {
+                    "jsonrpc": "2.0",
+                    "id": requested,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": requested,
+                        "capabilities": {},
+                        "clientInfo": {"name": "test", "version": "1"},
+                    },
+                }
+            )
+            self.assertEqual(
+                response["result"]["protocolVersion"], expected
+            )
+
+    def test_mcp_lists_reads_and_sends_through_service(self) -> None:
+        service = FakeChannelService()
+        server = ChannelMcpServer(service)
+        initialized = server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "1"},
+                },
+            }
+        )
+        self.assertEqual(
+            initialized["result"]["protocolVersion"], "2025-06-18"
+        )
+        self.assertIsNone(
+            server.handle(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/initialized",
+                }
+            )
+        )
+        listed = server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+            }
+        )
+        tool_names = [tool["name"] for tool in listed["result"]["tools"]]
+        self.assertIn("channel_status", tool_names)
+        response = server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "channel_read_messages",
+                    "arguments": {
+                        "account_id": "account-1",
+                        "conversation_id": "chat-1",
+                    },
+                },
+            }
+        )
+        self.assertEqual(
+            response["result"]["structuredContent"]["result"][0]["content"],
+            "hello",
+        )
+        send = server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "channel_send",
+                    "arguments": {
+                        "account_id": "account-1",
+                        "conversation_id": "chat-1",
+                        "content": "outbound",
+                        "idempotency_key": "same-send",
+                    },
+                },
+            }
+        )
+        action_id = send["result"]["structuredContent"]["action_id"]
+        repeated = server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {
+                    "name": "channel_send",
+                    "arguments": {
+                        "account_id": "account-1",
+                        "conversation_id": "chat-1",
+                        "content": "outbound",
+                        "idempotency_key": "same-send",
+                    },
+                },
+            }
+        )
+        self.assertEqual(
+            action_id, repeated["result"]["structuredContent"]["action_id"]
+        )
 
 
 class A2ATests(unittest.TestCase):

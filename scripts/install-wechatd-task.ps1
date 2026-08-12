@@ -1,14 +1,14 @@
 [CmdletBinding()]
 param(
     [string]$ProjectRoot = (Split-Path -Parent $PSScriptRoot),
-    [string]$TaskName = "WechatBotGateway"
+    [string]$TaskName = "WechatdService"
 )
 
 $ErrorActionPreference = "Stop"
 
-$runner = Join-Path $ProjectRoot "scripts\run-gateway.ps1"
+$runner = Join-Path $ProjectRoot "scripts\run-wechatd.ps1"
 if (!(Test-Path -LiteralPath $runner)) {
-    throw "Gateway runner not found: $runner"
+    throw "wechatd runner not found: $runner"
 }
 
 $userId = "$env:USERDOMAIN\$env:USERNAME"
@@ -29,7 +29,7 @@ Register-ScheduledTask `
     -Trigger $trigger `
     -Principal $principal `
     -Settings $settings `
-    -Description "Keeps the Windows WeChat Gateway connected to Bot Core." | Out-Null
+    -Description "Keeps the Windows WeChat daemon running for local agents." | Out-Null
 
 Start-ScheduledTask -TaskName $TaskName
 Write-Output "Scheduled task registered and started: $TaskName"

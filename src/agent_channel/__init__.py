@@ -1,5 +1,13 @@
 """Channel-neutral tools exposed to agents through MCP."""
 
-from .service import ChannelCapabilityError, SqliteChannelService
+from .service import (
+    ChannelCapabilityError,
+    ChannelUnavailableError,
+    HttpChannelService,
+)
 
-__all__ = ["ChannelCapabilityError", "SqliteChannelService"]
+__all__ = [
+    "ChannelCapabilityError",
+    "ChannelUnavailableError",
+    "HttpChannelService",
+]

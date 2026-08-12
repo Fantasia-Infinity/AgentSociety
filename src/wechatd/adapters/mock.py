@@ -72,6 +72,14 @@ class MockWeChatAdapter:
             )
             self._output.flush()
 
+    def status(self) -> dict[str, object]:
+        return {
+            "driver": "mock",
+            "connected": True,
+            "mode": "console",
+            "listen_chats": [],
+        }
+
     def stop(self) -> None:
         self._on_event = None
 
