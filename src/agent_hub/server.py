@@ -5,6 +5,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
+import secrets
 import time
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -143,7 +144,17 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
                 self.send_header("Content-Length", "0")
                 self.end_headers()
             else:
-                self._send_mcp_json(response)
+                # MCP Streamable HTTP clients (mcp-remote and friends) require
+                # the initialize response to carry an Mcp-Session-Id header.
+                # The Hub is stateless over this session id, but issuing one
+                # keeps protocol-compliant clients happy.
+                session_id = (
+                    secrets.token_hex(16)
+                    if isinstance(payload, dict)
+                    and payload.get("method") == "initialize"
+                    else None
+                )
+                self._send_mcp_json(response, session_id=session_id)
             return
         if parsed.path == "/a2a":
             context = self._authorized()
@@ -305,11 +316,15 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_mcp_json(self, payload: dict[str, Any]) -> None:
+    def _send_mcp_json(
+        self, payload: dict[str, Any], *, session_id: str | None = None
+    ) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("MCP-Protocol-Version", MCP_PROTOCOL_VERSION)
+        if session_id is not None:
+            self.send_header("Mcp-Session-Id", session_id)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self._send_security_headers()
