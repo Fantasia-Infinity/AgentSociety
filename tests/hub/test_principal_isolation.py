@@ -78,6 +78,78 @@ class PrincipalIsolationTests(unittest.TestCase):
         self.assertEqual(alice.role, "tenant_admin")
         self.assertEqual(bob.role, "tenant_admin")
 
+    def test_node_token_registers_only_own_identities(self) -> None:
+        self._register("alice", "correct-horse-222")
+        res = self._agent_login("alice", "correct-horse-222", "node-alice")
+        node_ctx = self.store.authenticate_token(res["node_token"])
+
+        status, _ = self.api.post(
+            "/v1/hub/principals",
+            {
+                "principal_id": "human-alice",
+                "kind": "human",
+                "display_name": "Alice",
+                "metadata": {},
+            },
+            node_ctx,
+        )
+        self.assertEqual(status, HTTPStatus.OK)
+
+        status, _ = self.api.post(
+            "/v1/hub/actors",
+            {
+                "actor_id": "opencode-node-alice",
+                "principal_id": "human-alice",
+                "kind": "agent",
+                "display_name": "OpenCode on node-alice",
+                "capabilities": ["code"],
+                "metadata": {},
+            },
+            node_ctx,
+        )
+        self.assertEqual(status, HTTPStatus.OK)
+
+        status, _ = self.api.post(
+            "/v1/hub/nodes",
+            {
+                "node_id": "node-alice-opencode",
+                "actor_id": "opencode-node-alice",
+                "display_name": "node-alice-opencode",
+                "capabilities": [],
+                "metadata": {},
+            },
+            node_ctx,
+        )
+        self.assertEqual(status, HTTPStatus.OK)
+
+        with self.assertRaises(ApiError):
+            self.api.post(
+                "/v1/hub/actors",
+                {
+                    "actor_id": "rogue",
+                    "principal_id": "human-mallory",
+                    "kind": "agent",
+                    "display_name": "Rogue",
+                    "capabilities": [],
+                    "metadata": {},
+                },
+                node_ctx,
+            )
+        self._register("mallory", "correct-horse-333")
+        self._agent_login("mallory", "correct-horse-333", "node-mallory")
+        with self.assertRaises(ApiError):
+            self.api.post(
+                "/v1/hub/nodes",
+                {
+                    "node_id": "node-alice-rogue",
+                    "actor_id": "pi-node-mallory",
+                    "display_name": "node-alice-rogue",
+                    "capabilities": [],
+                    "metadata": {},
+                },
+                node_ctx,
+            )
+
     def test_tenant_user_only_sees_own_data(self) -> None:
         self._register("alice", "correct-horse-222")
         self._register("bob", "correct-horse-333")

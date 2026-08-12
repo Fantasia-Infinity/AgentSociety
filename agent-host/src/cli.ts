@@ -410,24 +410,63 @@ async function connectCommand(config: AgentHostConfig): Promise<void> {
     );
   }
   const resolved = { ...config, hubUsername: username, hubPassword: password };
-  const { token, saved } = await resolveNodeCredential(resolved);
-  const hub = new HubClient(resolved.hubUrl!, token);
-  const envPath = agentEnvPath(
-    resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", ".."),
-  );
-  mkdirSync(dirname(envPath), { recursive: true });
   const nodeService =
     process.env.AGENT_HUB_NODE_TOKEN_CREDENTIAL_SERVICE?.trim() ||
     "AgentSociety Hub Node";
   const nodeAccount =
     process.env.AGENT_HUB_NODE_TOKEN_CREDENTIAL_ACCOUNT?.trim() ||
     userInfo().username;
+  let token: string;
+  try {
+    const login = await new HubClient(resolved.hubUrl!, "").agentLogin({
+      username,
+      password,
+      node_id: config.nodeId,
+      actor_id: config.actorId,
+      display_name: config.nodeDisplayName,
+      capabilities: hostCapabilities(config),
+      metadata: {
+        origin: "agent-connect",
+        workspace_root: config.workspaceRoot,
+        runtime: "pi",
+        runtime_version: "0.83.0",
+        remote_tool_policy: config.remoteToolPolicy,
+        builtin_capabilities: config.builtinCapabilitiesEnabled,
+        worker_session_mode: config.workerSessionMode,
+      },
+    });
+    token = login.node_token;
+  } catch (error) {
+    if (
+      error instanceof HubError &&
+      (error.status === 401 || error.status === 409)
+    ) {
+      throw new Error(
+        "Hub rejected your credentials. Check your username and password and try again.",
+      );
+    }
+    throw error;
+  }
+  const envPath = agentEnvPath(
+    resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", ".."),
+  );
+  mkdirSync(dirname(envPath), { recursive: true });
   ensureEnvLine(
     envPath,
     "AGENT_HUB_NODE_TOKEN_CREDENTIAL_SERVICE",
     nodeService,
   );
   ensureEnvLine(envPath, "AGENT_HUB_NODE_TOKEN_CREDENTIAL_ACCOUNT", nodeAccount);
+  let saved = false;
+  try {
+    writeSystemCredential(nodeService, nodeAccount, token, "Hub node credential");
+    saved = true;
+  } catch (error) {
+    console.warn(
+      `Could not save the node credential to the system store (${error instanceof Error ? error.message : String(error)}); ` +
+        "worker restarts may need to run connect again.",
+    );
+  }
   try {
     const passwordService =
       process.env.AGENT_HUB_PASSWORD_CREDENTIAL_SERVICE?.trim() ||

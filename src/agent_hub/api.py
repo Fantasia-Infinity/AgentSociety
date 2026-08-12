@@ -375,19 +375,19 @@ class AgentHubApi:
             raw, record = self.store.create_auth_token(item)
             return HTTPStatus.CREATED, {"token": record, "raw_token": raw}
         if path == f"{self.prefix}/principals":
-            self._require_tenant_manager(context)
+            self._require_registration(context, "principal", payload)
             item = self.store.register_principal(
                 PrincipalRegistration.from_dict(payload), tenant_id=tenant_id
             )
             return HTTPStatus.OK, {"principal": item}
         if path == f"{self.prefix}/actors":
-            self._require_tenant_manager(context)
+            self._require_registration(context, "actor", payload)
             item = self.store.register_actor(
                 ActorRegistration.from_dict(payload), tenant_id=tenant_id
             )
             return HTTPStatus.OK, {"actor": item}
         if path == f"{self.prefix}/nodes":
-            self._require_tenant_manager(context)
+            self._require_registration(context, "node", payload)
             item = self.store.register_node(
                 NodeRegistration.from_dict(payload), tenant_id=tenant_id
             )
@@ -644,6 +644,37 @@ class AgentHubApi:
             return
         if not context.is_admin and context.role != "tenant_admin":
             raise PermissionError("tenant manager role required")
+
+    def _require_registration(
+        self,
+        context: AuthenticatedContext | None,
+        kind: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Gate principal/actor/node registration.
+
+        Tenant managers and admins can register anything. A node token may
+        only register identities that belong to itself: its own node_id for
+        nodes, and its own principal_id for principals and actors. This lets
+        adapters self-register at boot without a tenant manager token.
+        """
+
+        if context is None or context.is_admin or context.role == "tenant_admin":
+            return
+        if context.role == "node":
+            if kind == "node":
+                actor_id = str(payload.get("actor_id", "")).strip()
+                if actor_id == context.actor_id:
+                    return
+                try:
+                    actor = self.store.get_actor(actor_id)
+                except LookupError:
+                    raise PermissionError("tenant manager role required") from None
+                if str(actor.get("principal_id", "")) == context.principal_id:
+                    return
+            elif str(payload.get("principal_id", "")).strip() == context.principal_id:
+                return
+        raise PermissionError("tenant manager role required")
 
     def _parts(self, path: str) -> list[str]:
         prefix = f"{self.prefix}/"

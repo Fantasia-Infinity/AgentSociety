@@ -15,6 +15,9 @@ from .base import (
 class IdentityStore:
     """Principal, actor and node registrations."""
 
+    def get_actor(self, actor_id: str) -> dict[str, Any]:
+        return self._actor(actor_id)
+
     def register_principal(
         self, item: PrincipalRegistration, *, tenant_id: str = "default"
     ) -> dict[str, Any]:
