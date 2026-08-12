@@ -320,9 +320,15 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
         self, payload: dict[str, Any], *, session_id: str | None = None
     ) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        result = payload.get("result")
+        negotiated = (
+            str(result.get("protocolVersion"))
+            if isinstance(result, dict) and result.get("protocolVersion")
+            else MCP_PROTOCOL_VERSION
+        )
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("MCP-Protocol-Version", MCP_PROTOCOL_VERSION)
+        self.send_header("MCP-Protocol-Version", negotiated)
         if session_id is not None:
             self.send_header("Mcp-Session-Id", session_id)
         self.send_header("Content-Length", str(len(body)))

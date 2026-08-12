@@ -9,7 +9,10 @@ from .domain import ActorRegistration, PrincipalRegistration
 from .errors import ApiError
 
 
-MCP_PROTOCOL_VERSION = "2025-06-18"
+MCP_PROTOCOL_VERSION = "2025-11-25"
+SUPPORTED_PROTOCOL_VERSIONS = frozenset(
+    {"2025-03-26", "2025-06-18", MCP_PROTOCOL_VERSION}
+)
 MCP_PRINCIPAL_ID = "mcp-external"
 MCP_ACTOR_ID = "mcp-gateway"
 
@@ -124,7 +127,13 @@ class McpService:
         if not isinstance(params, dict):
             return self._error(request_id, -32602, "Invalid params")
         if method == "initialize":
-            return self._result(request_id, self._initialize())
+            requested = str(params.get("protocolVersion", ""))
+            negotiated = (
+                requested
+                if requested in SUPPORTED_PROTOCOL_VERSIONS
+                else MCP_PROTOCOL_VERSION
+            )
+            return self._result(request_id, self._initialize(negotiated))
         if method in {"notifications/initialized", "notifications/cancelled"}:
             return None
         if method == "ping":
@@ -143,9 +152,9 @@ class McpService:
             )
         return self._error(request_id, -32601, f"Method not found: {method}")
 
-    def _initialize(self) -> dict[str, Any]:
+    def _initialize(self, protocol_version: str) -> dict[str, Any]:
         return {
-            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "protocolVersion": protocol_version,
             "capabilities": {
                 "tools": {"listChanged": False},
                 "resources": {"listChanged": False},

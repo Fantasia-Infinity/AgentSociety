@@ -1,8 +1,13 @@
 #!/usr/bin/env node
-// Secure Hub MCP bridge for Codex (macOS).
+// Secure Hub MCP bridge for stdio-based MCP clients (Codex, OpenCode, ...).
 //
 // Reads the per-node Hub credential from the system keychain and proxies
-// stdio to mcp-remote. The token never lives in config.toml or on disk.
+// stdio JSON-RPC to the Hub's Streamable HTTP MCP endpoint. The token never
+// lives in config files or on disk.
+//
+// The Hub answers every MCP message directly in the POST response, so this
+// bridge is a plain request/response proxy and does not depend on
+// mcp-remote's OAuth-first behavior.
 //
 // Configuration resolution (first non-empty wins):
 //   url:      AGENT_HUB_MCP_URL | AGENT_HUB_URL from .private/env/agent.env (or .env.agent) + "/mcp"
@@ -11,10 +16,9 @@
 //
 // Environment overrides:
 //   AGENT_HUB_MCP_URL              Hub MCP endpoint (defaults to AGENT_HUB_URL + /mcp)
-//   AGENT_HUB_MCP_REMOTE_BIN       default mcp-remote (resolved from PATH)
 //   AGENT_HUB_MCP_KEYCHAIN_SERVICE keychain service override
 //   AGENT_HUB_MCP_KEYCHAIN_ACCOUNT keychain account override
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -67,8 +71,6 @@ const hubUrl = (
 const url = hubUrl.endsWith("/mcp")
   ? hubUrl
   : `${hubUrl.replace(/\/+$/, "")}/mcp`;
-const mcpRemote =
-  process.env.AGENT_HUB_MCP_REMOTE_BIN?.trim() || "mcp-remote";
 
 if (!hubUrl) {
   console.error(
@@ -94,14 +96,62 @@ if (!token) {
   process.exit(1);
 }
 
-const child = spawn(
-  mcpRemote,
-  [url, "--header", `Authorization: Bearer ${token}`],
-  {
-    stdio: "inherit",
-  },
-);
-child.on("exit", (code, signal) => {
-  if (signal) process.kill(process.pid, signal);
-  process.exit(code ?? 0);
-});
+process.stdin.setEncoding("utf8");
+let buffer = "";
+for await (const chunk of process.stdin) {
+  buffer += chunk;
+  let newline;
+  while ((newline = buffer.indexOf("\n")) >= 0) {
+    const line = buffer.slice(0, newline).trim();
+    buffer = buffer.slice(newline + 1);
+    if (!line) continue;
+    let message;
+    try {
+      message = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const hasId =
+      message && typeof message === "object" && message.id !== undefined && message.id !== null;
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          Accept: "application/json, text/event-stream",
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: line,
+      });
+      if (!hasId) continue;
+      const text = (await response.text()).trim();
+      if (!text) continue;
+      if (response.ok) {
+        process.stdout.write(text + "\n");
+      } else {
+        process.stdout.write(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: message.id,
+            error: {
+              code: -32603,
+              message: `Hub MCP returned HTTP ${response.status}: ${text.slice(0, 500)}`,
+            },
+          }) + "\n",
+        );
+      }
+    } catch (error) {
+      if (!hasId) continue;
+      process.stdout.write(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: message.id,
+          error: {
+            code: -32603,
+            message: `Hub MCP request failed: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        }) + "\n",
+      );
+    }
+  }
+}
