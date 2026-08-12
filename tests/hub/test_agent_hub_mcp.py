@@ -45,7 +45,7 @@ class McpServiceTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             service = self.make_service(temporary)
             initialized = mcp_call(service, "initialize", {})
-            self.assertEqual(initialized["result"]["protocolVersion"], "2025-06-18")
+            self.assertEqual(initialized["result"]["protocolVersion"], "2025-11-25")
             self.assertIn("tools", initialized["result"]["capabilities"])
             listed = mcp_call(service, "tools/list", {})
             names = {tool["name"] for tool in listed["result"]["tools"]}
@@ -289,7 +289,7 @@ class McpHttpTests(unittest.TestCase):
                     port, {"jsonrpc": "2.0", "id": 1, "method": "initialize"}
                 )
                 self.assertEqual(status, 200)
-                self.assertEqual(initialized["result"]["protocolVersion"], "2025-06-18")
+                self.assertEqual(initialized["result"]["protocolVersion"], "2025-11-25")
 
                 status, created = self.post_mcp(
                     port,
