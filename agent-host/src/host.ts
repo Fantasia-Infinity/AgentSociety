@@ -65,8 +65,19 @@ export function resolveAdapterIdentity(
     process.env.AGENT_ACTOR_ID?.trim() || `${adapter.id}-${config.nodeId}`;
   const nodeId =
     process.env.AGENT_NODE_ID?.trim() || `${config.nodeId}-${adapter.id}`;
+  // A bridge registers its own node/actor pair, so a stored node token for
+  // the plain node (or a user session token) does not match the bridge
+  // identity. Drop both so resolveNodeCredential performs a fresh
+  // agent-login for the adapter-specific node instead, and never overwrite
+  // the plain node credential with the bridge token.
+  const {
+    hubNodeToken: _plainNodeToken,
+    hubToken: _plainHubToken,
+    ...base
+  } = config;
   return {
-    ...config,
+    ...base,
+    hubNodeTokenCacheDisabled: true,
     actorId,
     actorDisplayName:
       process.env.AGENT_ACTOR_NAME?.trim() ||

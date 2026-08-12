@@ -353,13 +353,15 @@ async function resolveNodeCredential(
       process.env.AGENT_HUB_NODE_TOKEN_CREDENTIAL_ACCOUNT?.trim() ||
       userInfo().username;
     let saved = true;
-    try {
-      writeSystemCredential(service, account, login.node_token, "Hub node credential");
-    } catch (error) {
-      saved = false;
-      console.warn(
-        `System credential store unavailable (${error instanceof Error ? error.message : String(error)}); keeping the node credential in memory only.`,
-      );
+    if (!config.hubNodeTokenCacheDisabled) {
+      try {
+        writeSystemCredential(service, account, login.node_token, "Hub node credential");
+      } catch (error) {
+        saved = false;
+        console.warn(
+          `System credential store unavailable (${error instanceof Error ? error.message : String(error)}); keeping the node credential in memory only.`,
+        );
+      }
     }
     return { token: login.node_token, saved };
   }

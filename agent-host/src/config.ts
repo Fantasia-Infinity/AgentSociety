@@ -22,6 +22,7 @@ export interface AgentHostConfig {
   hubUsername?: string;
   hubPassword?: string;
   hubNodeToken?: string;
+  hubNodeTokenCacheDisabled?: boolean;
   principalId: string;
   principalDisplayName: string;
   actorId: string;
