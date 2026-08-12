@@ -85,14 +85,6 @@ services:
       timeout: 5s
       retries: 3
 
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    restart: unless-stopped
-    depends_on:
-      - agent-hub
-    entrypoint: ["cloudflared"]
-    command: ["tunnel", "--no-autoupdate", "--url", "http://agent-hub:8090"]
-
   cloudflared-named:
     profiles:
       - named-tunnel
