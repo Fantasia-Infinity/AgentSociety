@@ -23,6 +23,12 @@ class IdentityStore:
     ) -> dict[str, Any]:
         now = time.time()
         with self._condition, self._connection:
+            existing = self._connection.execute(
+                "SELECT tenant_id FROM hub_principals WHERE principal_id=?",
+                (item.principal_id,),
+            ).fetchone()
+            if existing is not None and str(existing["tenant_id"]) != tenant_id:
+                raise PermissionError("principal belongs to another tenant")
             self._connection.execute(
                 """
                 INSERT INTO hub_principals(
@@ -52,7 +58,20 @@ class IdentityStore:
     ) -> dict[str, Any]:
         now = time.time()
         with self._condition, self._connection:
-            self._require("hub_principals", "principal_id", item.principal_id)
+            existing = self._connection.execute(
+                "SELECT tenant_id FROM hub_actors WHERE actor_id=?",
+                (item.actor_id,),
+            ).fetchone()
+            if existing is not None and str(existing["tenant_id"]) != tenant_id:
+                raise PermissionError("actor belongs to another tenant")
+            principal_row = self._connection.execute(
+                "SELECT tenant_id FROM hub_principals WHERE principal_id=?",
+                (item.principal_id,),
+            ).fetchone()
+            if principal_row is None:
+                raise LookupError("principal not found")
+            if str(principal_row["tenant_id"]) != tenant_id:
+                raise PermissionError("principal belongs to another tenant")
             self._connection.execute(
                 """
                 INSERT INTO hub_actors(
@@ -87,7 +106,20 @@ class IdentityStore:
     ) -> dict[str, Any]:
         now = time.time()
         with self._condition, self._connection:
-            self._require("hub_actors", "actor_id", item.actor_id)
+            existing = self._connection.execute(
+                "SELECT tenant_id FROM hub_nodes WHERE node_id=?",
+                (item.node_id,),
+            ).fetchone()
+            if existing is not None and str(existing["tenant_id"]) != tenant_id:
+                raise PermissionError("node belongs to another tenant")
+            actor_row = self._connection.execute(
+                "SELECT tenant_id FROM hub_actors WHERE actor_id=?",
+                (item.actor_id,),
+            ).fetchone()
+            if actor_row is None:
+                raise LookupError("actor not found")
+            if str(actor_row["tenant_id"]) != tenant_id:
+                raise PermissionError("actor belongs to another tenant")
             self._connection.execute(
                 """
                 INSERT INTO hub_nodes(

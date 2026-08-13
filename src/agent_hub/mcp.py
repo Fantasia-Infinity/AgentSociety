@@ -16,7 +16,6 @@ SUPPORTED_PROTOCOL_VERSIONS = frozenset(
 MCP_PRINCIPAL_ID = "mcp-external"
 MCP_ACTOR_ID = "mcp-gateway"
 
-
 TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "hub_list_actors",
@@ -244,8 +243,10 @@ class McpService:
         tenant_id = self._tenant(context, arguments)
         self._ensure_identity(tenant_id)
         payload = dict(arguments)
-        payload.setdefault("principal_id", MCP_PRINCIPAL_ID)
-        payload.setdefault("delegator_actor_id", MCP_ACTOR_ID)
+        payload.setdefault("principal_id", self._gateway_principal_id(tenant_id))
+        payload.setdefault(
+            "delegator_actor_id", self._gateway_actor_id(tenant_id)
+        )
         payload.setdefault("origin", "mcp")
         payload.setdefault("tenant_id", tenant_id)
         _, response = self.api.post("/v1/hub/tasks", payload, context)
@@ -261,13 +262,24 @@ class McpService:
         _, response = self.api.post(
             f"/v1/hub/tasks/{quote(self._required(arguments, 'task_id'), safe='')}/cancel",
             {
-                "actor_id": arguments.get("actor_id") or MCP_ACTOR_ID,
+                "actor_id": arguments.get("actor_id")
+                or self._gateway_actor_id(tenant_id),
                 "reason": arguments.get("reason"),
                 "tenant_id": tenant_id,
             },
             context,
         )
         return response["task"]
+
+    def _gateway_principal_id(self, tenant_id: str) -> str:
+        if tenant_id == "default":
+            return MCP_PRINCIPAL_ID
+        return f"{MCP_PRINCIPAL_ID}-{_safe_tenant_suffix(tenant_id)}"
+
+    def _gateway_actor_id(self, tenant_id: str) -> str:
+        if tenant_id == "default":
+            return MCP_ACTOR_ID
+        return f"{MCP_ACTOR_ID}-{_safe_tenant_suffix(tenant_id)}"
 
     def _tenant(
         self,
@@ -284,14 +296,14 @@ class McpService:
             return
         self.api.register_gateway_identity(
             PrincipalRegistration(
-                principal_id=MCP_PRINCIPAL_ID,
+                principal_id=self._gateway_principal_id(tenant_id),
                 kind="service",
                 display_name="MCP clients",
                 metadata={"protocol": "mcp"},
             ),
             ActorRegistration(
-                actor_id=MCP_ACTOR_ID,
-                principal_id=MCP_PRINCIPAL_ID,
+                actor_id=self._gateway_actor_id(tenant_id),
+                principal_id=self._gateway_principal_id(tenant_id),
                 kind="service",
                 display_name="MCP gateway",
                 capabilities=(),
@@ -341,3 +353,10 @@ class McpService:
             "id": request_id,
             "error": {"code": code, "message": message},
         }
+
+
+def _safe_tenant_suffix(tenant_id: str) -> str:
+    return "".join(
+        character if character.isalnum() or character in "-_" else "_"
+        for character in tenant_id
+    )[:40]

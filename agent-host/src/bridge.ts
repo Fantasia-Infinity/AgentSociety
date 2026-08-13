@@ -10,7 +10,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative as relativePath,
+  resolve,
+} from "node:path";
 
 import type { AgentHostConfig } from "./config.js";
 import { HubClient } from "./hub-client.js";
@@ -122,8 +129,21 @@ export function discoverSessionId(cwd: string, glob: string): string | undefined
   return uuid ?? base;
 }
 
-function splitGlob(patternPath: string): [string, string] {
-  const marker = patternPath.indexOf("**");
+const CREDENTIAL_ENV_PATTERN =
+  /^(AGENT_HUB_(NODE_)?TOKEN|AGENT_HUB_PASSWORD|AGENT_HUB_API_TOKEN|AGENT_REMOTE_API_KEY|AGENT_API_KEY|LLM_API_KEY|AGENT_HUB_USERNAME|AGENT_HUB_SECRET|AGENT_HUB_(NODE_TOKEN|TOKEN|PASSWORD)_CREDENTIAL_SERVICE)$/u;
+
+export function sanitizedAdapterEnv(
+  env: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const sanitized: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (CREDENTIAL_ENV_PATTERN.test(key)) continue;
+    sanitized[key] = value;
+  }
+  return sanitized;
+}
+
+function splitGlob(patternPath: string): [string, string] {  const marker = patternPath.indexOf("**");
   if (marker < 0) {
     return [dirname(patternPath), basename(patternPath)];
   }
@@ -386,7 +406,7 @@ export class BridgeWorker {
     ], {
       cwd,
       env: {
-        ...process.env,
+        ...sanitizedAdapterEnv(process.env),
         ...this.adapter.env,
         AGENT_HUB_TASK_FILE: envelopePath,
         AGENT_HUB_WORKSPACE: cwd,
@@ -593,6 +613,17 @@ export class BridgeWorker {
     for (const artifact of artifacts ?? []) {
       try {
         const path = resolve(cwd, artifact.path);
+        const relative = relativePath(cwd, path);
+        if (
+          relative === "" ||
+          relative.startsWith("..") ||
+          isAbsolute(relative)
+        ) {
+          this.output(
+            `Artifact outside the workspace, refusing: ${artifact.path}`,
+          );
+          continue;
+        }
         if (!existsSync(path) || !statSync(path).isFile()) {
           this.output(`Artifact not found, skipping: ${artifact.path}`);
           continue;

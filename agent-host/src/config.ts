@@ -138,15 +138,34 @@ export function assertRemoteUrl(value: string): string {
     throw new Error("Agent model URL must use HTTP or HTTPS");
   }
   const host = url.hostname.replace(/^\[|\]$/gu, "").toLowerCase();
+  if (isBannedRemoteHost(host)) {
+    throw new Error("Agent Host only accepts a remote model endpoint");
+  }
+  return value.replace(/\/$/u, "");
+}
+
+function isBannedRemoteHost(host: string): boolean {
   if (
     host === "localhost" ||
     host === "::1" ||
     host === "0.0.0.0" ||
-    host.startsWith("127.")
+    host.startsWith("127.") ||
+    host.endsWith(".localhost")
   ) {
-    throw new Error("Agent Host only accepts a remote model endpoint");
+    return true;
   }
-  return value.replace(/\/$/u, "");
+  const parts = host.split(".").map((part) => Number.parseInt(part, 10));
+  if (parts.length !== 4 || parts.some((part) => Number.isNaN(part))) {
+    return false;
+  }
+  const [a, b] = parts;
+  if (a === undefined || b === undefined) return false;
+  if (a === 10) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  return false;
 }
 
 export function loadConfig(): AgentHostConfig {

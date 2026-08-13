@@ -22,10 +22,23 @@ class SlidingWindowLimiter:
         self._clock = clock
         self._lock = threading.Lock()
         self._events: dict[str, deque[float]] = {}
+        self._last_sweep = clock()
+
+    def _sweep(self, now: float) -> None:
+        stale = [
+            key
+            for key, events in self._events.items()
+            if not events or now - events[-1] >= self._window
+        ]
+        for key in stale:
+            self._events.pop(key, None)
+        self._last_sweep = now
 
     def allow(self, key: str) -> bool:
         now = self._clock()
         with self._lock:
+            if now - self._last_sweep >= self._window:
+                self._sweep(now)
             events = self._events.get(key)
             if events is None:
                 self._events[key] = deque([now])

@@ -14,6 +14,20 @@ from ..domain import (
 class TokenStore:
     """Auth token issuance, revocation and authentication."""
 
+    def purge_expired_auth_tokens(self, *, now: float | None = None) -> int:
+        """Delete expired or revoked auth tokens, returning the removed count."""
+        cutoff = time.time() if now is None else now
+        with self._condition, self._connection:
+            cursor = self._connection.execute(
+                """
+                DELETE FROM hub_auth_tokens
+                WHERE (expires_at IS NOT NULL AND expires_at < ?)
+                   OR revoked_at IS NOT NULL
+                """,
+                (cutoff,),
+            )
+        return cursor.rowcount
+
     def create_auth_token(
         self, item: AuthTokenCreation
     ) -> tuple[str, dict[str, Any]]:

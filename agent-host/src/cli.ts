@@ -487,7 +487,8 @@ async function connectCommand(config: AgentHostConfig): Promise<void> {
   } else {
     console.warn(
       "The system credential store is unavailable on this machine. " +
-        `Set AGENT_HUB_NODE_TOKEN=${token} in .env.agent to persist the node credential.`,
+        "Worker restarts may need to run connect again. " +
+        "The node credential is intentionally not printed here.",
     );
   }
 }

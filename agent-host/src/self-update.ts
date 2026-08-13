@@ -50,11 +50,24 @@ export function isSelfUpdateTask(task: HubTask): boolean {
   return task.input?.action === SELF_UPDATE_ACTION;
 }
 
+const SELF_UPDATE_BRANCH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
+
 export function selfUpdateBranch(task: HubTask): string {
   const requested = task.input?.branch;
-  return typeof requested === "string" && requested.trim()
-    ? requested.trim()
-    : "main";
+  if (typeof requested !== "string" || !requested.trim()) {
+    return "main";
+  }
+  const branch = requested.trim();
+  if (
+    branch.length > 200 ||
+    branch.startsWith("-") ||
+    !SELF_UPDATE_BRANCH_PATTERN.test(branch)
+  ) {
+    throw new Error(
+      "Self-update branch must match [A-Za-z0-9][A-Za-z0-9._/-]*",
+    );
+  }
+  return branch;
 }
 
 export function runSelfUpdate(

@@ -14,5 +14,9 @@
 	request_body {
 		max_size 1MB
 	}
+	log {
+		output stdout
+		format json
+	}
 	reverse_proxy agent-hub:8090
 }

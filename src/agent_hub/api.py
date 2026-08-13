@@ -222,6 +222,8 @@ class AgentHubApi:
             self._assert_principal_owner(context, task)
             return HTTPStatus.OK, {"task": task}
         if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "events":
+            task = self.store.get_task(parts[1], tenant_id=tenant_id)
+            self._assert_principal_owner(context, task)
             query = parse_qs(query_string)
             try:
                 after_seq = int((query.get("after_seq") or ["0"])[0])
@@ -274,7 +276,9 @@ class AgentHubApi:
             account = self.store.register_user_personal(
                 username=str(payload.get("username", "")),
                 password=str(payload.get("password", "")),
-                display_name=str(payload.get("display_name", "")).strip(),
+                display_name=required_text(
+                    payload, "display_name", maximum=200
+                ).strip(),
             )
             return HTTPStatus.CREATED, {"user": account}
         if path == f"{self.auth_prefix}/login":
@@ -286,7 +290,7 @@ class AgentHubApi:
                 raise ApiError("invalid username or password", HTTPStatus.UNAUTHORIZED)
             raw, record = self.store.create_session(
                 account,
-                label=str(payload.get("label", "api")),
+                label=optional_text(payload, "label", maximum=200) or "api",
             )
             return HTTPStatus.OK, {
                 "session_token": raw,
@@ -304,20 +308,24 @@ class AgentHubApi:
                 item = self.store.agent_login(
                     username=str(payload.get("username", "")),
                     password=str(payload.get("password", "")),
-                    node_id=str(payload.get("node_id", "")),
-                    actor_id=str(payload.get("actor_id", "")).strip() or None,
-                    display_name=str(payload.get("display_name", "")).strip() or None,
+                    node_id=required_text(payload, "node_id", maximum=200),
+                    actor_id=optional_text(payload, "actor_id", maximum=200),
+                    display_name=optional_text(
+                        payload, "display_name", maximum=200
+                    ),
                     capabilities=tuple(
-                        str(c).strip()
+                        str(c).strip()[:200]
                         for c in (payload.get("capabilities") or [])
                         if str(c).strip()
-                    ),
+                    )[:32],
                     metadata=object_value(payload, "metadata"),
                 )
             except PermissionError as exc:
                 raise ApiError(
                     "invalid username or password", HTTPStatus.UNAUTHORIZED
                 ) from exc
+            except ValueError as exc:
+                raise ApiError(str(exc), HTTPStatus.BAD_REQUEST) from exc
             return HTTPStatus.OK, item
         if path == f"{self.auth_prefix}/logout":
             if context is None or not context.session_id:
@@ -486,6 +494,41 @@ class AgentHubApi:
         if path == f"{self.prefix}/artifacts":
             artifact_payload = dict(payload)
             encoded = artifact_payload.pop("content_base64", None)
+            if context is not None and not context.is_admin:
+                creator = required_text(
+                    artifact_payload, "created_by_actor_id", maximum=200
+                )
+                if context.actor_id is None or creator != context.actor_id:
+                    raise PermissionError(
+                        "created_by_actor_id must match the authenticated actor"
+                    )
+                if context.role != "tenant_admin":
+                    run_id = artifact_payload.get("run_id")
+                    task_id = artifact_payload.get("task_id")
+                    if run_id:
+                        run = self.store.get_run(
+                            str(run_id), tenant_id=tenant_id
+                        )
+                        if run["actor_id"] != context.actor_id:
+                            raise PermissionError(
+                                "only the executing actor can attach artifacts"
+                            )
+                    elif task_id:
+                        task = self.store.get_task(
+                            str(task_id), tenant_id=tenant_id
+                        )
+                        if task["executor_actor_id"] != context.actor_id:
+                            raise PermissionError(
+                                "only the executing actor can attach artifacts"
+                            )
+                if encoded is None:
+                    artifact_payload["sha256"] = None
+                    artifact_payload["size_bytes"] = None
+            raw_uri = artifact_payload.get("uri")
+            if isinstance(raw_uri, str) and raw_uri.strip() and not raw_uri.lower().startswith(
+                ("https://", "http://", "file://", "s3://")
+            ):
+                raise ValueError("unsupported artifact uri scheme")
             if encoded is not None:
                 if self.object_store is None:
                     raise ValueError("Hub object storage is not configured")
@@ -585,6 +628,19 @@ class AgentHubApi:
             )
             return HTTPStatus.OK, {"control": control}
         if len(parts) == 3 and parts[0] == "runs" and parts[2] == "updates":
+            if (
+                context is not None
+                and not context.is_admin
+                and context.role != "tenant_admin"
+            ):
+                existing = self.store.get_run(parts[1], tenant_id=tenant_id)
+                if (
+                    context.actor_id is None
+                    or context.actor_id != existing["actor_id"]
+                ):
+                    raise PermissionError(
+                        "only the executing actor can update its run"
+                    )
             raw_status = required_text(payload, "status", maximum=40)
             try:
                 status = RunStatus(raw_status)

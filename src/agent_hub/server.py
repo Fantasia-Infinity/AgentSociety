@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
 import secrets
+import threading
 import time
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -73,6 +74,9 @@ class HubHttpServer(ThreadingHTTPServer):
 
 class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
     server: HubHttpServer
+    # Bound per-I/O waits so slowloris-style connections cannot pin threads
+    # indefinitely. The MCP SSE keep-alive writes every 15s, well within this.
+    timeout = 60
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -436,10 +440,31 @@ def main() -> None:
         "postgresql" if settings.database_url else settings.state_db,
     )
     try:
+        removed = store.purge_expired_auth_tokens()
+        if removed:
+            logger.info("purged_expired_auth_tokens count=%s", removed)
+    except Exception:
+        logger.exception("purge_expired_auth_tokens_failed")
+    purge_stop = threading.Event()
+
+    def purge_loop() -> None:
+        while not purge_stop.wait(6 * 60 * 60):
+            try:
+                removed = store.purge_expired_auth_tokens()
+                if removed:
+                    logger.info("purged_expired_auth_tokens count=%s", removed)
+            except Exception:
+                logger.exception("purge_expired_auth_tokens_failed")
+
+    threading.Thread(
+        target=purge_loop, name="hub-token-purge", daemon=True
+    ).start()
+    try:
         server.serve_forever()
     except KeyboardInterrupt:
         logger.info("shutdown_requested")
     finally:
+        purge_stop.set()
         server.server_close()
         store.close()
 
