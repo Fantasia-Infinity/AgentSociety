@@ -46,3 +46,11 @@ deploy/hub/certs/
 # Only the README inside is tracked; everything else stays on the machine.
 .private/*
 !.private/README.md
+
+# Local machine-specific tooling, venvs, and test state (not for sharing).
+.venv-wxautox4/
+agent-host/worker-restart.ps1
+mock-test-state.sqlite3*
+wechat-automation/
+# Half-deleted dependency trees left behind by failed Windows npm ci runs.
+agent-host/node_modules.broken-*
