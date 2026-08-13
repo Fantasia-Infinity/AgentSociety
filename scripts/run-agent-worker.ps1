@@ -38,13 +38,15 @@ function Invoke-PendingInstall {
     $marker = Join-Path $agentHost ".self-update-pending"
     if (!(Test-Path -LiteralPath $marker)) { return }
     Write-SupervisorLog "pending self-update detected; running npm ci"
-    $npm = (Get-Command npm.cmd -ErrorAction Stop).Source
+    # Call npm through node directly: npm.cmd reports exit code 1 from
+    # PowerShell 5.1 even on success, which would misreport the install.
+    $npmCli = Join-Path (Split-Path $node) "node_modules\npm\bin\npm-cli.js"
     try {
         Push-Location $agentHost
-        & $npm ci --ignore-scripts
+        & $node $npmCli ci --ignore-scripts
         if ($LASTEXITCODE -ne 0) { throw "npm ci failed with exit $LASTEXITCODE" }
         & $node scripts/patch-pi-brace-expansion.mjs
-        & $npm run build
+        & $node $npmCli run build
         if ($LASTEXITCODE -ne 0) { throw "build failed with exit $LASTEXITCODE" }
         $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $agentHost "package-lock.json")).Hash.ToLower()
         New-Item -ItemType Directory -Force -Path (Join-Path $agentHost "node_modules") | Out-Null
