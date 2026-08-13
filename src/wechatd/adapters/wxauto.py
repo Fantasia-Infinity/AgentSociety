@@ -230,7 +230,9 @@ class WxAutoAdapter:
         for message, key in snapshot[start_index:]:
             self._remember_polled_message(nickname, key)
             if _is_deliverable_message(message):
-                self._handle_message(message, wechat, source_key=key)
+                self._handle_message(
+                    message, wechat, source_key=key, chat_id=actual_chat
+                )
         for _, key in snapshot[:start_index]:
             self._remember_polled_message(nickname, key)
         self._poll_snapshot_ready[nickname] = True
@@ -393,7 +395,9 @@ class WxAutoAdapter:
                     ]
                     count = max(session_new_count, 1)
                     for message in deliverable[-count:]:
-                        self._handle_message(message, wechat)
+                        self._handle_message(
+                            message, wechat, chat_id=actual_chat
+                        )
                 self._poll_session_markers[nickname] = session_marker
                 return
             seen = self._seen_message_ids.get(nickname, set())
@@ -436,7 +440,7 @@ class WxAutoAdapter:
                     1,
                 )
                 for message in deliverable[-count:]:
-                    self._handle_message(message, wechat)
+                    self._handle_message(message, wechat, chat_id=actual_chat)
             for _, key in unseen:
                 self._remember_polled_message(nickname, key)
             self._poll_pending_counts.pop(nickname, None)
@@ -487,6 +491,8 @@ class WxAutoAdapter:
         chat: Any,
         *,
         source_key: str | None = None,
+        chat_id: str | None = None,
+        chat_type: str | None = None,
     ) -> bool | None:
         callback = self._on_event
         if callback is None:
@@ -500,15 +506,23 @@ class WxAutoAdapter:
             if content_type is None:
                 return
 
-            chat_info = _chat_info(chat)
-            chat_id = str(
-                chat_info.get("chat_name") or getattr(chat, "who", "")
-            ).strip()
+            if chat_id is not None:
+                # Polling mode: the client object reports the focused chat
+                # (often 文件传输助手), not the chat that was just polled.
+                # Trust the explicitly polled chat name instead.
+                chat_id = chat_id.strip()
+                raw_chat_type = chat_type or "direct"
+            else:
+                chat_info = _chat_info(chat)
+                chat_id = str(
+                    chat_info.get("chat_name") or getattr(chat, "who", "")
+                ).strip()
+                raw_chat_type = str(
+                    chat_info.get("chat_type")
+                    or getattr(chat, "chat_type", "friend")
+                )
             if not chat_id:
                 raise ValueError("wxauto callback did not include a chat name")
-            raw_chat_type = str(
-                chat_info.get("chat_type") or getattr(chat, "chat_type", "friend")
-            )
             chat_type = "group" if raw_chat_type == "group" else "direct"
             sender_id = str(getattr(message, "sender", "") or chat_id).strip()
             content = str(getattr(message, "content", ""))

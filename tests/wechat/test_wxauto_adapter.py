@@ -173,6 +173,39 @@ class WxAutoAdapterTests(unittest.TestCase):
         )
         self.assertTrue(wechat.stopped)
 
+    def test_polling_attributes_messages_to_the_polled_chat_not_the_focused_chat(
+        self,
+    ) -> None:
+        # Regression: the free-package client's ChatInfo() can report the
+        # focused chat (typically 文件传输助手) rather than the chat that was
+        # just polled. Explicit chat ids from the polling loop must win.
+        events = []
+        adapter = WxAutoAdapter(
+            account_id="account-1",
+            module_name="wxauto4",
+            listen_chats=("测试好友",),
+            bot_mention="",
+            wechat_factory=lambda: FakeWeChat(),
+        )
+        adapter.start(events.append)
+        try:
+            message = SimpleNamespace(
+                attr="friend",
+                type="text",
+                content="hello",
+                sender="测试好友",
+                hash="h1",
+            )
+            misleaded = FakeChat()  # ChatInfo reports a different chat
+            adapter._handle_message(message, misleaded)
+            self.assertEqual(events[0].chat_id, "项目群")
+
+            adapter._handle_message(message, misleaded, chat_id="炼九生")
+            self.assertEqual(events[1].chat_id, "炼九生")
+            self.assertEqual(events[1].chat_type, "direct")
+        finally:
+            adapter.stop()
+
     def test_free_package_polls_only_messages_added_after_startup(self) -> None:
         old_message = SimpleNamespace(
             attr="friend",
