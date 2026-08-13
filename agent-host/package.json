@@ -1,6 +1,6 @@
 {
   "name": "@agent-society/agent-host",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "AgentSociety local-first Pi host with optional Hub collaboration",
