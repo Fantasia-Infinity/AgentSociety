@@ -258,6 +258,7 @@ export function applyPendingUpdate(agentHostDir: string): void {
       [...npm.args, "ci", "--ignore-scripts"],
       record,
       "npm ci",
+      30 * 60 * 1000,
     );
     run(
       agentHostDir,
@@ -387,15 +388,20 @@ function run(
   args: string[],
   record: (label: string, output: string) => void,
   label: string,
+  timeoutMs: number = 10 * 60 * 1000,
 ): string {
   const result = spawnSync(command, args, {
     cwd,
     encoding: "utf8",
     maxBuffer: 32 * 1024 * 1024,
+    timeout: timeoutMs,
   });
   const output = `${result.stdout ?? ""}${result.stderr ?? ""}`.trim();
   if (result.error) {
     throw new Error(`${label} could not start: ${result.error.message}`);
+  }
+  if (result.signal) {
+    throw new Error(`${label} timed out after ${timeoutMs}ms`);
   }
   if (result.status !== 0) {
     throw new Error(
