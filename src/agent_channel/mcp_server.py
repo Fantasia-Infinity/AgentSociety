@@ -231,6 +231,11 @@ def serve(input_stream: TextIO, output_stream: TextIO, service: HttpChannelServi
 
 
 def main() -> None:
+    for stream in (sys.stdin, sys.stdout):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
     base_url = os.environ.get(
         "AGENT_CHANNEL_HTTP_URL", "http://127.0.0.1:8742"
     ).strip().rstrip("/")
