@@ -30,6 +30,36 @@ function Write-SupervisorLog {
     Add-Content -LiteralPath $supervisorLog -Value $line -Encoding UTF8
 }
 
+# Runs the deferred npm ci when a self-update left .self-update-pending.
+# Only safe here: at this point the previous worker has exited, so no
+# process pins the native DLLs inside node_modules (on Windows npm ci
+# otherwise fails with EPERM mid-delete and leaves a broken tree).
+function Invoke-PendingInstall {
+    $marker = Join-Path $agentHost ".self-update-pending"
+    if (!(Test-Path -LiteralPath $marker)) { return }
+    Write-SupervisorLog "pending self-update detected; running npm ci"
+    $npm = (Get-Command npm.cmd -ErrorAction Stop).Source
+    try {
+        Push-Location $agentHost
+        & $npm ci --ignore-scripts
+        if ($LASTEXITCODE -ne 0) { throw "npm ci failed with exit $LASTEXITCODE" }
+        & $node scripts/patch-pi-brace-expansion.mjs
+        & $npm run build
+        if ($LASTEXITCODE -ne 0) { throw "build failed with exit $LASTEXITCODE" }
+        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $agentHost "package-lock.json")).Hash.ToLower()
+        New-Item -ItemType Directory -Force -Path (Join-Path $agentHost "node_modules") | Out-Null
+        Set-Content -LiteralPath (Join-Path $agentHost "node_modules\.installed-lock-hash") -Value $hash -NoNewline -Encoding ASCII
+        Remove-Item -LiteralPath $marker -Force
+        Write-SupervisorLog "pending self-update applied (lock $hash)"
+    }
+    catch {
+        Write-SupervisorLog "pending self-update failed: $($_.Exception.Message)"
+    }
+    finally {
+        Pop-Location
+    }
+}
+
 Write-SupervisorLog "agent worker supervisor started project=$ProjectRoot"
 
 while ($true) {
@@ -53,6 +83,10 @@ while ($true) {
     catch {
         Write-SupervisorLog "worker start failed error=$($_.Exception.Message)"
     }
+
+    # Install deferred dependencies between worker runs, when the DLLs of
+    # the previous worker are no longer pinned by any process.
+    Invoke-PendingInstall
 
     Start-Sleep -Seconds ([Math]::Max($RestartDelaySeconds, 1))
 }

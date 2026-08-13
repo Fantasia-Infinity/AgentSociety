@@ -222,15 +222,29 @@ function writePendingUpdate(agentHostDir: string, lockHash: string): void {
 }
 
 /**
- * Runs before the worker loads any credentials (and thus before the keyring
- * native addon pins node_modules files on Windows). When a previous update
- * deferred npm ci, this process has replaced the old worker, so the DLL lock
- * is gone and the install can proceed. Failures keep the marker so the next
- * start retries, and never prevent the worker from starting.
+ * Runs before the worker loads any credentials. When a previous update
+ * deferred npm ci, this process has replaced the old worker, so on POSIX
+ * systems the install can proceed. On Windows this is impossible: the
+ * worker's own import graph pins native DLLs (e.g. the clipboard addon
+ * inside pi-coding-agent) for the lifetime of the process, so `npm ci`
+ * fails with EPERM mid-delete and leaves node_modules half-deleted,
+ * crashing every subsequent start in an endless retry loop. The worker
+ * supervisor therefore owns the install on Windows and runs it between
+ * worker exits, when no worker holds the files; this function only keeps
+ * the marker visible for it. Failures never prevent the worker from
+ * starting.
  */
 export function applyPendingUpdate(agentHostDir: string): void {
   const marker = pendingUpdatePath(agentHostDir);
   if (!existsSync(marker)) return;
+  if (process.platform === "win32") {
+    // The supervisor (run-agent-worker.ps1) runs the pending install after
+    // this worker exits, when no process pins node_modules native DLLs.
+    console.error(
+      "Pending self-update detected; npm ci deferred to the worker supervisor (Windows DLL locks)",
+    );
+    return;
+  }
   const npm = resolveNpm();
   const steps: string[] = [];
   const record = (label: string, output: string) => {
