@@ -46,7 +46,7 @@ function task() {
     task_id: "task-self-update-test",
     objective: "Self-update",
     input: { action: "self_update", branch: "main", workspace: "." },
-    status: "submitted",
+    status: "submitted" as const,
     result: {},
     error: null,
     created_at: 0,
@@ -63,6 +63,7 @@ function task() {
     executor_node_id: null,
     origin: "test",
     artifacts: [],
+    required_capabilities: [],
   };
 }
 
@@ -176,4 +177,26 @@ test("applyPendingUpdate is a no-op without a marker", () => {
     false,
   );
   rmSync(workspace, { recursive: true, force: true });
+});
+
+test("selfUpdateBranch whitelists safe names and rejects injections", async () => {
+  const { selfUpdateBranch } = await import("../src/self-update.js");
+  assert.equal(selfUpdateBranch(task()), "main");
+  const withBranch = (branch: unknown) => ({
+    ...task(),
+    input: { ...task().input, branch },
+  });
+  assert.equal(selfUpdateBranch(withBranch("release/1.2")), "release/1.2");
+  assert.equal(selfUpdateBranch(withBranch("  main  ")), "main");
+  for (const bad of [
+    "--upload-pack=x",
+    "main; rm -rf /",
+    "feat/../../etc",
+    "../main",
+    "main\x00evil",
+    "/main",
+  ]) {
+    assert.throws(() => selfUpdateBranch(withBranch(bad)));
+  }
+  assert.throws(() => selfUpdateBranch(withBranch("a".repeat(300))));
 });

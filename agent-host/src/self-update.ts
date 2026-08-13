@@ -58,13 +58,15 @@ export function selfUpdateBranch(task: HubTask): string {
     return "main";
   }
   const branch = requested.trim();
-  if (
+  const invalid =
     branch.length > 200 ||
     branch.startsWith("-") ||
-    !SELF_UPDATE_BRANCH_PATTERN.test(branch)
-  ) {
+    !SELF_UPDATE_BRANCH_PATTERN.test(branch) ||
+    branch.split("/").includes("..") ||
+    branch.startsWith("/");
+  if (invalid) {
     throw new Error(
-      "Self-update branch must match [A-Za-z0-9][A-Za-z0-9._/-]*",
+      "Self-update branch must match [A-Za-z0-9][A-Za-z0-9._/-]* without '..' segments",
     );
   }
   return branch;
