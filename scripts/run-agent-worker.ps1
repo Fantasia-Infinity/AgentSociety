@@ -41,10 +41,38 @@ function Invoke-PendingInstall {
     # Call npm through node directly: npm.cmd reports exit code 1 from
     # PowerShell 5.1 even on success, which would misreport the install.
     $npmCli = Join-Path (Split-Path $node) "node_modules\npm\bin\npm-cli.js"
+    # A just-exited worker may still hold native DLLs open for a few seconds
+    # (Windows unload delay). Retry until the lock clears; the supervisor
+    # does not start a new worker while this runs, so nothing re-pins the
+    # files during the retry window.
+    Start-Sleep -Seconds 5
+    $attempt = 0
+    $maxAttempts = 6
+    $installed = $false
+    while ($attempt -lt $maxAttempts -and -not $installed) {
+        $attempt++
+        Push-Location $agentHost
+        try {
+            & $node $npmCli ci --ignore-scripts
+            if ($LASTEXITCODE -ne 0) { throw "npm ci failed with exit $LASTEXITCODE" }
+            $installed = $true
+        }
+        catch {
+            Write-SupervisorLog "npm ci attempt $attempt/$maxAttempts failed: $($_.Exception.Message)"
+        }
+        finally {
+            Pop-Location
+        }
+        if (-not $installed -and $attempt -lt $maxAttempts) {
+            Start-Sleep -Seconds 15
+        }
+    }
+    if (-not $installed) {
+        Write-SupervisorLog "pending self-update failed after $maxAttempts attempts; keeping marker for next restart"
+        return
+    }
     try {
         Push-Location $agentHost
-        & $node $npmCli ci --ignore-scripts
-        if ($LASTEXITCODE -ne 0) { throw "npm ci failed with exit $LASTEXITCODE" }
         & $node scripts/patch-pi-brace-expansion.mjs
         & $node $npmCli run build
         if ($LASTEXITCODE -ne 0) { throw "build failed with exit $LASTEXITCODE" }
