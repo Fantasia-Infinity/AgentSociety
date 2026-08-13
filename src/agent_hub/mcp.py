@@ -139,17 +139,13 @@ class McpService:
         if method == "ping":
             return self._result(request_id, {})
         if method == "tools/list":
-            return self._result(
-                request_id, {"tools": TOOL_DEFINITIONS, "nextCursor": None}
-            )
+            return self._result(request_id, {"tools": TOOL_DEFINITIONS})
         if method == "tools/call":
             return self._result(request_id, self._tools_call(params, context))
         if method == "resources/list":
-            return self._result(request_id, {"resources": [], "nextCursor": None})
+            return self._result(request_id, {"resources": []})
         if method == "resources/templates/list":
-            return self._result(
-                request_id, {"resourceTemplates": [], "nextCursor": None}
-            )
+            return self._result(request_id, {"resourceTemplates": []})
         return self._error(request_id, -32601, f"Method not found: {method}")
 
     def _initialize(self, protocol_version: str) -> dict[str, Any]:
