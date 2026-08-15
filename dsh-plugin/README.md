@@ -22,6 +22,10 @@ Current scope:
   - Durable session transcript attached to the Hub as an artifact
     (`dsh-transcript-<run_id>-session.jsonl`).
 - `agent-society-hub-mcp`: optional `mcp__agent-society__hub_*` dispatch tools.
+- `agent-society-hub-tool-guard`: keeps those Hub tools in the assembled
+  model catalog even when a preset (for example `anchored-standard`)
+  filters the system-prompt tool list. Real `tools.restrict()` denials still
+  win.
 
 The Python Hub and its REST contract remain unchanged.
 

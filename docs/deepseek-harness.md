@@ -72,6 +72,11 @@ dsh-TUI 的 `/resume` 使用 `ctx.agents.resume`；continuous worker 也会把
 
 插件现在还会：
 
+- 通过 `agent-society-hub-tool-guard` 在 system-prompt assembly 之后重新
+  注入 `mcp__agent-society__hub_*`，因此 `anchored-standard` 这类会裁剪
+  工具目录的 preset 也不会把 Hub 工具裁掉（真正的 `tools.restrict()`
+  拒绝仍然生效）；
+
 - 按任务 `input.tool_policy`（回退到 `AGENT_SOCIETY_TOOL_POLICY`）映射
   `full` / `read_only` / `no_tools`，并写入每个 session 的 `sandbox/mode`；
 - 把任务标题写入 `session/title`，在 Run/Task 结果中返回

@@ -23,6 +23,12 @@
         maxTokens: !!js Number(process.env.AGENT_SOCIETY_MAX_TOKENS ?? 8192)
 
     # Dispatch surface: expose Hub coordination tools as mcp__agent-society__*.
+    # This guard re-appends Hub tools after preset-level system-prompt
+    # filters (for example anchored-standard) so dispatch stays available.
+    - id: agent-society-hub-tool-guard
+      name: '@agent-society/dsh-agent-society/hub-tool-guard'
+      disabled: !!js process.env.AGENT_SOCIETY_HUB_MCP !== '1'
+
     - id: agent-society-hub-mcp
       name: '@deepseek-ai/dsh-mcp-client'
       disabled: !!js process.env.AGENT_SOCIETY_HUB_MCP !== '1'

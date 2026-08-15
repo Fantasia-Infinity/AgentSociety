@@ -15,6 +15,10 @@
       "types": "./lib/worker-plugin.d.ts",
       "default": "./lib/worker-plugin.js"
     },
+    "./hub-tool-guard": {
+      "types": "./lib/hub-tool-guard.d.ts",
+      "default": "./lib/hub-tool-guard.js"
+    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
