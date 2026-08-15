@@ -46,9 +46,29 @@ AGENT_SOCIETY_HUB_TOKEN='<token>' \
 node /path/to/dsh-TUI/bin/dsh-tui-local.js
 ```
 
+`./agent worker` 在检测到 `agent-society-worker` profile 时会默认启动
+上面的插件进程，并把 `AGENT_REMOTE_TOOL_POLICY` 映射为
+`AGENT_SOCIETY_TOOL_POLICY`；profile 不存在或 `dsh` 无法启动时自动回退到
+Pi worker。强制走 Pi 时设置：
+
+```bash
+AGENT_WORKER_RUNTIME=pi ./agent worker
+```
+
 dsh-TUI 的 `/resume` 使用 `ctx.agents.resume`；continuous worker 也会把
 `sessionId` 写入 `~/.dsh/agent-society-worker-sessions.json`，worker 重启后
-恢复同一 session。详见 [`dsh-plugin/README.md`](../dsh-plugin/README.md)。
+恢复同一 session。
+
+插件现在还会：
+
+- 按任务 `input.tool_policy`（回退到 `AGENT_SOCIETY_TOOL_POLICY`）映射
+  `full` / `read_only` / `no_tools`，并写入每个 session 的 `sandbox/mode`；
+- 把任务标题写入 `session/title`，在 Run/Task 结果中返回
+  `dsh_session_title`；
+- flush 后把 dsh transcript 作为 Hub artifact 挂到 Run/Task
+  （`dsh_transcript_artifact_id`），`./agent observe` 可读取本机文件 artifact。
+
+详见 [`dsh-plugin/README.md`](../dsh-plugin/README.md)。
 
 以下各节仍保留外部 JSON-RPC/headless 通道，作为过渡和兼容路径。
 

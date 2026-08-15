@@ -1,20 +1,23 @@
 /**
  * AgentSociety worker plugin for DeepSeek Harness.
  *
- * This is the first in-process dsh execution path: it claims tasks from the
- * AgentSociety Hub, drives dsh agents through `ctx.agents.create()` /
- * `ctx.agents.resume()`, and writes task results back to the Hub.
+ * In-process execution path: claims tasks from the AgentSociety Hub, drives
+ * dsh agents through `ctx.agents.create()` / `ctx.agents.resume()`, applies
+ * per-task tool policies, attaches durable transcripts as Hub artifacts, and
+ * writes task results back to the Hub.
  */
 import Schema from '@deepseek-ai/schemastery';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { SessionId } from '@deepseek-ai/dsh-session';
+import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy';
 import { hostname, userInfo } from 'node:os';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { dirname, isAbsolute, relative, resolve } from 'node:path';
-import { HubClient } from './hub-client.js';
+import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { HubClient, } from './hub-client.js';
 export const name = 'agent-society-worker';
-export const inject = ['timer', 'agents', 'sessionPersistence'];
+export const inject = ['timer', 'agents', 'sessions', 'sessionPersistence'];
 export const Config = Schema.object({
     hubUrl: Schema.string().required(false),
     hubTokenEnv: Schema.string().required(false),
@@ -26,19 +29,60 @@ export const Config = Schema.object({
     displayName: Schema.string().required(false),
     workspaceRoot: Schema.string().required(false),
     sessionMode: Schema.union(['per_task', 'continuous']).default('per_task'),
+    toolPolicy: Schema.union(['full', 'read_only', 'no_tools']).required(false),
     provider: Schema.string().required(false),
     model: Schema.string().required(false),
     maxTokens: Schema.number().min(1).required(false),
 });
-const TASK_PROMPT = (task, runId, cwd) => [
+const TASK_PROMPT = (task, runId, cwd, toolPolicy) => [
     'You are executing a durable task delegated through the AgentSociety Hub.',
     `Task ID: ${task.task_id}`,
     `Run ID: ${runId}`,
     `Objective: ${task.objective}`,
     `Configured workspace: ${cwd}`,
+    `Tool policy: ${toolPolicy}`,
     `Structured input: ${JSON.stringify(task.input)}`,
     'Complete the objective with the currently available tools. Return a concise result suitable for the delegating agent.',
 ].join('\n');
+/** Tool names mounted by the shipped dsh-base bundle. */
+const LOCAL_TOOL_NAMES = new Set([
+    'bash',
+    'create_goal',
+    'edit',
+    'exit_plan_mode',
+    'get_goal',
+    'glob',
+    'grep',
+    'interrupt_agent',
+    'job_kill',
+    'job_list',
+    'job_output',
+    'list_agents',
+    'ralph',
+    'read',
+    'read_image',
+    'send_message',
+    'skill',
+    'str_replace_editor',
+    'subagent',
+    'subagent_fork',
+    'todo_write',
+    'update_goal',
+    'web_search',
+    'workflow',
+    'write',
+]);
+/** Local tools that remain visible under `read_only` (plus external/MCP tools). */
+const READ_ONLY_TOOL_NAMES = new Set([
+    'read',
+    'read_image',
+    'glob',
+    'grep',
+    'web_search',
+]);
+/** Local tools that remain visible under `no_tools` (plus external/MCP tools). */
+const NO_TOOLS_ALLOWED_TOOL_NAMES = new Set(['web_search']);
+const MAX_INLINE_ARTIFACT_BYTES = 4 * 1024 * 1024;
 export async function apply(ctx, config) {
     const hubUrl = config.hubUrl ?? process.env.AGENT_SOCIETY_HUB_URL?.trim();
     const tokenEnv = config.hubTokenEnv ?? 'AGENT_SOCIETY_HUB_TOKEN';
@@ -47,6 +91,7 @@ export async function apply(ctx, config) {
         ctx.logger.warn('agent-society-worker: AGENT_SOCIETY_HUB_URL and AGENT_SOCIETY_HUB_TOKEN are required; worker stays idle');
         return;
     }
+    const toolPolicy = normalizeToolPolicy(config.toolPolicy ?? process.env.AGENT_SOCIETY_TOOL_POLICY) ?? 'full';
     const owner = stableSlug(userInfo().username);
     const host = stableSlug(hostname());
     const identity = {
@@ -62,6 +107,7 @@ export async function apply(ctx, config) {
         pollSeconds: config.pollSeconds ?? 20,
         leaseSeconds: config.leaseSeconds ?? 300,
         sessionMode: config.sessionMode ?? 'per_task',
+        toolPolicy,
         provider: config.provider ?? 'deepseek-official',
         model: config.model ?? process.env.DSH_MODEL ?? 'deepseek-v4-flash',
         maxTokens: config.maxTokens,
@@ -109,8 +155,17 @@ class WorkerLoop {
             principal_id: this.options.principalId,
             kind: 'agent',
             display_name: this.options.displayName,
-            capabilities: ['dsh', 'code', 'hub-task'],
-            metadata: { runtime: 'dsh', runtime_version: 'plugin-0.1.0' },
+            capabilities: [
+                'dsh',
+                'code',
+                'hub-task',
+                ...(this.options.toolPolicy === 'full' ? ['workspace-write'] : []),
+            ],
+            metadata: {
+                runtime: 'dsh',
+                runtime_version: 'plugin-0.2.0',
+                tool_policy: this.options.toolPolicy,
+            },
         });
         await this.hub.registerNode({
             node_id: this.options.nodeId,
@@ -120,6 +175,7 @@ class WorkerLoop {
             metadata: {
                 runtime: 'dsh',
                 workspace_root: this.options.workspaceRoot,
+                tool_policy: this.options.toolPolicy,
             },
         });
     }
@@ -203,29 +259,43 @@ class WorkerLoop {
         }
         const scopeKey = this.scopeKey(task, cwd);
         const continuous = this.options.sessionMode === 'continuous';
+        const resetRequested = task.input.reset_worker_session === true;
+        const toolPolicy = taskToolPolicy(task, this.options.toolPolicy);
         let active = continuous ? this.active.get(scopeKey) : undefined;
         let reused = Boolean(active);
-        if (continuous && active === undefined) {
-            const previous = readState(this.options.statePath)[scopeKey];
-            if (previous) {
-                try {
-                    const handle = await this.ctx.agents.resume({
-                        resumeSessionId: SessionId(previous),
-                        agentOptions: {
-                            provider: this.options.provider,
-                            model: this.options.model,
-                            ...(this.options.maxTokens === undefined
-                                ? {}
-                                : { maxTokens: this.options.maxTokens }),
-                        },
-                    });
-                    active = { handle, sessionId: previous, scopeKey };
-                    this.active.set(scopeKey, active);
-                    reused = true;
-                    this.ctx.logger.info(`agent-society-worker resumed session ${previous}`);
-                }
-                catch (error) {
-                    this.ctx.logger.warn(`agent-society-worker resume failed, creating a new session: ${message(error)}`);
+        if (continuous) {
+            if (active &&
+                (active.toolPolicy !== toolPolicy || resetRequested)) {
+                await active.handle.dispose();
+                this.active.delete(scopeKey);
+                active = undefined;
+                reused = false;
+            }
+            if (active === undefined) {
+                const previous = resetRequested
+                    ? undefined
+                    : readState(this.options.statePath)[scopeKey];
+                if (previous) {
+                    try {
+                        const handle = await this.ctx.agents.resume({
+                            resumeSessionId: SessionId(previous),
+                            agentOptions: {
+                                provider: this.options.provider,
+                                model: this.options.model,
+                                ...(this.options.maxTokens === undefined
+                                    ? {}
+                                    : { maxTokens: this.options.maxTokens }),
+                            },
+                            setup: agentSetup(toolPolicy),
+                        });
+                        active = { handle, sessionId: previous, scopeKey, toolPolicy };
+                        this.active.set(scopeKey, active);
+                        reused = true;
+                        this.ctx.logger.info(`agent-society-worker resumed session ${previous} (${toolPolicy})`);
+                    }
+                    catch (error) {
+                        this.ctx.logger.warn(`agent-society-worker resume failed, creating a new session: ${message(error)}`);
+                    }
                 }
             }
         }
@@ -241,12 +311,15 @@ class WorkerLoop {
                         : { maxTokens: this.options.maxTokens }),
                 },
                 meta: { cwd },
+                setup: agentSetup(toolPolicy),
             });
-            active = { handle, sessionId, scopeKey };
+            active = { handle, sessionId, scopeKey, toolPolicy };
             if (continuous)
                 this.active.set(scopeKey, active);
         }
         const agent = active.handle.agent;
+        applySandboxMode(this.ctx, agent.session, toolPolicy);
+        const title = this.applySessionTitle(agent.session, task);
         const running = {
             taskId: task.task_id,
             runId: run.run_id,
@@ -254,6 +327,8 @@ class WorkerLoop {
             agent,
             sessionId: active.sessionId,
             continuous,
+            toolPolicy,
+            title,
             cancelled: false,
         };
         this.running = running;
@@ -269,20 +344,28 @@ class WorkerLoop {
                 dsh_session_id: active.sessionId,
                 dsh_session_mode: continuous ? 'continuous' : 'per_task',
                 dsh_session_reused: reused,
+                dsh_tool_policy: toolPolicy,
+                ...(title === undefined ? {} : { dsh_session_title: title }),
                 adapter: 'agent-society-dsh-plugin',
             },
         });
         try {
             agent.followup(createUserMessage({
-                content: [{ type: 'text', text: TASK_PROMPT(task, run.run_id, cwd) }],
+                content: [{
+                        type: 'text',
+                        text: TASK_PROMPT(task, run.run_id, cwd, toolPolicy),
+                    }],
                 source: { kind: 'user' },
             }));
             await agent.whenIdle();
+            await this.flushSession(agent.session);
             if (running.cancelled) {
                 this.ctx.logger.info(`agent-society-worker cancelled ${task.task_id} in ${active.sessionId}`);
                 return;
             }
             const text = lastAssistantText(agent.session.events);
+            const finalTitle = this.currentSessionTitle(agent.session) ?? running.title;
+            const transcript = await this.attachTranscript(task, run.run_id, agent.session, finalTitle, toolPolicy);
             await this.hub.updateTask(task.task_id, {
                 run_id: run.run_id,
                 lease_token: claim.lease_token,
@@ -295,6 +378,11 @@ class WorkerLoop {
                     dsh_session_id: active.sessionId,
                     dsh_session_mode: continuous ? 'continuous' : 'per_task',
                     dsh_session_reused: reused,
+                    dsh_tool_policy: toolPolicy,
+                    ...(finalTitle === undefined ? {} : { dsh_session_title: finalTitle }),
+                    ...(transcript === undefined
+                        ? {}
+                        : { dsh_transcript_artifact_id: transcript.artifact_id }),
                 },
             });
             this.ctx.logger.info(`agent-society-worker completed ${task.task_id} in ${active.sessionId}`);
@@ -304,7 +392,16 @@ class WorkerLoop {
                 await this.markRunCancelled(running);
             }
             else {
-                await this.failTask(claim, message(error), active.sessionId);
+                await this.flushSession(agent.session);
+                const transcript = await this.attachTranscript(task, run.run_id, agent.session, running.title, toolPolicy);
+                await this.failTask(claim, message(error), {
+                    sessionId: active.sessionId,
+                    toolPolicy,
+                    ...(running.title === undefined ? {} : { title: running.title }),
+                    ...(transcript === undefined
+                        ? {}
+                        : { transcriptArtifactId: transcript.artifact_id }),
+                });
             }
         }
         finally {
@@ -322,35 +419,124 @@ class WorkerLoop {
             }
         }
     }
+    async flushSession(session) {
+        try {
+            await this.ctx.sessions.flush(session);
+        }
+        catch (error) {
+            this.ctx.logger.warn(`agent-society-worker session flush failed: ${message(error)}`);
+        }
+    }
+    applySessionTitle(session, task) {
+        const service = this.ctx.get('sessionTitle');
+        if (!service)
+            return undefined;
+        const existing = service.get(session)?.title;
+        if (existing)
+            return existing;
+        const title = taskTitle(task);
+        if (!title)
+            return existing;
+        try {
+            return service.rename(session, title).title;
+        }
+        catch (error) {
+            this.ctx.logger.warn(`agent-society-worker session title failed: ${message(error)}`);
+            return service.get(session)?.title;
+        }
+    }
+    currentSessionTitle(session) {
+        const service = this.ctx.get('sessionTitle');
+        return service?.get(session)?.title;
+    }
+    async attachTranscript(task, runId, session, title, toolPolicy) {
+        try {
+            const location = this.ctx.sessionPersistence.locate(session.header);
+            if (!location || !existsSync(location.path))
+                return undefined;
+            const name = `dsh-transcript-${runId}-${basename(location.path)}`;
+            const metadata = {
+                dsh_session_id: session.id,
+                dsh_tool_policy: toolPolicy,
+                ...(title === undefined ? {} : { dsh_session_title: title }),
+            };
+            let raw;
+            if (this.ctx.sessionPersistence.supportsRawArtifacts) {
+                raw = (await this.ctx.sessionPersistence.readRaw(session.id))?.content;
+            }
+            if (raw) {
+                const bytes = Buffer.byteLength(raw, 'utf8');
+                if (bytes > 0 && bytes <= MAX_INLINE_ARTIFACT_BYTES) {
+                    try {
+                        return await this.hub.addArtifact({
+                            name,
+                            media_type: 'application/x-ndjson',
+                            task_id: task.task_id,
+                            run_id: runId,
+                            created_by_actor_id: this.options.actorId,
+                            content_base64: Buffer.from(raw, 'utf8').toString('base64'),
+                            metadata,
+                        });
+                    }
+                    catch (error) {
+                        this.ctx.logger.warn(`agent-society-worker inline transcript artifact failed, attaching file reference: ${message(error)}`);
+                    }
+                }
+            }
+            return await this.hub.addArtifact({
+                name,
+                media_type: 'application/x-ndjson',
+                task_id: task.task_id,
+                run_id: runId,
+                created_by_actor_id: this.options.actorId,
+                uri: pathToFileURL(location.path).href,
+                metadata,
+            });
+        }
+        catch (error) {
+            this.ctx.logger.warn(`agent-society-worker transcript artifact failed: ${message(error)}`);
+            return undefined;
+        }
+    }
     async markRunCancelled(running) {
         try {
             await this.hub.updateRun(running.runId, {
                 status: 'cancelled',
                 error: 'cancelled by Hub',
-                result: { dsh_session_id: running.sessionId },
+                result: {
+                    dsh_session_id: running.sessionId,
+                    dsh_tool_policy: running.toolPolicy,
+                    ...(running.title === undefined ? {} : { dsh_session_title: running.title }),
+                },
             });
         }
         catch (error) {
             this.ctx.logger.warn(`agent-society-worker could not mark run ${running.runId} cancelled: ${message(error)}`);
         }
     }
-    async failTask(claim, messageText, sessionId) {
+    async failTask(claim, messageText, details = {}) {
         const { task, run } = claim;
+        const result = {
+            adapter: 'agent-society-dsh-plugin',
+            ...(details.sessionId ? { dsh_session_id: details.sessionId } : {}),
+            ...(details.toolPolicy === undefined ? {} : { dsh_tool_policy: details.toolPolicy }),
+            ...(details.title === undefined ? {} : { dsh_session_title: details.title }),
+            ...(details.transcriptArtifactId === undefined
+                ? {}
+                : { dsh_transcript_artifact_id: details.transcriptArtifactId }),
+        };
         try {
             await this.hub.updateTask(task.task_id, {
                 run_id: run.run_id,
                 lease_token: claim.lease_token,
                 status: 'failed',
                 message: messageText,
-                result: {
-                    ...(sessionId ? { dsh_session_id: sessionId } : {}),
-                    adapter: 'agent-society-dsh-plugin',
-                },
+                result,
             });
             await this.hub.updateRun(run.run_id, {
                 status: 'failed',
                 error: messageText,
-                result: { dsh_session_id: sessionId ?? '' },
+                result,
             });
         }
         catch (error) {
@@ -384,6 +570,70 @@ class WorkerLoop {
         }
         this.active.clear();
     }
+}
+function applySandboxMode(ctx, session, toolPolicy) {
+    const mode = toolPolicy === 'full' ? 'workspace-write' : 'read-only';
+    const sandboxPolicy = ctx.get('sandboxPolicy');
+    if (sandboxPolicy?.overrideOf(session) === mode)
+        return;
+    setSandboxMode(session, mode);
+}
+function agentSetup(toolPolicy) {
+    return (agentCtx) => {
+        applyToolPolicy(agentCtx, toolPolicy);
+    };
+}
+function applyToolPolicy(agentCtx, toolPolicy) {
+    if (toolPolicy === 'full')
+        return;
+    const tools = agentCtx.get('tools');
+    if (!tools || typeof tools.restrict !== 'function')
+        return;
+    const names = [...new Set(tools.schemas().map((schema) => schema.name))];
+    const allowed = toolPolicy === 'read_only'
+        ? READ_ONLY_TOOL_NAMES
+        : NO_TOOLS_ALLOWED_TOOL_NAMES;
+    const keep = names.filter((name) => allowed.has(name) || !LOCAL_TOOL_NAMES.has(name));
+    if (keep.length > 0) {
+        tools.restrict({ allow: keep });
+        return;
+    }
+    const deny = names.filter((name) => LOCAL_TOOL_NAMES.has(name));
+    if (deny.length > 0)
+        tools.restrict({ deny });
+}
+function taskToolPolicy(task, fallback) {
+    return normalizeToolPolicy(task.input.tool_policy) ?? fallback;
+}
+function normalizeToolPolicy(value) {
+    if (value === 'full' || value === 'read_only' || value === 'no_tools') {
+        return value;
+    }
+    return undefined;
+}
+function taskTitle(task) {
+    const requested = task.input.title;
+    if (typeof requested === 'string' && requested.trim()) {
+        return truncateTitleUtf8(requested.trim());
+    }
+    const objective = task.objective.replace(/\s+/gu, ' ').trim();
+    if (!objective)
+        return `Hub task ${task.task_id.slice(0, 8)}`;
+    return truncateTitleUtf8(objective);
+}
+function truncateTitleUtf8(value, maxBytes = 80) {
+    if (Buffer.byteLength(value, 'utf8') <= maxBytes)
+        return value;
+    let result = '';
+    let bytes = 0;
+    for (const character of value) {
+        const size = Buffer.byteLength(character, 'utf8');
+        if (bytes + size > maxBytes)
+            break;
+        result += character;
+        bytes += size;
+    }
+    return result.trim();
 }
 function lastAssistantText(events) {
     for (let index = events.length - 1; index >= 0; index -= 1) {

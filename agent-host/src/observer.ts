@@ -1,11 +1,12 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { stdin, stdout } from "node:process";
+import { fileURLToPath } from "node:url";
 
 import type { AgentHostConfig } from "./config.js";
 import type { HubClient } from "./hub-client.js";
 import { RunSessionRegistry, type RunSessionRecord } from "./run-registry.js";
-import type { HubRun, HubTask } from "./types.js";
+import type { HubArtifact, HubRun, HubTask } from "./types.js";
 
 interface Snapshot {
   local?: RunSessionRecord;
@@ -77,20 +78,56 @@ async function loadSnapshot(
     error = reason instanceof Error ? reason.message : String(reason);
   }
   const resolvedLocal = local ?? (run ? registry.get(run.run_id) : undefined);
+  const localTranscript = resolvedLocal
+    ? readTranscript(resolvedLocal, 18)
+    : [];
+  const hubTranscript = localTranscript.length
+    ? []
+    : await readHubTranscript(hub, task, run);
   return {
     ...(resolvedLocal ? { local: resolvedLocal } : {}),
     ...(run ? { run } : {}),
     ...(task ? { task } : {}),
-    transcript: resolvedLocal
-      ? readTranscript(resolvedLocal, 18)
-      : [],
+    transcript: localTranscript.length ? localTranscript : hubTranscript,
     ...(error ? { error } : {}),
   };
+}
+
+async function readHubTranscript(
+  hub: HubClient,
+  task: HubTask | undefined,
+  run: HubRun | undefined,
+): Promise<string[]> {
+  if (!task && !run) return [];
+  try {
+    const artifacts = await hub.listArtifacts();
+    const matching = artifacts.filter((artifact) => {
+      if (run && artifact.run_id === run.run_id) return true;
+      if (task && artifact.task_id === task.task_id) return true;
+      return false;
+    });
+    const transcript =
+      matching.find((artifact) => artifact.name.includes("transcript")) ??
+      matching[0];
+    if (!transcript) return [];
+    if (transcript.uri.startsWith("file://")) {
+      return readDshTranscript(fileURLToPath(transcript.uri), 18);
+    }
+    return [artifactLine(transcript)];
+  } catch {
+    return [];
+  }
+}
+
+function artifactLine(artifact: HubArtifact): string {
+  const name = artifact.name || "artifact";
+  return `Transcript artifact: ${name} (${artifact.uri})`;
 }
 
 function renderSnapshot(snapshot: Snapshot, clear: boolean): void {
   const width = Math.max(Math.min(stdout.columns || 100, 140), 60);
   const line = "─".repeat(width);
+  const title = sessionTitle(snapshot);
   const output = [
     ...(clear ? ["\x1b[H\x1b[2J"] : []),
     "Agent Session Observer",
@@ -101,18 +138,27 @@ function renderSnapshot(snapshot: Snapshot, clear: boolean): void {
     `Actor:    ${snapshot.run?.actor_id ?? "unknown"}`,
     `Node:     ${snapshot.run?.node_id ?? "unknown"}`,
     `Session:  ${snapshot.local?.sessionId ?? sessionId(snapshot.run) ?? "remote/not published"}`,
+    ...(title ? [`Title:    ${title}`] : []),
     `Workspace:${snapshot.local ? ` ${snapshot.local.cwd}` : " unavailable on this device"}`,
     line,
     `Objective: ${snapshot.task?.objective ?? snapshot.run?.objective ?? ""}`,
     line,
     ...(snapshot.transcript.length
       ? snapshot.transcript
-      : ["No local transcript is available on this device."]),
+      : ["No transcript is available yet. The dsh worker attaches one as a Hub artifact after the run settles."]),
     ...(snapshot.error ? [line, `Hub error: ${snapshot.error}`] : []),
     line,
     clear ? "Press q or Ctrl-C to leave. Active sessions refresh every second." : "",
   ];
   stdout.write(`${output.join("\n")}\n`);
+}
+
+function sessionTitle(snapshot: Snapshot): string | undefined {
+  for (const result of [snapshot.run?.result, snapshot.task?.result]) {
+    const value = result?.dsh_session_title;
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
 }
 
 export function readTranscript(

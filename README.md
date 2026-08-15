@@ -128,8 +128,10 @@ AgentSociety 不要求所有设备都用同一种 Agent：
   Codex GUI 的 “AgentHub” 项目里。
 - **DeepSeek Harness（新主路径）**：通过本地 dsh bundle `dsh-plugin/`
   在 dsh 进程内执行 Hub 任务，支持 `ctx.agents.resume` 跨进程恢复和
-  dsh-TUI 交互；兼容入口仍保留 `./agent bridge --adapter dsh` 和
-  `./agent dsh-worker`，见 [集成文档](docs/deepseek-harness.md)。
+  dsh-TUI 交互。安装 profile 后 `./agent worker` 默认使用该路径，Pi
+  自动作为回退（`AGENT_WORKER_RUNTIME=pi` 可强制回退）；兼容入口仍保留
+  `./agent bridge --adapter dsh` 和 `./agent dsh-worker`，见
+  [集成文档](docs/deepseek-harness.md)。
 - **Generic**：任何带非交互 CLI 的工具都可以通过
   [适配器规范](docs/agent-adapters.md) 接入。
 

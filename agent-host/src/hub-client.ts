@@ -117,6 +117,13 @@ export class HubClient {
     return response.run;
   }
 
+  async listArtifacts(limit = 200): Promise<HubArtifact[]> {
+    const response = await this.request<{ artifacts: HubArtifact[] }>(
+      `/v1/hub/artifacts?limit=${Math.min(Math.max(limit, 1), 500)}`,
+    );
+    return response.artifacts;
+  }
+
   async createTask(item: {
     principal_id: string;
     delegator_actor_id: string;

@@ -56,6 +56,10 @@ export class HubClient {
             body: item,
         });
     }
+    async addArtifact(item) {
+        const response = await this.request("/v1/hub/artifacts", { method: "POST", body: item });
+        return response.artifact;
+    }
     async updateRun(runId, item) {
         await this.request(`/v1/hub/runs/${encodeURIComponent(runId)}/updates`, {
             method: "POST",

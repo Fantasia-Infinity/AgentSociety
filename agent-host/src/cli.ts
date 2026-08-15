@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import { userInfo } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { Writable } from "node:stream";
 
 import { sanitizedChildEnv } from "./child-env.js";
@@ -71,7 +71,10 @@ async function main(): Promise<void> {
     return;
   }
 
-  const config = loadConfig();
+  const pluginWorkerDefault =
+    command === "worker" &&
+    process.env.AGENT_WORKER_RUNTIME?.trim() !== "pi";
+  const config = loadConfig({ allowDshPlugin: pluginWorkerDefault });
   const hubRuntimeDisabled = process.env.AGENT_HUB_RUNTIME_DISABLED === "1";
   if (
     process.env.AGENT_HUB_RECEIVE_DISABLED?.trim() === "1" &&
@@ -134,7 +137,10 @@ async function main(): Promise<void> {
   ) {
     if (dshReceivingCommand) {
       await registerDshHost(workerConfig, hub);
-    } else if (!dshDispatchCommand) {
+    } else if (
+      !dshDispatchCommand &&
+      !(command === "worker" && config.workerRuntime === "dsh-plugin")
+    ) {
       await registerHost(config, hub);
     }
   }
@@ -321,6 +327,16 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === "worker" && config.workerRuntime === "dsh-plugin") {
+    const started = await runDshPluginWorker(config, hub!);
+    if (started) return;
+    console.warn(
+      "DeepSeek Harness plugin worker is unavailable; falling back to Pi. " +
+        "Run scripts/install-dsh-plugin.sh to install the dsh worker profile.",
+    );
+    await registerHost(config, hub!);
+  }
+
   const workerHub = hub!;
   const engine = await PiAgentEngine.create(config, workerHub);
   const worker = new TaskWorker(config, workerHub, engine);
@@ -359,6 +375,99 @@ async function main(): Promise<void> {
     return;
   }
   throw new Error(`Unknown command: ${command}`);
+}
+
+async function runDshPluginWorker(
+  config: AgentHostConfig,
+  hub: HubClient,
+): Promise<boolean> {
+  const profile = config.dshPluginProfile ?? "agent-society-worker";
+  const dshHome =
+    process.env.DSH_HOME?.trim() || resolve(homedir(), ".dsh");
+  const profilePackage = resolve(
+    dshHome,
+    "profiles",
+    profile,
+    "package.json",
+  );
+  if (!existsSync(profilePackage)) {
+    console.warn(
+      `dsh plugin profile "${profile}" not found at ${profilePackage}.`,
+    );
+    return false;
+  }
+  const command = [
+    ...(config.dshCommand ?? ["dsh"]),
+    "--profile",
+    profile,
+  ];
+  console.log(
+    `Starting DeepSeek Harness plugin worker: ${command.join(" ")}`,
+  );
+  const model =
+    config.dshModel ?? config.remoteModel ?? "deepseek-v4-flash";
+  const child = spawn(command[0]!, command.slice(1), {
+    stdio: "inherit",
+    env: {
+      ...sanitizedChildEnv(process.env),
+      AGENT_SOCIETY_WORKER: "1",
+      AGENT_SOCIETY_HUB_URL: config.hubUrl!,
+      AGENT_SOCIETY_HUB_TOKEN: hub.nodeToken,
+      AGENT_SOCIETY_WORKSPACE_ROOT: config.workspaceRoot,
+      AGENT_SOCIETY_SESSION_MODE: config.workerSessionMode,
+      AGENT_SOCIETY_TOOL_POLICY: config.remoteToolPolicy,
+      AGENT_SOCIETY_POLL_SECONDS: String(config.pollSeconds),
+      AGENT_SOCIETY_LEASE_SECONDS: String(config.leaseSeconds),
+      AGENT_SOCIETY_ACTOR_ID: config.actorId,
+      AGENT_SOCIETY_NODE_ID: config.nodeId,
+      AGENT_SOCIETY_PRINCIPAL_ID: config.principalId,
+      AGENT_SOCIETY_DISPLAY_NAME: config.actorDisplayName,
+      AGENT_SOCIETY_PROVIDER: config.dshProvider ?? "deepseek-official",
+      AGENT_SOCIETY_MODEL: model,
+      DSH_MODEL: model,
+      AGENT_SOCIETY_MAX_TOKENS: String(
+        config.dshMaxTokens ?? config.maxOutputTokens,
+      ),
+      AGENT_SOCIETY_SESSION_COMPRESSION:
+        config.dshSessionCompression ?? "none",
+      AGENT_SOCIETY_HUB_MCP: config.dshHubMcp === false ? "0" : "1",
+    },
+  });
+  return await new Promise<boolean>((resolveStart) => {
+    let settled = false;
+    const finish = (started: boolean): void => {
+      if (settled) return;
+      settled = true;
+      resolveStart(started);
+    };
+    const forwardSignal = (signal: NodeJS.Signals): void => {
+      child.kill(signal);
+    };
+    process.once("SIGINT", forwardSignal);
+    process.once("SIGTERM", forwardSignal);
+    child.once("error", (error) => {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") {
+        console.warn(
+          `Could not start ${command[0]!}: ${error.message}.`,
+        );
+        finish(false);
+        return;
+      }
+      console.error(`DeepSeek Harness plugin worker failed: ${error.message}`);
+      process.exitCode = 1;
+      finish(true);
+    });
+    child.once("exit", (code, signal) => {
+      process.removeListener("SIGINT", forwardSignal);
+      process.removeListener("SIGTERM", forwardSignal);
+      if (code) process.exitCode = code;
+      if (signal && ["SIGINT", "SIGTERM"].includes(signal) === false) {
+        process.exitCode = 1;
+      }
+      finish(true);
+    });
+  });
 }
 
 function adapterArgument(argv: string[]): string | undefined {

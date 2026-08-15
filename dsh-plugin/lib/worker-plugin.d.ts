@@ -1,14 +1,16 @@
 /**
  * AgentSociety worker plugin for DeepSeek Harness.
  *
- * This is the first in-process dsh execution path: it claims tasks from the
- * AgentSociety Hub, drives dsh agents through `ctx.agents.create()` /
- * `ctx.agents.resume()`, and writes task results back to the Hub.
+ * In-process execution path: claims tasks from the AgentSociety Hub, drives
+ * dsh agents through `ctx.agents.create()` / `ctx.agents.resume()`, applies
+ * per-task tool policies, attaches durable transcripts as Hub artifacts, and
+ * writes task results back to the Hub.
  */
 import type { Context } from '@deepseek-ai/cordis';
 import Schema from '@deepseek-ai/schemastery';
 export declare const name = "agent-society-worker";
 export declare const inject: string[];
+export type ToolPolicy = 'full' | 'read_only' | 'no_tools';
 export interface Config {
     hubUrl?: string;
     hubTokenEnv?: string;
@@ -20,6 +22,7 @@ export interface Config {
     displayName?: string;
     workspaceRoot?: string;
     sessionMode?: 'per_task' | 'continuous';
+    toolPolicy?: ToolPolicy;
     provider?: string;
     model?: string;
     maxTokens?: number;

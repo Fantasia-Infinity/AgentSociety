@@ -42,6 +42,10 @@ export interface AgentHostConfig {
   workerSessionMode: WorkerSessionMode;
   workerSessionMaxTasks: number;
   workerSessionMaxAgeHours: number;
+  /** Worker process runtime: in-process dsh bundle or the legacy Pi engine. */
+  workerRuntime?: "dsh-plugin" | "pi";
+  /** dsh profile used by the plugin worker. */
+  dshPluginProfile?: string;
   remoteToolPolicy: RemoteToolPolicy;
   remotePiResourcePolicy: RemotePiResourcePolicy;
   selfUpdateEnabled: boolean;
@@ -225,10 +229,22 @@ function isBannedRemoteHost(host: string): boolean {
   return false;
 }
 
-export function loadConfig(): AgentHostConfig {
+export function loadConfig(
+  options: { allowDshPlugin?: boolean } = {},
+): AgentHostConfig {
   loadProjectEnv(process.env.AGENT_ENV_FILE);
   const host = stableSlug(hostname());
   const owner = stableSlug(userInfo().username);
+  const rawWorkerRuntime =
+    process.env.AGENT_WORKER_RUNTIME?.trim() ||
+    (options.allowDshPlugin ? "dsh-plugin" : undefined);
+  let workerRuntime: "dsh-plugin" | "pi" | undefined;
+  if (rawWorkerRuntime) {
+    if (!["dsh-plugin", "pi"].includes(rawWorkerRuntime)) {
+      throw new Error("AGENT_WORKER_RUNTIME must be dsh-plugin or pi");
+    }
+    workerRuntime = rawWorkerRuntime as "dsh-plugin" | "pi";
+  }
   const remoteToolPolicy = (process.env.AGENT_REMOTE_TOOL_POLICY ??
     "full") as RemoteToolPolicy;
   if (!["no_tools", "read_only", "full"].includes(remoteToolPolicy)) {
@@ -335,7 +351,14 @@ export function loadConfig(): AgentHostConfig {
     process.env.AGENT_DSH_CONFIG?.trim() ||
       process.env.AGENT_DSH_RUNTIME_BIN?.trim(),
   );
-  if (!piProvider && (!remoteBaseUrl || !remoteModel) && !dshConfigured) {
+  const dshPluginConfigured =
+    options.allowDshPlugin === true && workerRuntime === "dsh-plugin";
+  if (
+    !piProvider &&
+    (!remoteBaseUrl || !remoteModel) &&
+    !dshConfigured &&
+    !dshPluginConfigured
+  ) {
     throw new Error(
       "Configure PI_PROVIDER/PI_MODEL, a remote LLM_BASE_URL/LLM_MODEL, or the DeepSeek Harness runtime (AGENT_DSH_CONFIG/AGENT_DSH_RUNTIME_BIN)",
     );
@@ -401,6 +424,9 @@ export function loadConfig(): AgentHostConfig {
     ),
     workerSupervised: process.env.AGENT_WORKER_SUPERVISED === "1",
     workerSessionMode,
+    ...(workerRuntime ? { workerRuntime } : {}),
+    dshPluginProfile:
+      process.env.AGENT_DSH_PLUGIN_PROFILE?.trim() || "agent-society-worker",
     workerSessionMaxTasks: Math.min(
       10_000,
       Math.floor(nonNegativeNumber("AGENT_WORKER_SESSION_MAX_TASKS", 0)),

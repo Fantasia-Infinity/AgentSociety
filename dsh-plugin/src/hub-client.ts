@@ -45,6 +45,19 @@ export interface HubTaskControl {
   lease_token: string;
 }
 
+export interface HubArtifact {
+  artifact_id: string;
+  task_id: string | null;
+  run_id: string | null;
+  name: string;
+  media_type: string;
+  uri: string;
+  sha256: string | null;
+  size_bytes: number | null;
+  created_by_actor_id: string;
+  metadata: Record<string, unknown>;
+}
+
 export interface HubClaim {
   task: HubTask;
   run: HubRun;
@@ -162,6 +175,25 @@ export class HubClient {
       method: "POST",
       body: item,
     });
+  }
+
+  async addArtifact(item: {
+    name: string;
+    media_type: string;
+    task_id?: string;
+    run_id?: string;
+    created_by_actor_id: string;
+    content_base64?: string;
+    uri?: string;
+    sha256?: string;
+    size_bytes?: number;
+    metadata?: Record<string, unknown>;
+  }): Promise<HubArtifact> {
+    const response = await this.request<{ artifact: HubArtifact }>(
+      "/v1/hub/artifacts",
+      { method: "POST", body: item },
+    );
+    return response.artifact;
   }
 
   async updateRun(

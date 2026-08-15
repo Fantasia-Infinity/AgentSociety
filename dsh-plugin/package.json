@@ -1,6 +1,6 @@
 {
   "name": "@agent-society/dsh-agent-society",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "AgentSociety Hub worker and dispatch tools as a DeepSeek Harness bundle",
   "license": "MIT",
   "type": "module",
@@ -34,6 +34,7 @@
     "@deepseek-ai/cordis-plugin-timer": "^1.1.3",
     "@deepseek-ai/dsh-agent": "^0.0.1-rc.5",
     "@deepseek-ai/dsh-llm": "^0.0.1-rc.5",
+    "@deepseek-ai/dsh-sandbox-policy": "^0.0.1-rc.5",
     "@deepseek-ai/dsh-session": "^0.0.1-rc.5",
     "@deepseek-ai/dsh-session-persistence": "^0.0.1-rc.5",
     "@deepseek-ai/schemastery": "^3.18.1"
@@ -43,8 +44,10 @@
     "@deepseek-ai/cordis-plugin-timer": "1.1.3",
     "@deepseek-ai/dsh-agent": "0.0.1-rc.5",
     "@deepseek-ai/dsh-llm": "0.0.1-rc.5",
+    "@deepseek-ai/dsh-sandbox-policy": "^0.0.1-rc.5",
     "@deepseek-ai/dsh-session": "0.0.1-rc.5",
     "@deepseek-ai/dsh-session-persistence": "0.0.1-rc.5",
+    "@deepseek-ai/dsh-session-title": "^0.0.1-rc.5",
     "@deepseek-ai/schemastery": "3.18.1",
     "@types/node": "^22.0.0",
     "typescript": "^5.9.3"

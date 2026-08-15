@@ -13,11 +13,13 @@
         leaseSeconds: !!js Number(process.env.AGENT_SOCIETY_LEASE_SECONDS ?? 300)
         workspaceRoot: !!js process.env.AGENT_SOCIETY_WORKSPACE_ROOT ?? process.cwd()
         sessionMode: !!js process.env.AGENT_SOCIETY_SESSION_MODE ?? 'per_task'
+        toolPolicy: !!js process.env.AGENT_SOCIETY_TOOL_POLICY ?? 'full'
         actorId: !!js process.env.AGENT_SOCIETY_ACTOR_ID
         nodeId: !!js process.env.AGENT_SOCIETY_NODE_ID
         principalId: !!js process.env.AGENT_SOCIETY_PRINCIPAL_ID
+        displayName: !!js process.env.AGENT_SOCIETY_DISPLAY_NAME
         provider: !!js process.env.AGENT_SOCIETY_PROVIDER ?? 'deepseek-official'
-        model: !!js process.env.DSH_MODEL ?? 'deepseek-v4-flash'
+        model: !!js process.env.DSH_MODEL ?? process.env.AGENT_SOCIETY_MODEL ?? 'deepseek-v4-flash'
         maxTokens: !!js Number(process.env.AGENT_SOCIETY_MAX_TOKENS ?? 8192)
 
     # Dispatch surface: expose Hub coordination tools as mcp__agent-society__*.
@@ -33,3 +35,18 @@
         failOnStartupError: false
         reconnect:
           enabled: true
+
+# Readable transcripts: the worker attaches these to Hub runs and `agent
+# observe` reads them locally. zstd remains available by setting
+# AGENT_SOCIETY_SESSION_COMPRESSION=zstd.
+- id: session-persistence-jsonl
+  config:
+    root: !!js dshHomePath('sessions')
+    compression: !!js process.env.AGENT_SOCIETY_SESSION_COMPRESSION || 'none'
+
+# Process-wide default matches the worker policy. Per-task `input.tool_policy`
+# overrides are appended as `sandbox/mode` events on the session itself.
+- id: sandbox-policy
+  config:
+    mode: !!js "(process.env.AGENT_SOCIETY_TOOL_POLICY === 'full' ? 'workspace-write' : 'read-only')"
+    workspaceRoot: !!js process.env.AGENT_SOCIETY_WORKSPACE_ROOT ?? process.cwd()
