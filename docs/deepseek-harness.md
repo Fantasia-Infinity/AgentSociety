@@ -11,6 +11,47 @@ AgentSociety 与 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harn
    - `./agent dsh-worker`：通过 dsh SDK JSON-RPC runtime 常驻执行 Hub 任务，
      支持文本流式、工具策略映射和同进程连续会话。
 
+## 新的主路径：dsh 进程内插件
+
+AgentSociety 现在提供一个本地 dsh bundle：`dsh-plugin/`
+（`@agent-society/dsh-agent-society`）。它直接运行在 dsh 进程内，使用
+`ctx.agents.create()` / `ctx.agents.resume()`，因此具备跨进程 resume，
+也不再受 JSON-RPC SDK 的 cancel/steer 限制。
+
+安装：
+
+```bash
+sh scripts/install-dsh-plugin.sh
+```
+
+Worker profile：
+
+```bash
+AGENT_SOCIETY_WORKER=1 \
+AGENT_SOCIETY_HUB_URL=http://127.0.0.1:8090 \
+AGENT_SOCIETY_HUB_TOKEN='<token>' \
+AGENT_SOCIETY_WORKSPACE_ROOT=/path/to/workspaces \
+dsh --profile agent-society-worker
+```
+
+dsh-TUI 本地集成（不改 dsh-TUI）：
+
+```bash
+mkdir -p ~/.dsh/plugins
+ln -s /path/to/AgentSociety/dsh-plugin ~/.dsh/plugins/agent-society
+
+AGENT_SOCIETY_HUB_MCP=1 \
+AGENT_SOCIETY_HUB_URL=http://127.0.0.1:8090 \
+AGENT_SOCIETY_HUB_TOKEN='<token>' \
+node /path/to/dsh-TUI/bin/dsh-tui-local.js
+```
+
+dsh-TUI 的 `/resume` 使用 `ctx.agents.resume`；continuous worker 也会把
+`sessionId` 写入 `~/.dsh/agent-society-worker-sessions.json`，worker 重启后
+恢复同一 session。详见 [`dsh-plugin/README.md`](../dsh-plugin/README.md)。
+
+以下各节仍保留外部 JSON-RPC/headless 通道，作为过渡和兼容路径。
+
 ## 版本
 
 已针对 `@deepseek-ai/dsh` `0.1.0-rc.5` 实现。DeepSeek Harness 仍是 developer
@@ -106,14 +147,12 @@ AGENT_DSH_HUB_MCP=0      # 显式关闭 dsh worker 内的 Hub MCP 工具
 
 ### 已知边界
 
-- dsh SDK 没有协议级 prompt cancel，取消任务会终止该 workspace 的 runtime
-  并重启。
-- dsh SDK 不能跨进程恢复 session；`continuous` 模式只在同一 runtime 进程内
-  复用上下文，worker 重启后会新建 session。
-- dsh runtime 当前只支持一个 workspace per process；AgentSociety 会按
-  workspace 维护独立 runtime。
-- dsh 执行端不应用 Hub steer/follow-up；worker 领取到 controls 后会调用
-  `/controls/{id}/unsupported`，把状态明确记录为 `unsupported` 并写入事件流。
+- **进程内插件**使用 `ctx.agents.resume`，支持跨进程 continuous session；
+  `agent.steer` / `agent.followup` / `agent.cancel` 也可用。当前
+  `dsh-plugin` 第一版已实现 resume，controls/cancel 的完整 Hub ACK 闭环仍
+  在下一阶段接入。
+- **外部 JSON-RPC/headless 通道**仍受 dsh wire protocol 限制：无协议级
+  cancel，不能跨进程 resume。
 - `agent observe` 支持 dsh session transcript。dsh worker 默认使用未压缩
   JSONL（`AGENT_DSH_SESSION_COMPRESSION=none`），可直接读取。
 

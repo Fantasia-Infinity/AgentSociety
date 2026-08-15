@@ -126,9 +126,10 @@ AgentSociety 不要求所有设备都用同一种 Agent：
 - **Codex / OpenCode**：通过通用 Bridge 作为 Hub worker
   （`./agent bridge --adapter codex`），支持跨任务连续会话，任务会出现在
   Codex GUI 的 “AgentHub” 项目里。
-- **DeepSeek Harness**：`./agent bridge --adapter dsh` 或
-  `./agent dsh-worker`，也可通过 `./agent dsh-dispatch` 在 dsh Web 会话中
-  使用 Hub MCP 工具，见 [集成文档](docs/deepseek-harness.md)。
+- **DeepSeek Harness（新主路径）**：通过本地 dsh bundle `dsh-plugin/`
+  在 dsh 进程内执行 Hub 任务，支持 `ctx.agents.resume` 跨进程恢复和
+  dsh-TUI 交互；兼容入口仍保留 `./agent bridge --adapter dsh` 和
+  `./agent dsh-worker`，见 [集成文档](docs/deepseek-harness.md)。
 - **Generic**：任何带非交互 CLI 的工具都可以通过
   [适配器规范](docs/agent-adapters.md) 接入。
 

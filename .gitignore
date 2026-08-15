@@ -23,6 +23,7 @@ models/
 *.pth
 *.safetensors
 agent-host/node_modules/
+dsh-plugin/node_modules/
 agent-host/dist/
 agent-host/.agent-sessions/
 agent-host/.setup-complete

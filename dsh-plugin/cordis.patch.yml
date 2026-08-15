@@ -1,0 +1,35 @@
+# AgentSociety dsh bundle.
+#
+# Worker row: enabled with AGENT_SOCIETY_WORKER=1. TUI/web profiles without
+# that flag load only the Hub MCP tools below.
+- insert:
+    - id: agent-society-worker
+      name: '@agent-society/dsh-agent-society/worker'
+      disabled: !!js process.env.AGENT_SOCIETY_WORKER !== '1'
+      config:
+        hubUrl: !!js process.env.AGENT_SOCIETY_HUB_URL
+        hubTokenEnv: 'AGENT_SOCIETY_HUB_TOKEN'
+        pollSeconds: !!js Number(process.env.AGENT_SOCIETY_POLL_SECONDS ?? 20)
+        leaseSeconds: !!js Number(process.env.AGENT_SOCIETY_LEASE_SECONDS ?? 300)
+        workspaceRoot: !!js process.env.AGENT_SOCIETY_WORKSPACE_ROOT ?? process.cwd()
+        sessionMode: !!js process.env.AGENT_SOCIETY_SESSION_MODE ?? 'per_task'
+        actorId: !!js process.env.AGENT_SOCIETY_ACTOR_ID
+        nodeId: !!js process.env.AGENT_SOCIETY_NODE_ID
+        principalId: !!js process.env.AGENT_SOCIETY_PRINCIPAL_ID
+        provider: !!js process.env.AGENT_SOCIETY_PROVIDER ?? 'deepseek-official'
+        model: !!js process.env.DSH_MODEL ?? 'deepseek-v4-flash'
+        maxTokens: !!js Number(process.env.AGENT_SOCIETY_MAX_TOKENS ?? 8192)
+
+    # Dispatch surface: expose Hub coordination tools as mcp__agent-society__*.
+    - id: agent-society-hub-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      disabled: !!js process.env.AGENT_SOCIETY_HUB_MCP !== '1'
+      config:
+        transport: streamable-http
+        serverName: agent-society
+        url: !!js '`${(process.env.AGENT_SOCIETY_HUB_URL ?? "http://127.0.0.1:8090").replace(/\/$/u, "")}/mcp`'
+        headers:
+          Authorization: !!js '`Bearer ${process.env.AGENT_SOCIETY_HUB_TOKEN ?? ""}`'
+        failOnStartupError: false
+        reconnect:
+          enabled: true
