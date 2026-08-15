@@ -9,6 +9,9 @@ Current scope:
   - `ctx.agents.resume()` for continuous sessions, including across process
     restarts.
   - Hub task claim / lease renewal via heartbeat / result reporting.
+  - Hub controls: `agent.steer()` for `steer`, `agent.followup()` for
+    `follow_up`, then Hub ACK.
+  - Hub cancellation: `agent.cancel()` and cancelled Run reporting.
 - `agent-society-hub-mcp`: optional `mcp__agent-society__hub_*` dispatch tools.
 
 The Python Hub and its REST contract remain unchanged.

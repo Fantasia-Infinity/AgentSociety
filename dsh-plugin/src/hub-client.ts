@@ -34,6 +34,17 @@ export interface HubRun {
   result: Record<string, unknown>;
 }
 
+export interface HubTaskControl {
+  control_id: string;
+  task_id: string;
+  run_id: string | null;
+  kind: "steer" | "follow_up";
+  message: string;
+  actor_id: string;
+  status: "pending" | "leased" | "delivered" | "unsupported";
+  lease_token: string;
+}
+
 export interface HubClaim {
   task: HubTask;
   run: HubRun;
@@ -105,6 +116,36 @@ export class HubClient {
       { method: "POST", body: item },
     );
     return response.claim;
+  }
+
+  async getTask(taskId: string): Promise<HubTask> {
+    const response = await this.request<{ task: HubTask }>(
+      `/v1/hub/tasks/${encodeURIComponent(taskId)}`,
+      { method: "GET" },
+    );
+    return response.task;
+  }
+
+  async claimTaskControls(
+    taskId: string,
+    item: { run_id: string; lease_token: string },
+  ): Promise<HubTaskControl[]> {
+    const response = await this.request<{ controls: HubTaskControl[] }>(
+      `/v1/hub/tasks/${encodeURIComponent(taskId)}/controls/claim`,
+      { method: "POST", body: item },
+    );
+    return response.controls;
+  }
+
+  async acknowledgeTaskControl(
+    taskId: string,
+    controlId: string,
+    item: { run_id: string; lease_token: string },
+  ): Promise<void> {
+    await this.request(
+      `/v1/hub/tasks/${encodeURIComponent(taskId)}/controls/${encodeURIComponent(controlId)}/ack`,
+      { method: "POST", body: item },
+    );
   }
 
   async updateTask(

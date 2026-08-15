@@ -148,9 +148,9 @@ AGENT_DSH_HUB_MCP=0      # 显式关闭 dsh worker 内的 Hub MCP 工具
 ### 已知边界
 
 - **进程内插件**使用 `ctx.agents.resume`，支持跨进程 continuous session；
-  `agent.steer` / `agent.followup` / `agent.cancel` 也可用。当前
-  `dsh-plugin` 第一版已实现 resume，controls/cancel 的完整 Hub ACK 闭环仍
-  在下一阶段接入。
+  `agent.steer` / `agent.followup` / `agent.cancel` 已接入 Hub：
+  steer/follow-up 会 ACK 为 delivered，任务取消会 abort 当前 turn 并记录
+  cancelled Run。
 - **外部 JSON-RPC/headless 通道**仍受 dsh wire protocol 限制：无协议级
   cancel，不能跨进程 resume。
 - `agent observe` 支持 dsh session transcript。dsh worker 默认使用未压缩

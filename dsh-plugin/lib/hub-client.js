@@ -39,6 +39,17 @@ export class HubClient {
         const response = await this.request("/v1/hub/tasks/claim", { method: "POST", body: item });
         return response.claim;
     }
+    async getTask(taskId) {
+        const response = await this.request(`/v1/hub/tasks/${encodeURIComponent(taskId)}`, { method: "GET" });
+        return response.task;
+    }
+    async claimTaskControls(taskId, item) {
+        const response = await this.request(`/v1/hub/tasks/${encodeURIComponent(taskId)}/controls/claim`, { method: "POST", body: item });
+        return response.controls;
+    }
+    async acknowledgeTaskControl(taskId, controlId, item) {
+        await this.request(`/v1/hub/tasks/${encodeURIComponent(taskId)}/controls/${encodeURIComponent(controlId)}/ack`, { method: "POST", body: item });
+    }
     async updateTask(taskId, item) {
         await this.request(`/v1/hub/tasks/${encodeURIComponent(taskId)}/updates`, {
             method: "POST",

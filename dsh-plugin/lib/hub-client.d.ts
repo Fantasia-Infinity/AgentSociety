@@ -25,6 +25,16 @@ export interface HubRun {
     status: "active" | "completed" | "failed" | "cancelled";
     result: Record<string, unknown>;
 }
+export interface HubTaskControl {
+    control_id: string;
+    task_id: string;
+    run_id: string | null;
+    kind: "steer" | "follow_up";
+    message: string;
+    actor_id: string;
+    status: "pending" | "leased" | "delivered" | "unsupported";
+    lease_token: string;
+}
 export interface HubClaim {
     task: HubTask;
     run: HubRun;
@@ -67,6 +77,15 @@ export declare class HubClient {
         wait_seconds: number;
         lease_seconds: number;
     }): Promise<HubClaim | null>;
+    getTask(taskId: string): Promise<HubTask>;
+    claimTaskControls(taskId: string, item: {
+        run_id: string;
+        lease_token: string;
+    }): Promise<HubTaskControl[]>;
+    acknowledgeTaskControl(taskId: string, controlId: string, item: {
+        run_id: string;
+        lease_token: string;
+    }): Promise<void>;
     updateTask(taskId: string, item: {
         run_id: string;
         lease_token: string;

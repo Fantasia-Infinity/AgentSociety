@@ -71,9 +71,14 @@ export async function apply(ctx, config) {
     const timer = ctx.setInterval(() => {
         void worker.tick();
     }, worker.pollSeconds * 1_000);
+    const maintenance = ctx.setInterval(() => {
+        void worker.maintain();
+    }, 2_000);
     void worker.tick();
+    void worker.maintain();
     ctx.effect(() => () => {
         timer();
+        maintenance();
         void worker.dispose();
     });
 }
@@ -84,6 +89,7 @@ class WorkerLoop {
     active = new Map();
     busy = false;
     disposed = false;
+    running;
     constructor(ctx, hub, options) {
         this.ctx = ctx;
         this.hub = hub;
@@ -122,7 +128,6 @@ class WorkerLoop {
             return;
         this.busy = true;
         try {
-            await this.hub.heartbeat(this.options.nodeId);
             const claim = await this.hub.claimTask({
                 actor_id: this.options.actorId,
                 node_id: this.options.nodeId,
@@ -137,6 +142,53 @@ class WorkerLoop {
         }
         finally {
             this.busy = false;
+        }
+    }
+    async maintain() {
+        if (this.disposed)
+            return;
+        try {
+            await this.hub.heartbeat(this.options.nodeId);
+            const running = this.running;
+            if (!running)
+                return;
+            await this.hub.updateTask(running.taskId, {
+                run_id: running.runId,
+                lease_token: running.leaseToken,
+                status: 'working',
+                message: 'DeepSeek Harness session active',
+            });
+            const task = await this.hub.getTask(running.taskId);
+            if (task.status === 'cancelled') {
+                running.cancelled = true;
+                running.agent.cancel({ kind: 'hook', reason: 'hub-task-cancelled' });
+                await this.markRunCancelled(running);
+                return;
+            }
+            const controls = await this.hub.claimTaskControls(running.taskId, {
+                run_id: running.runId,
+                lease_token: running.leaseToken,
+            });
+            for (const control of controls) {
+                const message = createUserMessage({
+                    content: [{ type: 'text', text: control.message }],
+                    source: { kind: 'user' },
+                });
+                if (control.kind === 'steer') {
+                    running.agent.steer(message);
+                }
+                else {
+                    running.agent.followup(message);
+                }
+                await this.hub.acknowledgeTaskControl(running.taskId, control.control_id, {
+                    run_id: running.runId,
+                    lease_token: control.lease_token,
+                });
+                this.ctx.logger.info(`agent-society-worker applied ${control.kind} control ${control.control_id}`);
+            }
+        }
+        catch (error) {
+            this.ctx.logger.warn(`agent-society-worker maintenance failed: ${message(error)}`);
         }
     }
     async execute(claim) {
@@ -195,6 +247,16 @@ class WorkerLoop {
                 this.active.set(scopeKey, active);
         }
         const agent = active.handle.agent;
+        const running = {
+            taskId: task.task_id,
+            runId: run.run_id,
+            leaseToken: claim.lease_token,
+            agent,
+            sessionId: active.sessionId,
+            continuous,
+            cancelled: false,
+        };
+        this.running = running;
         await this.hub.updateTask(task.task_id, {
             run_id: run.run_id,
             lease_token: claim.lease_token,
@@ -216,6 +278,10 @@ class WorkerLoop {
                 source: { kind: 'user' },
             }));
             await agent.whenIdle();
+            if (running.cancelled) {
+                this.ctx.logger.info(`agent-society-worker cancelled ${task.task_id} in ${active.sessionId}`);
+                return;
+            }
             const text = lastAssistantText(agent.session.events);
             await this.hub.updateTask(task.task_id, {
                 run_id: run.run_id,
@@ -234,20 +300,38 @@ class WorkerLoop {
             this.ctx.logger.info(`agent-society-worker completed ${task.task_id} in ${active.sessionId}`);
         }
         catch (error) {
-            await this.failTask(claim, message(error), active.sessionId);
-            if (!continuous) {
+            if (running.cancelled) {
+                await this.markRunCancelled(running);
+            }
+            else {
+                await this.failTask(claim, message(error), active.sessionId);
+            }
+        }
+        finally {
+            this.running = undefined;
+            if (continuous) {
+                if (!running.cancelled) {
+                    writeState(this.options.statePath, {
+                        ...readState(this.options.statePath),
+                        [scopeKey]: active.sessionId,
+                    });
+                }
+            }
+            else {
                 await active.handle.dispose();
             }
-            return;
         }
-        if (continuous) {
-            writeState(this.options.statePath, {
-                ...readState(this.options.statePath),
-                [scopeKey]: active.sessionId,
+    }
+    async markRunCancelled(running) {
+        try {
+            await this.hub.updateRun(running.runId, {
+                status: 'cancelled',
+                error: 'cancelled by Hub',
+                result: { dsh_session_id: running.sessionId },
             });
         }
-        else {
-            await active.handle.dispose();
+        catch (error) {
+            this.ctx.logger.warn(`agent-society-worker could not mark run ${running.runId} cancelled: ${message(error)}`);
         }
     }
     async failTask(claim, messageText, sessionId) {
