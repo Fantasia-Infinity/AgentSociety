@@ -77,10 +77,12 @@ export interface AgentHostConfig {
   dshPermissionMode?: DshPermissionMode;
   /** Per-request output cap for the dsh runtime, default maxOutputTokens. */
   dshMaxTokens?: number;
-  /** Mount AgentSociety Hub MCP tools in the dsh worker runtime (opt-in). */
+  /** Mount AgentSociety Hub MCP tools in the dsh worker runtime. Enabled by default; set AGENT_DSH_HUB_MCP=0 to disable. */
   dshHubMcp?: boolean;
-  /** Mount dsh's DeepSeek web_search provider in the worker runtime (opt-in). */
+  /** Mount dsh's DeepSeek web_search provider in the worker runtime. Enabled by default; set AGENT_DSH_WEB_SEARCH=0 to disable. */
   dshWebSearch?: boolean;
+  /** dsh session log compression. none keeps transcripts readable by `agent observe`. */
+  dshSessionCompression?: "none" | "zstd";
 }
 
 export function loadProjectEnv(path?: string): void {
@@ -363,6 +365,12 @@ export function loadConfig(): AgentHostConfig {
     process.env.AGENT_DSH_SESSION_ROOT?.trim() ||
       resolve(loadSessionDir(false), "dsh-sessions"),
   );
+  const dshSessionCompression = (
+    process.env.AGENT_DSH_SESSION_COMPRESSION?.trim() || "none"
+  ) as "none" | "zstd";
+  if (!["none", "zstd"].includes(dshSessionCompression)) {
+    throw new Error("AGENT_DSH_SESSION_COMPRESSION must be none or zstd");
+  }
   const dshMaxTokens = positiveNumber(
     "AGENT_DSH_MAX_TOKENS",
     positiveNumber("AGENT_MODEL_MAX_TOKENS", 8_192),
@@ -442,8 +450,9 @@ export function loadConfig(): AgentHostConfig {
     dshSessionRoot,
     dshPermissionMode,
     dshMaxTokens,
-    dshHubMcp: process.env.AGENT_DSH_HUB_MCP === "1",
-    dshWebSearch: process.env.AGENT_DSH_WEB_SEARCH === "1",
+    dshSessionCompression,
+    dshHubMcp: process.env.AGENT_DSH_HUB_MCP !== "0",
+    dshWebSearch: process.env.AGENT_DSH_WEB_SEARCH !== "0",
   };
 }
 

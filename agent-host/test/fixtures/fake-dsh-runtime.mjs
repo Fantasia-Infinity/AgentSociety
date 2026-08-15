@@ -4,6 +4,7 @@
  * agent-host/test/dsh-engine.test.ts. It speaks the same newline-delimited
  * wire protocol as dsh-jsonrpc-agent but makes no model calls.
  */
+import { writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const pending = new Map();
@@ -54,6 +55,9 @@ lines.on("line", (raw) => {
         method: "session.status",
         params: { sessionId, status: "running" },
       });
+      if (process.env.FAKE_DSH_STALL_MARKER) {
+        writeFileSync(process.env.FAKE_DSH_STALL_MARKER, "running\n");
+      }
       return;
     }
 

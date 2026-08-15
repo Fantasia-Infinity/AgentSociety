@@ -31,7 +31,10 @@ type WorkerHub = Pick<
   Partial<
     Pick<
       HubClient,
-      "getTask" | "claimTaskControls" | "acknowledgeTaskControl"
+      | "getTask"
+      | "claimTaskControls"
+      | "acknowledgeTaskControl"
+      | "markTaskControlUnsupported"
     >
   >;
 
@@ -282,6 +285,10 @@ export class TaskWorker {
         sessionFile: conversation.sessionFile,
         cwd,
         origin: "remote_task",
+        engine: this.engineProfile.engine,
+        ...(conversation.transcriptFile
+          ? { transcriptFile: conversation.transcriptFile }
+          : {}),
         sessionMode: continuous ? "continuous" : "per_task",
         workerSlot: this.workerSlot,
         ...(workerSessionKey ? { workerSessionKey } : {}),
@@ -518,6 +525,15 @@ export class TaskWorker {
     const turnEnd = conversation?.getSessionPosition?.();
     this.registry.upsert({
       ...record,
+      ...(conversation
+        ? {
+            sessionId: conversation.sessionId,
+            sessionFile: conversation.sessionFile,
+            ...(conversation.transcriptFile
+              ? { transcriptFile: conversation.transcriptFile }
+              : {}),
+          }
+        : {}),
       status,
       startedAt: record.startedAt,
       ...(turnEnd ? { turnEndEntry: turnEnd.entryCount } : {}),
@@ -555,10 +571,33 @@ export class TaskWorker {
       const task = await this.hub.getTask(taskId);
       if (task.status === "cancelled") return "cancelled";
     }
+    if (!this.hub.claimTaskControls) return "active";
+
+    if (!this.engineProfile.supportsControls) {
+      if (!this.hub.markTaskControlUnsupported) return "active";
+      const controls = await this.hub.claimTaskControls(taskId, {
+        run_id: runId,
+        lease_token: taskLeaseToken,
+      });
+      for (const control of controls) {
+        await this.hub.markTaskControlUnsupported(
+          taskId,
+          control.control_id,
+          {
+            run_id: runId,
+            lease_token: control.lease_token,
+            reason: `${this.engineProfile.label} runtime does not support steer/follow-up controls`,
+          },
+        );
+        this.output(
+          `Marked ${control.kind} control ${control.control_id} unsupported for ${taskId}`,
+        );
+      }
+      return "active";
+    }
+
     if (
-      !this.engineProfile.supportsControls ||
       !conversation ||
-      !this.hub.claimTaskControls ||
       !this.hub.acknowledgeTaskControl
     ) {
       return "active";

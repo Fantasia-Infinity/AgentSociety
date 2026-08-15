@@ -631,3 +631,55 @@ class TaskStore:
                 now=now,
             )
             return self._control(control_id)
+
+    def mark_task_control_unsupported(
+        self,
+        task_id: str,
+        control_id: str,
+        *,
+        run_id: str,
+        lease_token: str,
+        reason: str,
+        tenant_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Resolve a leased control when the executing runtime cannot apply it."""
+        now = time.time()
+        with self._condition, self._connection:
+            task = self._task(task_id)
+            if tenant_id is not None and task["tenant_id"] != tenant_id:
+                raise LookupError("task not found")
+            row = self._connection.execute(
+                "SELECT * FROM hub_task_controls WHERE control_id=? AND task_id=?",
+                (control_id, task_id),
+            ).fetchone()
+            if row is None:
+                raise LookupError("task control not found")
+            if str(row["run_id"] or "") != run_id:
+                raise PermissionError("task control belongs to another run")
+            if str(row["lease_token"] or "") != lease_token:
+                raise PermissionError("invalid task control lease")
+            if str(row["status"]) in {"delivered", "unsupported"}:
+                return self._control(control_id)
+            if str(row["status"]) != "leased" or float(row["lease_until"]) < now:
+                raise PermissionError("task control lease expired")
+            self._connection.execute(
+                """
+                UPDATE hub_task_controls
+                SET status='unsupported', lease_until=0, delivered_at=?
+                WHERE control_id=?
+                """,
+                (now, control_id),
+            )
+            self._event(
+                task_id,
+                "task.control.unsupported",
+                run_id=run_id,
+                payload={
+                    "control_id": control_id,
+                    "kind": str(row["kind"]),
+                    "reason": reason[:10_000],
+                },
+                tenant_id=task["tenant_id"],
+                now=now,
+            )
+            return self._control(control_id)

@@ -7,6 +7,10 @@ import { createInterface, type Interface } from "node:readline";
 
 import { sanitizedChildEnv } from "./child-env.js";
 import type { AgentHostConfig } from "./config.js";
+import {
+  dshSessionLogPath,
+  type DshSessionCompression,
+} from "./dsh-paths.js";
 import type { HubClient } from "./hub-client.js";
 import type {
   AgentConversation,
@@ -320,6 +324,10 @@ class DshSessionChannel {
     }
   }
 
+  recover(): void {
+    this.failure = undefined;
+  }
+
   private settle(): void {
     for (const waiter of [...this.waiters]) {
       while (waiter.cursor < this.notifications.length) {
@@ -351,11 +359,13 @@ class DshConversation implements AgentConversation {
   private turnError: string | undefined;
   private sessionName = "";
   private readonly channel = new DshSessionChannel();
+  readonly engine = "dsh" as const;
 
   constructor(
-    private readonly engine: DshAgentEngine,
-    readonly sessionId: string,
+    private readonly runtimeEngine: DshAgentEngine,
+    public sessionId: string,
     readonly sessionFile: string,
+    public transcriptFile: string,
     readonly cwd: string,
   ) {}
 
@@ -372,46 +382,57 @@ class DshConversation implements AgentConversation {
         `DeepSeek Harness session ${this.sessionId} is no longer usable`,
       );
     }
-    const runtime = await this.engine.runtimeFor(this.cwd);
-    this.turnError = undefined;
-    const cursor = this.channel.length;
-    const receipt = await runtime.prompt(this.sessionId, text);
-    let received = false;
-    let idleAfterReceipt = false;
-    await this.channel.waitFrom(cursor, (notification) => {
-      if (notification.method === "session.event") {
-        if (isInboxReceipt(notification, receipt.messageId)) {
-          received = true;
-        }
-        const chunk = textDelta(notification);
-        if (chunk !== undefined) onText?.(chunk);
-        return false;
-      }
-      if (notification.method === "session.status") {
-        if (notification.params.status === "running") {
-          idleAfterReceipt = false;
+    for (let attempt = 0; ; attempt += 1) {
+      this.turnError = undefined;
+      const cursor = this.channel.length;
+      try {
+        const receipt = await this.sendPrompt(text);
+        let received = false;
+        let idleAfterReceipt = false;
+        await this.channel.waitFrom(cursor, (notification) => {
+          if (notification.method === "session.event") {
+            if (isInboxReceipt(notification, receipt.messageId)) {
+              received = true;
+            }
+            const chunk = textDelta(notification);
+            if (chunk !== undefined) onText?.(chunk);
+            return false;
+          }
+          if (notification.method === "session.status") {
+            if (notification.params.status === "running") {
+              idleAfterReceipt = false;
+              return false;
+            }
+            if (notification.params.status === "idle") {
+              idleAfterReceipt = received;
+              return idleAfterReceipt;
+            }
+          }
           return false;
+        });
+        if (this.turnError) throw new Error(this.turnError);
+        const finalText = (this.lastAssistantText ?? "").trim();
+        if (!finalText) {
+          throw new Error(
+            "DeepSeek Harness session ended without an assistant message",
+          );
         }
-        if (notification.params.status === "idle") {
-          idleAfterReceipt = received;
-          return idleAfterReceipt;
+        return {
+          text: finalText,
+          provider: this.runtimeEngine.providerName,
+          model: this.runtimeEngine.modelName,
+          sessionId: this.sessionId,
+        };
+      } catch (error) {
+        if (
+          attempt === 0 &&
+          this.runtimeEngine.recoverRuntimeAfterFailure(this.cwd, error)
+        ) {
+          continue;
         }
+        throw error;
       }
-      return false;
-    });
-    if (this.turnError) throw new Error(this.turnError);
-    const finalText = (this.lastAssistantText ?? "").trim();
-    if (!finalText) {
-      throw new Error(
-        "DeepSeek Harness session ended without an assistant message",
-      );
     }
-    return {
-      text: finalText,
-      provider: this.engine.providerName,
-      model: this.engine.modelName,
-      sessionId: this.sessionId,
-    };
   }
 
   async steer(text: string): Promise<void> {
@@ -424,7 +445,7 @@ class DshConversation implements AgentConversation {
 
   async abort(): Promise<void> {
     if (!this.usable) return;
-    this.engine.abortRuntime(this.cwd);
+    this.runtimeEngine.abortRuntime(this.cwd);
   }
 
   getSessionPosition(): AgentSessionPosition {
@@ -443,7 +464,7 @@ class DshConversation implements AgentConversation {
   async dispose(): Promise<void> {
     if (!this.usable) return;
     this.usable = false;
-    this.engine.releaseSession(this);
+    this.runtimeEngine.releaseSession(this);
   }
 
   deliver(notification: DshRuntimeNotification): void {
@@ -484,18 +505,46 @@ class DshConversation implements AgentConversation {
     this.channel.fail(error);
   }
 
+  failRuntime(error: Error): void {
+    this.channel.fail(error);
+  }
+
+  recoverRuntime(): void {
+    this.channel.recover();
+    this.sessionId = `dsh-${randomUUID().replaceAll("-", "")}`;
+    this.transcriptFile = dshSessionLogPath(
+      this.runtimeEngine.sessionRoot(),
+      this.cwd,
+      this.sessionId,
+      this.runtimeEngine.sessionCompression,
+    );
+    this.writeMarker();
+  }
+
   private async queueControl(text: string): Promise<void> {
     if (!this.usable) {
       throw new Error(
         `DeepSeek Harness session ${this.sessionId} is no longer usable`,
       );
     }
-    const runtime = await this.engine.runtimeFor(this.cwd);
     const cursor = this.channel.length;
-    const receipt = await runtime.prompt(this.sessionId, text);
+    const receipt = await this.sendPrompt(text);
     await this.channel.waitFrom(cursor, (notification) =>
       isInboxReceipt(notification, receipt.messageId),
     );
+  }
+
+  private async sendPrompt(text: string): Promise<DshPromptReceipt> {
+    let runtime = await this.runtimeEngine.runtimeFor(this.cwd);
+    try {
+      return await runtime.prompt(this.sessionId, text);
+    } catch (error) {
+      if (!this.runtimeEngine.recoverRuntimeAfterFailure(this.cwd, error)) {
+        throw error;
+      }
+      runtime = await this.runtimeEngine.runtimeFor(this.cwd);
+      return runtime.prompt(this.sessionId, text);
+    }
   }
 
   private writeMarker(): void {
@@ -504,8 +553,10 @@ class DshConversation implements AgentConversation {
       `${JSON.stringify(
         {
           version: 1,
+          engine: "dsh",
           sessionId: this.sessionId,
           sessionName: this.sessionName,
+          transcriptFile: this.transcriptFile,
           updatedAt: new Date().toISOString(),
         },
         null,
@@ -521,11 +572,19 @@ export class DshAgentEngine implements AgentEngine {
   private readonly conversations = new Set<DshConversation>();
   private readonly sessionsByCwd = new Map<string, Set<DshConversation>>();
   private disposed = false;
+  private hubMcpAvailable = true;
+  private webSearchAvailable = true;
+  private readonly warnings: string[] = [];
 
   private constructor(
     private readonly config: AgentHostConfig,
     private readonly hub?: HubClient,
   ) {}
+
+  /** Runtime capability warnings produced by optional-plugin fallback. */
+  get diagnostics(): readonly string[] {
+    return [...this.warnings];
+  }
 
   static async create(
     config: AgentHostConfig,
@@ -566,11 +625,18 @@ export class DshAgentEngine implements AgentEngine {
       this.sessionRoot(),
       `${sessionId}.agent-society.json`,
     );
+    const transcriptFile = dshSessionLogPath(
+      this.sessionRoot(),
+      cwd,
+      sessionId,
+      this.sessionCompression,
+    );
     mkdirSync(this.sessionRoot(), { recursive: true, mode: 0o700 });
     const conversation = new DshConversation(
       this,
       sessionId,
       sessionFile,
+      transcriptFile,
       cwd,
     );
     conversation.setSessionName("DeepSeek Harness worker session");
@@ -598,8 +664,51 @@ export class DshAgentEngine implements AgentEngine {
     } catch (error) {
       this.runtimes.delete(cwd);
       await runtime.close();
+      const fallback = optionalPluginFallback(error);
+      if (fallback) {
+        this.applyOptionalPluginFallback(fallback);
+        return this.runtimeFor(cwd);
+      }
       throw error;
     }
+  }
+
+  private applyOptionalPluginFallback(fallback: {
+    hubMcp?: boolean;
+    webSearch?: boolean;
+  }): void {
+    if (fallback.hubMcp && this.hubMcpAvailable) {
+      this.hubMcpAvailable = false;
+      this.warnings.push(
+        "DeepSeek Harness runtime could not resolve @deepseek-ai/dsh-mcp-client; " +
+          "dsh worker sessions will run without Hub MCP tools for this worker process.",
+      );
+    }
+    if (fallback.webSearch && this.webSearchAvailable) {
+      this.webSearchAvailable = false;
+      this.warnings.push(
+        "DeepSeek Harness runtime could not resolve dsh web-search plugins; " +
+          "dsh worker sessions will run without web_search for this worker process.",
+      );
+    }
+  }
+
+  recoverRuntimeAfterFailure(cwd: string, error: unknown): boolean {
+    const fallback = optionalPluginFallback(error);
+    if (!fallback) return false;
+    this.applyOptionalPluginFallback(fallback);
+    const failed = this.runtimes.get(cwd);
+    if (failed) {
+      this.runtimes.delete(cwd);
+      void failed.close();
+    }
+    const sessions = this.sessionsByCwd.get(cwd);
+    if (sessions) {
+      for (const conversation of [...sessions]) {
+        conversation.recoverRuntime();
+      }
+    }
+    return true;
   }
 
   releaseSession(conversation: DshConversation): void {
@@ -654,6 +763,18 @@ export class DshAgentEngine implements AgentEngine {
     return this.config.dshModel ?? "deepseek-v4-flash";
   }
 
+  get sessionCompression(): DshSessionCompression {
+    return this.config.dshSessionCompression ?? "none";
+  }
+
+  private get hubMcpEnabled(): boolean {
+    return Boolean(this.hub && this.config.dshHubMcp && this.hubMcpAvailable);
+  }
+
+  private get webSearchEnabled(): boolean {
+    return Boolean(this.config.dshWebSearch && this.webSearchAvailable);
+  }
+
   private createRuntime(cwd: string): DshRuntime {
     const configPath = this.config.dshConfigPath ?? defaultDshConfigPath();
     const command = [
@@ -672,13 +793,13 @@ export class DshAgentEngine implements AgentEngine {
       DSH_THINKING:
         this.config.thinkingLevel === "off" ? "disabled" : "enabled",
       DSH_SESSION_ROOT: this.sessionRoot(),
-      AGENT_SOCIETY_HUB_ENABLED:
-        this.hub && this.config.dshHubMcp ? "1" : "0",
-      AGENT_SOCIETY_WEB_SEARCH: this.config.dshWebSearch ? "1" : "0",
-      ...(this.hub && this.config.dshHubMcp && this.config.hubUrl
+      DSH_SESSION_COMPRESSION: this.sessionCompression,
+      AGENT_SOCIETY_HUB_ENABLED: this.hubMcpEnabled ? "1" : "0",
+      AGENT_SOCIETY_WEB_SEARCH: this.webSearchEnabled ? "1" : "0",
+      ...(this.hubMcpEnabled && this.config.hubUrl
         ? {
             AGENT_SOCIETY_HUB_URL: this.config.hubUrl,
-            AGENT_SOCIETY_HUB_MCP_TOKEN: this.hub.nodeToken,
+            AGENT_SOCIETY_HUB_MCP_TOKEN: this.hub!.nodeToken,
           }
         : {}),
       ...(this.config.remoteApiKey
@@ -695,6 +816,17 @@ export class DshAgentEngine implements AgentEngine {
       onNotification: (notification) => this.dispatch(notification),
       onExit: (error) => {
         this.runtimes.delete(cwd);
+        const fallback = optionalPluginFallback(error);
+        if (fallback) {
+          this.applyOptionalPluginFallback(fallback);
+          const sessions = this.sessionsByCwd.get(cwd);
+          if (sessions) {
+            for (const conversation of [...sessions]) {
+              conversation.failRuntime(error);
+            }
+          }
+          return;
+        }
         const sessions = this.sessionsByCwd.get(cwd);
         if (sessions) {
           for (const conversation of [...sessions]) {
@@ -716,7 +848,7 @@ export class DshAgentEngine implements AgentEngine {
     }
   }
 
-  private sessionRoot(): string {
+  sessionRoot(): string {
     return (
       this.config.dshSessionRoot ??
       resolve(this.config.sessionDir, "dsh-sessions")
@@ -728,6 +860,23 @@ function defaultDshConfigPath(): string {
   return fileURLToPath(
     new URL("../../config/dsh-worker.cordis.yml", import.meta.url),
   );
+}
+
+function optionalPluginFallback(error: unknown): {
+  hubMcp?: boolean;
+  webSearch?: boolean;
+} | undefined {
+  const text = message(error);
+  const fallback: { hubMcp?: boolean; webSearch?: boolean } = {};
+  if (/@deepseek-ai\/dsh-mcp-client/u.test(text)) fallback.hubMcp = true;
+  if (
+    /@deepseek-ai\/dsh-web-search-deepseek/u.test(text) ||
+    /@deepseek-ai\/dsh-tool-web/u.test(text) ||
+    /loader entry tool-web/u.test(text)
+  ) {
+    fallback.webSearch = true;
+  }
+  return fallback.hubMcp || fallback.webSearch ? fallback : undefined;
 }
 
 function reasoningEffort(level: string): string {

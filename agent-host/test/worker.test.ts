@@ -21,11 +21,12 @@ import {
   type AgentHostConfig,
 } from "../src/config.js";
 import { RunSessionRegistry } from "../src/run-registry.js";
-import type {
-  AgentConversation,
-  AgentEngine,
-  HubClaim,
-  HubTask,
+import {
+  DSH_ENGINE_PROFILE,
+  type AgentConversation,
+  type AgentEngine,
+  type HubClaim,
+  type HubTask,
 } from "../src/types.js";
 import { resolveTaskWorkspace, TaskWorker } from "../src/worker.js";
 
@@ -585,6 +586,78 @@ test("worker injects durable controls into the owning Pi session before ACK", as
     await poll.pollTaskControls("task-1", "run-1", "task-lease", conversation),
     "active",
   );
+test("unsupported runtimes resolve queued controls with an explicit Hub status", async () => {
+  const workspace = temporaryDirectory();
+  const unsupported: Array<{ control_id: string; reason: string }> = [];
+  const hub = {
+    claimTask: async () => null,
+    updateTask: async () => task(),
+    updateRun: async () => claim().run,
+    heartbeat: async () => {},
+    getTask: async () => task(),
+    claimTaskControls: async () => [
+      {
+        seq: 1,
+        control_id: "control-steer",
+        task_id: "task-1",
+        run_id: "run-1",
+        kind: "steer" as const,
+        message: "focus on tests",
+        actor_id: "actor-owner",
+        status: "leased" as const,
+        lease_token: "control-lease-1",
+        lease_until: Date.now() / 1_000 + 30,
+        created_at: Date.now() / 1_000,
+        delivered_at: null,
+      },
+    ],
+    markTaskControlUnsupported: async (
+      _taskId: string,
+      controlId: string,
+      item: { reason: string },
+    ) => {
+      unsupported.push({ control_id: controlId, reason: item.reason });
+    },
+  };
+  const engine: AgentEngine = {
+    createConversation: async () => {
+      throw new Error("not used");
+    },
+  };
+  const worker = new TaskWorker(
+    config(workspace),
+    hub,
+    engine,
+    () => {},
+    undefined,
+    0,
+    DSH_ENGINE_PROFILE,
+  );
+  const poll = worker as unknown as {
+    pollTaskControls(
+      taskId: string,
+      runId: string,
+      taskLeaseToken: string,
+      current: AgentConversation,
+    ): Promise<"active" | "cancelled">;
+  };
+  const conversation: AgentConversation = {
+    sessionId: "dsh-session",
+    prompt: async () => {
+      throw new Error("not used");
+    },
+    setSessionName: () => {},
+    dispose: async () => {},
+  };
+
+  assert.equal(
+    await poll.pollTaskControls("task-1", "run-1", "task-lease", conversation),
+    "active",
+  );
+  assert.equal(unsupported.length, 1);
+  assert.equal(unsupported[0]?.control_id, "control-steer");
+  assert.match(unsupported[0]?.reason ?? "", /does not support/u);
+});
   assert.deepEqual(applied, [
     "steer:focus on tests",
     "follow_up:then summarize",

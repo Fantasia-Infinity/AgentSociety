@@ -61,6 +61,7 @@ stdout 文本写回任务结果，超时/取消使用 SIGTERM → SIGKILL。dsh 
 ## 执行端：`dsh-worker`
 
 ```bash
+./agent dsh-doctor    # 检查 dsh runtime、模型与 Hub 配置
 ./agent dsh-once      # 领取并执行一个任务
 ./agent dsh-worker    # 常驻 worker
 ```
@@ -91,12 +92,13 @@ export AGENT_DSH_CONFIG=/path/to/deepseek-harness/examples/agent-society-worker.
 | `read_only` | fs 只读 |
 | `no_tools` | 无本地工具 |
 
-`web_search` 与 Hub MCP 工具为可选能力，默认不加载（避免要求额外的 dsh
-插件包），通过环境变量显式开启：
+`web_search` 与 Hub MCP 工具默认开启。如果当前 dsh runtime 安装中缺少对应
+插件，AgentSociety 会在本次 worker 进程内自动关闭该能力并打印 warning，不
+会阻断任务执行：
 
 ```bash
-AGENT_DSH_WEB_SEARCH=1   # 需要 dsh-web-search-deepseek / dsh-tool-web 可解析
-AGENT_DSH_HUB_MCP=1      # 需要 dsh-mcp-client 可解析
+AGENT_DSH_WEB_SEARCH=0   # 显式关闭 web_search
+AGENT_DSH_HUB_MCP=0      # 显式关闭 dsh worker 内的 Hub MCP 工具
 ```
 
 权限模式默认 `workspace-write`；`full` 策略下需要完整本机权限时显式设置
@@ -110,7 +112,10 @@ AGENT_DSH_HUB_MCP=1      # 需要 dsh-mcp-client 可解析
   复用上下文，worker 重启后会新建 session。
 - dsh runtime 当前只支持一个 workspace per process；AgentSociety 会按
   workspace 维护独立 runtime。
-- Hub steer/follow-up 不适用于 dsh 执行端（dsh 无对应控制原语）。
+- dsh 执行端不应用 Hub steer/follow-up；worker 领取到 controls 后会调用
+  `/controls/{id}/unsupported`，把状态明确记录为 `unsupported` 并写入事件流。
+- `agent observe` 支持 dsh session transcript。dsh worker 默认使用未压缩
+  JSONL（`AGENT_DSH_SESSION_COMPRESSION=none`），可直接读取。
 
 ## 环境变量
 

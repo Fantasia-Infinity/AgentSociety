@@ -24,7 +24,8 @@
     "bridge": "node dist/src/cli.js bridge",
     "dsh-worker": "node dist/src/cli.js dsh-worker",
     "dsh-once": "node dist/src/cli.js dsh-once",
-    "dsh-dispatch": "node dist/src/cli.js dsh-dispatch"
+    "dsh-dispatch": "node dist/src/cli.js dsh-dispatch",
+    "dsh-doctor": "node dist/src/cli.js dsh-doctor"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.84.0",

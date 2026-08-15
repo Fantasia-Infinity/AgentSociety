@@ -21,6 +21,7 @@ import {
   writeSystemCredential,
 } from "./credential-store.js";
 import { DshAgentEngine } from "./dsh-engine.js";
+import { runDshDoctor } from "./dsh-doctor.js";
 import { runDoctor } from "./doctor.js";
 import { HubClient, HubError } from "./hub-client.js";
 import {
@@ -214,6 +215,10 @@ async function main(): Promise<void> {
     await runDoctor(config, hub);
     return;
   }
+  if (command === "dsh-doctor") {
+    await runDshDoctor(config, hub);
+    return;
+  }
   if (command === "observe" || command === "attach") {
     const id = process.argv[3]?.trim();
     if (!id) throw new Error(`${command} requires a run_id or task_id`);
@@ -265,6 +270,9 @@ async function main(): Promise<void> {
   if (dshReceivingCommand) {
     const workerHub = hub!;
     const engine = await DshAgentEngine.create(workerConfig, workerHub);
+    for (const warning of engine.diagnostics) {
+      console.warn(warning);
+    }
     const worker = new TaskWorker(
       workerConfig,
       workerHub,
@@ -278,6 +286,7 @@ async function main(): Promise<void> {
       try {
         const worked = await worker.runOnce();
         console.log(worked ? "Processed one task" : "No matching task");
+        for (const warning of engine.diagnostics) console.warn(warning);
       } finally {
         await worker.dispose();
         await engine.dispose();
@@ -307,6 +316,7 @@ async function main(): Promise<void> {
     await Promise.all(
       workers.map((current) => current.runForever(controller.signal)),
     );
+    for (const warning of engine.diagnostics) console.warn(warning);
     await engine.dispose();
     return;
   }

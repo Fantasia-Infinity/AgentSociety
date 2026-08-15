@@ -18,6 +18,8 @@ export interface RunSessionRecord {
   sessionFile: string;
   cwd: string;
   origin: "local_ui" | "remote_task";
+  engine?: "pi" | "dsh";
+  transcriptFile?: string;
   sessionMode?: "per_task" | "continuous";
   workerSlot?: number;
   workerSessionKey?: string;

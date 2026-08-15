@@ -126,6 +126,10 @@ export interface AgentTaskContext {
 export interface AgentConversation {
   readonly sessionId: string;
   readonly sessionFile?: string;
+  /** Runtime family, used by observers to select a transcript reader. */
+  readonly engine?: "pi" | "dsh";
+  /** Native transcript file for non-Pi runtimes (dsh JSONL). */
+  readonly transcriptFile?: string;
   /** False when the session can no longer be used (for example after an abort). */
   readonly isUsable?: boolean;
   prompt(text: string, onText?: (delta: string) => void): Promise<AgentResult>;
@@ -139,6 +143,7 @@ export interface AgentConversation {
 }
 
 export interface AgentEngineProfile {
+  engine: "pi" | "dsh";
   label: string;
   sessionFieldPrefix: string;
   /** Whether the worker should generate a throwaway session title per task. */
@@ -148,6 +153,7 @@ export interface AgentEngineProfile {
 }
 
 export const PI_ENGINE_PROFILE: AgentEngineProfile = {
+  engine: "pi",
   label: "Pi",
   sessionFieldPrefix: "pi_session",
   generateSessionTitles: true,
@@ -155,6 +161,7 @@ export const PI_ENGINE_PROFILE: AgentEngineProfile = {
 };
 
 export const DSH_ENGINE_PROFILE: AgentEngineProfile = {
+  engine: "dsh",
   label: "DeepSeek Harness",
   sessionFieldPrefix: "dsh_session",
   generateSessionTitles: false,

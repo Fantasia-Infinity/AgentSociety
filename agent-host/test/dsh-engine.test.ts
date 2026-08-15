@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, test } from "node:test";
 
 import { DshAgentEngine } from "../src/dsh-engine.js";
+import { runDshDoctor } from "../src/dsh-doctor.js";
 import type { AgentHostConfig } from "../src/config.js";
 
 const temporaryDirectories: string[] = [];
@@ -123,7 +124,10 @@ test("DshAgentEngine abort invalidates the conversation and rejects the prompt",
   );
   const runtimeConfig = config(workspace);
   const previous = process.env.FAKE_DSH_STALL;
+  const previousMarker = process.env.FAKE_DSH_STALL_MARKER;
+  const marker = join(workspace, "stalled.marker");
   process.env.FAKE_DSH_STALL = "1";
+  process.env.FAKE_DSH_STALL_MARKER = marker;
   try {
     const engine = await DshAgentEngine.create(runtimeConfig);
     const conversation = await engine.createConversation({
@@ -132,7 +136,10 @@ test("DshAgentEngine abort invalidates the conversation and rejects the prompt",
       persisted: true,
     });
     const prompt = conversation.prompt("stall");
-    await new Promise((done) => setTimeout(done, 50));
+    for (let attempt = 0; attempt < 100 && !existsSync(marker); attempt += 1) {
+      await new Promise((done) => setTimeout(done, 10));
+    }
+    assert.ok(existsSync(marker));
     await conversation.abort?.();
     await assert.rejects(prompt, /runtime was aborted/u);
     assert.equal(conversation.isUsable, false);
@@ -141,5 +148,16 @@ test("DshAgentEngine abort invalidates the conversation and rejects the prompt",
   } finally {
     if (previous === undefined) delete process.env.FAKE_DSH_STALL;
     else process.env.FAKE_DSH_STALL = previous;
+    if (previousMarker === undefined) delete process.env.FAKE_DSH_STALL_MARKER;
+    else process.env.FAKE_DSH_STALL_MARKER = previousMarker;
   }
+});
+test("dsh doctor runs a diagnostic prompt through the dsh runtime", async () => {
+  const workspace = temporaryDirectory();
+  mkdirSync(workspace, { recursive: true });
+  writeFileSync(
+    join(workspace, "dsh-worker.cordis.yml"),
+    "# fake config for the fake runtime\n",
+  );
+  await runDshDoctor(config(workspace));
 });

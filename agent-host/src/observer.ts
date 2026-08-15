@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { stdin, stdout } from "node:process";
 
@@ -81,7 +82,7 @@ async function loadSnapshot(
     ...(run ? { run } : {}),
     ...(task ? { task } : {}),
     transcript: resolvedLocal
-      ? readTranscript(resolvedLocal.sessionFile, 18)
+      ? readTranscript(resolvedLocal, 18)
       : [],
     ...(error ? { error } : {}),
   };
@@ -92,7 +93,7 @@ function renderSnapshot(snapshot: Snapshot, clear: boolean): void {
   const line = "─".repeat(width);
   const output = [
     ...(clear ? ["\x1b[H\x1b[2J"] : []),
-    "Pi Agent Session Observer",
+    "Agent Session Observer",
     line,
     `Run:      ${snapshot.run?.run_id ?? snapshot.local?.runId ?? "unknown"}`,
     `Task:     ${snapshot.task?.task_id ?? snapshot.local?.taskId ?? "local"}`,
@@ -114,7 +115,22 @@ function renderSnapshot(snapshot: Snapshot, clear: boolean): void {
   stdout.write(`${output.join("\n")}\n`);
 }
 
-function readTranscript(path: string, limit: number): string[] {
+export function readTranscript(
+  record: RunSessionRecord,
+  limit: number,
+): string[] {
+  const marker = readSessionMarker(record.sessionFile);
+  const engine = record.engine ?? marker?.engine;
+  if (engine === "dsh") {
+    const transcriptFile = record.transcriptFile ?? marker?.transcriptFile;
+    return transcriptFile
+      ? readDshTranscript(transcriptFile, limit)
+      : ["DeepSeek Harness transcript path is unavailable for this run."];
+  }
+  return readPiTranscript(record.sessionFile, limit);
+}
+
+function readPiTranscript(path: string, limit: number): string[] {
   if (!existsSync(path)) return ["Session file has not been created yet."];
   const messages: string[] = [];
   for (const line of readFileSync(path, "utf8").split(/\r?\n/u)) {
@@ -127,6 +143,70 @@ function readTranscript(path: string, limit: number): string[] {
       if (text) messages.push(`${role}> ${text.replace(/\s+/gu, " ").trim()}`);
     } catch {
       // The worker may be appending the final JSONL line while it is read.
+    }
+  }
+  return messages.slice(-limit);
+}
+
+function readSessionMarker(
+  path: string,
+): { engine?: "pi" | "dsh"; transcriptFile?: string } | undefined {
+  if (!existsSync(path)) return undefined;
+  try {
+    const value = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    if (!isRecord(value)) return undefined;
+    const engine =
+      value.engine === "pi" || value.engine === "dsh" ? value.engine : undefined;
+    const transcriptFile =
+      typeof value.transcriptFile === "string" ? value.transcriptFile : undefined;
+    return {
+      ...(engine ? { engine } : {}),
+      ...(transcriptFile ? { transcriptFile } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function readDshTranscript(path: string, limit: number): string[] {
+  if (!existsSync(path)) {
+    return ["DeepSeek Harness session transcript has not been created yet."];
+  }
+  let text: string;
+  if (path.endsWith(".jsonl.zstd")) {
+    try {
+      text = execFileSync("zstd", ["-dc", path], {
+        encoding: "utf8",
+        maxBuffer: 8 * 1024 * 1024,
+      });
+    } catch {
+      return [
+        "DeepSeek Harness transcript is zstd-compressed and the `zstd` command is unavailable on this device. Set AGENT_DSH_SESSION_COMPRESSION=none for readable transcripts.",
+      ];
+    }
+  } else {
+    text = readFileSync(path, "utf8");
+  }
+  const messages: string[] = [];
+  for (const line of text.split(/\r?\n/u)) {
+    if (!line.trim()) continue;
+    try {
+      const entry = JSON.parse(line) as Record<string, unknown>;
+      const data = isRecord(entry.data) ? entry.data : undefined;
+      if (entry.type === "user/message") {
+        const value = data ? messageText(data.content) : "";
+        if (value) messages.push(`user> ${value.replace(/\s+/gu, " ").trim()}`);
+      } else if (entry.type === "assistant/message" && isRecord(data?.message)) {
+        const value = messageText(data.message.content);
+        if (value) messages.push(`assistant> ${value.replace(/\s+/gu, " ").trim()}`);
+      } else if (entry.type === "tool/call") {
+        const name = isRecord(data) && typeof data.name === "string" ? data.name : "tool";
+        messages.push(`tool> ${name}`);
+      } else if (entry.type === "tool/result") {
+        messages.push("tool> result");
+      }
+    } catch {
+      // The runtime may be appending the final JSONL line while it is read.
     }
   }
   return messages.slice(-limit);
@@ -149,7 +229,7 @@ function messageText(content: unknown): string {
 }
 
 function sessionId(run: HubRun | undefined): string | undefined {
-  const value = run?.result.pi_session_id;
+  const value = run?.result.pi_session_id ?? run?.result.dsh_session_id;
   return typeof value === "string" ? value : undefined;
 }
 

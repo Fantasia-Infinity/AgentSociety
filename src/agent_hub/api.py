@@ -627,6 +627,22 @@ class AgentHubApi:
                 tenant_id=tenant_id,
             )
             return HTTPStatus.OK, {"control": control}
+        if (
+            len(parts) == 5
+            and parts[0] == "tasks"
+            and parts[2] == "controls"
+            and parts[4] == "unsupported"
+        ):
+            control = self.store.mark_task_control_unsupported(
+                parts[1],
+                parts[3],
+                run_id=required_text(payload, "run_id", maximum=200),
+                lease_token=required_text(payload, "lease_token", maximum=200),
+                reason=optional_text(payload, "reason", maximum=10_000)
+                or "runtime does not support task controls",
+                tenant_id=tenant_id,
+            )
+            return HTTPStatus.OK, {"control": control}
         if len(parts) == 3 and parts[0] == "runs" and parts[2] == "updates":
             if (
                 context is not None

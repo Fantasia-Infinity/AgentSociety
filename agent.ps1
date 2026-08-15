@@ -42,8 +42,8 @@ switch ($Command) {
         break
     }
     "worker" { & $NpmCommand --prefix $AgentHost run worker; break }
-    { $_ -in "doctor", "sessions" } { & $NpmCommand --prefix $AgentHost run $Command; break }
-    { $_ -in "register", "once", "observe", "attach", "bridge", "dsh-worker", "dsh-once", "dsh-dispatch" } {
+    { $_ -in "doctor", "sessions", "dsh-doctor" } { & $NpmCommand --prefix $AgentHost run $Command; break }
+    { $_ -in "register", "once", "observe", "attach", "bridge", "dsh-worker", "dsh-once", "dsh-dispatch", "dsh-doctor" } {
         & $NpmCommand --prefix $AgentHost run start -- $Command @Rest
         break
     }

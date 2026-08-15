@@ -482,6 +482,63 @@ class HubLeaseTests(unittest.TestCase):
                 self.assertEqual(delivered["status"], "delivered")
             finally:
                 store.close()
+    def test_unsupported_runtime_resolves_controls_with_an_audit_event(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = AgentHubStore(Path(directory) / "hub.sqlite3")
+            try:
+                store.register_principal(
+                    PrincipalRegistration("p", "human", "Person", {})
+                )
+                store.register_actor(
+                    ActorRegistration("human", "p", "human", "Human", (), {})
+                )
+                store.register_actor(
+                    ActorRegistration("agent", "p", "agent", "Agent", (), {})
+                )
+                store.register_node(NodeRegistration("node", "agent", "Node", (), {}))
+                task, _ = store.create_task(
+                    TaskSubmission(
+                        principal_id="p",
+                        delegator_actor_id="human",
+                        objective="work",
+                        assignee_actor_id=None,
+                        context_id=None,
+                        idempotency_key=None,
+                        required_capabilities=(),
+                        input={},
+                        metadata={},
+                        origin="test",
+                    )
+                )
+                claim = store.claim_task(
+                    actor_id="agent", node_id="node", lease_seconds=17
+                )
+                self.assertIsNotNone(claim)
+                control = store.create_task_control(
+                    task["task_id"], actor_id="human", kind="steer", message="focus"
+                )
+                controls = store.claim_task_controls(
+                    task["task_id"],
+                    run_id=claim["run"]["run_id"],
+                    lease_token=claim["lease_token"],
+                )
+                resolved = store.mark_task_control_unsupported(
+                    task["task_id"],
+                    control["control_id"],
+                    run_id=claim["run"]["run_id"],
+                    lease_token=controls[0]["lease_token"],
+                    reason="runtime does not support controls",
+                )
+                self.assertEqual(resolved["status"], "unsupported")
+                self.assertIn(
+                    "task.control.unsupported",
+                    [
+                        event["type"]
+                        for event in store.list_task_events(task["task_id"])
+                    ],
+                )
+            finally:
+                store.close()
 
     def test_expired_unassigned_task_can_move_to_another_node(self) -> None:
         with TemporaryDirectory() as directory:

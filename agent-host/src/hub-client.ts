@@ -215,6 +215,17 @@ export class HubClient {
     );
   }
 
+  async markTaskControlUnsupported(
+    taskId: string,
+    controlId: string,
+    item: { run_id: string; lease_token: string; reason: string },
+  ): Promise<void> {
+    await this.request(
+      `/v1/hub/tasks/${encodeURIComponent(taskId)}/controls/${encodeURIComponent(controlId)}/unsupported`,
+      { method: "POST", body: item },
+    );
+  }
+
   async startRun(item: {
     principal_id: string;
     actor_id: string;
