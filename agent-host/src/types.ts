@@ -126,6 +126,8 @@ export interface AgentTaskContext {
 export interface AgentConversation {
   readonly sessionId: string;
   readonly sessionFile?: string;
+  /** False when the session can no longer be used (for example after an abort). */
+  readonly isUsable?: boolean;
   prompt(text: string, onText?: (delta: string) => void): Promise<AgentResult>;
   steer?(text: string): Promise<void>;
   followUp?(text: string): Promise<void>;
@@ -136,6 +138,29 @@ export interface AgentConversation {
   dispose(): Promise<void>;
 }
 
+export interface AgentEngineProfile {
+  label: string;
+  sessionFieldPrefix: string;
+  /** Whether the worker should generate a throwaway session title per task. */
+  generateSessionTitles: boolean;
+  /** Whether Hub steer/follow-up controls are safe to apply to this engine. */
+  supportsControls: boolean;
+}
+
+export const PI_ENGINE_PROFILE: AgentEngineProfile = {
+  label: "Pi",
+  sessionFieldPrefix: "pi_session",
+  generateSessionTitles: true,
+  supportsControls: true,
+};
+
+export const DSH_ENGINE_PROFILE: AgentEngineProfile = {
+  label: "DeepSeek Harness",
+  sessionFieldPrefix: "dsh_session",
+  generateSessionTitles: false,
+  supportsControls: false,
+};
+
 export interface AgentEngine {
   createConversation(options: {
     cwd: string;
@@ -144,4 +169,5 @@ export interface AgentEngine {
     sessionFile?: string;
     subagentDepth?: number;
   }): Promise<AgentConversation>;
+  dispose?(): Promise<void>;
 }

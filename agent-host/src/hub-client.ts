@@ -29,6 +29,11 @@ export class HubClient {
     private readonly fetchImpl: FetchLike = fetch,
   ) {}
 
+  /** The bearer token used by this client. Exposed only for trusted child runtimes. */
+  get nodeToken(): string {
+    return this.token;
+  }
+
   async registerPrincipal(item: {
     principal_id: string;
     kind: Principal["kind"];

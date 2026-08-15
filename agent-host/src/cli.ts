@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -8,6 +9,7 @@ import { stdin, stdout } from "node:process";
 import { userInfo } from "node:os";
 import { Writable } from "node:stream";
 
+import { sanitizedChildEnv } from "./child-env.js";
 import { listAdapterIds, loadAdapterManifest } from "./adapter-registry.js";
 import { BridgeWorker } from "./bridge.js";
 import { agentHubProjectDir } from "./codex-project.js";
@@ -18,18 +20,22 @@ import {
   deleteSystemCredential,
   writeSystemCredential,
 } from "./credential-store.js";
+import { DshAgentEngine } from "./dsh-engine.js";
 import { runDoctor } from "./doctor.js";
 import { HubClient, HubError } from "./hub-client.js";
 import {
   registerAdapterHost,
+  registerDshHost,
   registerHost,
   resolveAdapterIdentity,
+  resolveDshIdentity,
 } from "./host.js";
 import { runInteractive, runInteractiveChild } from "./interactive.js";
 import { observeRun } from "./observer.js";
 import { PiAgentEngine } from "./pi-engine.js";
 import { RunSessionRegistry } from "./run-registry.js";
 import { applyPendingUpdate } from "./self-update.js";
+import { DSH_ENGINE_PROFILE } from "./types.js";
 import { TaskWorker } from "./worker.js";
 
 async function main(): Promise<void> {
@@ -68,7 +74,9 @@ async function main(): Promise<void> {
   const hubRuntimeDisabled = process.env.AGENT_HUB_RUNTIME_DISABLED === "1";
   if (
     process.env.AGENT_HUB_RECEIVE_DISABLED?.trim() === "1" &&
-    new Set(["worker", "bridge", "once"]).has(command)
+    new Set(["worker", "bridge", "once", "dsh-worker", "dsh-once"]).has(
+      command,
+    )
   ) {
     throw new Error(
       "Receiving tasks is disabled on this host (AGENT_HUB_RECEIVE_DISABLED=1). " +
@@ -79,9 +87,15 @@ async function main(): Promise<void> {
     await connectCommand(config);
     return;
   }
+  const dshReceivingCommand =
+    command === "dsh-worker" || command === "dsh-once";
+  const dshDispatchCommand = command === "dsh-dispatch";
+  const workerConfig = dshReceivingCommand
+    ? resolveDshIdentity(config)
+    : config;
   const hub =
     config.hubEnabled && !hubRuntimeDisabled
-      ? await resolveHubClient(config)
+      ? await resolveHubClient(workerConfig, dshReceivingCommand ? "dsh" : "pi")
       : undefined;
   if (command === "__tui-child") {
     const runId = process.argv[3]?.trim();
@@ -102,6 +116,9 @@ async function main(): Promise<void> {
     "control",
     "once",
     "worker",
+    "dsh-once",
+    "dsh-worker",
+    "dsh-dispatch",
   ]);
   if (hubCommands.has(command) && !hub) {
     throw new Error(
@@ -111,10 +128,14 @@ async function main(): Promise<void> {
   if (
     hub &&
     command !== "bridge" &&
-    config.hubToken &&
-    !config.hubUsername
+    workerConfig.hubToken &&
+    !workerConfig.hubUsername
   ) {
-    await registerHost(config, hub);
+    if (dshReceivingCommand) {
+      await registerDshHost(workerConfig, hub);
+    } else if (!dshDispatchCommand) {
+      await registerHost(config, hub);
+    }
   }
 
   if (command === "register") {
@@ -133,10 +154,16 @@ async function main(): Promise<void> {
             : adapterList()),
       );
     }
-    const adapter = loadAdapterManifest(
+    let adapter = loadAdapterManifest(
       adapterId,
       process.env.AGENT_HUB_ADAPTER_DIR,
     );
+    if (adapter.id === "dsh" && process.env.AGENT_DSH_COMMAND?.trim()) {
+      adapter = {
+        ...adapter,
+        command: [...(config.dshCommand ?? ["dsh"]), "--profile", "headless"],
+      };
+    }
     let bridgeConfig = resolveAdapterIdentity(config, adapter);
     if (
       adapter.id === "codex" &&
@@ -225,8 +252,62 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === "dsh-dispatch") {
+    await runDshDispatch(config, hub!);
+    return;
+  }
+
   if (command === "interactive" || command === "tui" || command === "local") {
     await runInteractive(config, hub);
+    return;
+  }
+
+  if (dshReceivingCommand) {
+    const workerHub = hub!;
+    const engine = await DshAgentEngine.create(workerConfig, workerHub);
+    const worker = new TaskWorker(
+      workerConfig,
+      workerHub,
+      engine,
+      console.log,
+      undefined,
+      0,
+      DSH_ENGINE_PROFILE,
+    );
+    if (command === "dsh-once") {
+      try {
+        const worked = await worker.runOnce();
+        console.log(worked ? "Processed one task" : "No matching task");
+      } finally {
+        await worker.dispose();
+        await engine.dispose();
+      }
+      return;
+    }
+    const controller = new AbortController();
+    const stop = () => controller.abort();
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+    const workers = Array.from(
+      { length: workerConfig.workerConcurrency },
+      (_, index) =>
+        index === 0
+          ? worker
+          : new TaskWorker(
+              workerConfig,
+              workerHub,
+              engine,
+              (message) =>
+                console.log(`[DeepSeek Harness worker ${index + 1}] ${message}`),
+              undefined,
+              index,
+              DSH_ENGINE_PROFILE,
+            ),
+    );
+    await Promise.all(
+      workers.map((current) => current.runForever(controller.signal)),
+    );
+    await engine.dispose();
     return;
   }
 
@@ -289,7 +370,63 @@ function adapterList(extraDir?: string): string {
   return listAdapterIds(extraDir).join(", ");
 }
 
-function hostCapabilities(config: AgentHostConfig): string[] {
+async function runDshDispatch(
+  config: AgentHostConfig,
+  hub: HubClient,
+): Promise<void> {
+  const patchPath = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "..",
+    "dsh",
+    "agent-society.dsh.yml",
+  );
+  if (!existsSync(patchPath)) {
+    throw new Error(`DeepSeek Harness dispatch patch not found: ${patchPath}`);
+  }
+  const command = [
+    ...(config.dshCommand ?? ["dsh"]),
+    "web",
+    "--patch",
+    patchPath,
+    ...process.argv.slice(3),
+  ];
+  console.log(
+    `Starting DeepSeek Harness web with AgentSociety Hub MCP tools (${command.join(" ")})`,
+  );
+  const child = spawn(command[0]!, command.slice(1), {
+    stdio: "inherit",
+    env: {
+      ...sanitizedChildEnv(process.env),
+      AGENT_SOCIETY_HUB_URL: config.hubUrl!,
+      AGENT_SOCIETY_HUB_MCP_TOKEN: hub.nodeToken,
+    },
+  });
+  const exitCode = await new Promise<number | null>((resolveExit) => {
+    child.once("error", (error) => {
+      console.error(`Could not start ${command[0]}: ${error.message}`);
+      resolveExit(null);
+    });
+    child.once("exit", (code) => resolveExit(code));
+  });
+  if (exitCode !== 0) process.exitCode = exitCode ?? 1;
+}
+
+type WorkerRuntimeKind = "pi" | "dsh";
+
+function hostCapabilities(
+  config: AgentHostConfig,
+  kind: WorkerRuntimeKind = "pi",
+): string[] {
+  if (kind === "dsh") {
+    return [
+      "dsh",
+      "code",
+      "hub-task",
+      ...(config.webSearchMode !== "disabled" ? ["web-search"] : []),
+      ...(config.remoteToolPolicy === "full" ? ["workspace-write"] : []),
+    ];
+  }
   return [
     "pi",
     "code",
@@ -311,6 +448,7 @@ function hostCapabilities(config: AgentHostConfig): string[] {
 
 async function resolveNodeCredential(
   config: AgentHostConfig,
+  kind: WorkerRuntimeKind = "pi",
 ): Promise<{ token: string; saved: boolean }> {
   if (config.hubNodeToken) {
     return { token: config.hubNodeToken, saved: true };
@@ -324,12 +462,12 @@ async function resolveNodeCredential(
         node_id: config.nodeId,
         actor_id: config.actorId,
         display_name: config.nodeDisplayName,
-        capabilities: hostCapabilities(config),
+        capabilities: hostCapabilities(config, kind),
         metadata: {
           origin: "worker-boot",
           workspace_root: config.workspaceRoot,
-          runtime: "pi",
-          runtime_version: "0.83.0",
+          runtime: kind,
+          runtime_version: kind === "dsh" ? "0.1.0-rc.5" : "0.83.0",
           remote_tool_policy: config.remoteToolPolicy,
           builtin_capabilities: config.builtinCapabilitiesEnabled,
           worker_session_mode: config.workerSessionMode,
@@ -375,8 +513,9 @@ async function resolveNodeCredential(
 
 async function resolveHubClient(
   config: AgentHostConfig,
+  kind: WorkerRuntimeKind = "pi",
 ): Promise<HubClient> {
-  const { token } = await resolveNodeCredential(config);
+  const { token } = await resolveNodeCredential(config, kind);
   return new HubClient(config.hubUrl!, token);
 }
 

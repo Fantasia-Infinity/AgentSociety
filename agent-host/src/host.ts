@@ -57,6 +57,70 @@ export async function registerHost(
   });
 }
 
+export async function registerDshHost(
+  config: AgentHostConfig,
+  hub: HubClient,
+): Promise<void> {
+  await hub.registerPrincipal({
+    principal_id: config.principalId,
+    kind: "human",
+    display_name: config.principalDisplayName,
+    metadata: {},
+  });
+  await hub.registerActor({
+    actor_id: config.actorId,
+    principal_id: config.principalId,
+    kind: "agent",
+    display_name: config.actorDisplayName,
+    capabilities: [
+      "dsh",
+      "code",
+      "hub-task",
+      ...(config.webSearchMode !== "disabled" ? ["web-search"] : []),
+      ...(config.remoteToolPolicy === "full" ? ["workspace-write"] : []),
+    ],
+    metadata: {
+      runtime: "dsh",
+      runtime_version: "0.1.0-rc.5",
+      remote_tool_policy: config.remoteToolPolicy,
+      worker_session_mode: config.workerSessionMode,
+    },
+  });
+  await hub.registerNode({
+    node_id: config.nodeId,
+    actor_id: config.actorId,
+    display_name: config.nodeDisplayName,
+    capabilities: ["filesystem", "remote-worker"],
+    metadata: {
+      platform: platform(),
+      release: release(),
+      workspace_root: config.workspaceRoot,
+      runtime: "dsh",
+    },
+  });
+}
+
+export function resolveDshIdentity(
+  config: AgentHostConfig,
+): AgentHostConfig {
+  const actorId =
+    process.env.AGENT_ACTOR_ID?.trim() ||
+    (config.actorId.startsWith("pi-")
+      ? `dsh-${config.actorId.slice("pi-".length)}`
+      : `dsh-${config.actorId}`);
+  const nodeId =
+    process.env.AGENT_NODE_ID?.trim() || `dsh-${config.nodeId}`;
+  return {
+    ...config,
+    actorId,
+    actorDisplayName:
+      process.env.AGENT_ACTOR_NAME?.trim() ||
+      `DeepSeek Harness on ${hostname()}`,
+    nodeId,
+    nodeDisplayName: process.env.AGENT_NODE_NAME?.trim() || hostname(),
+  };
+}
+
 export function resolveAdapterIdentity(
   config: AgentHostConfig,
   adapter: AdapterManifest,

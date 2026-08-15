@@ -19,6 +19,7 @@ import {
   resolve,
 } from "node:path";
 
+import { sanitizedAdapterEnv } from "./child-env.js";
 import type { AgentHostConfig } from "./config.js";
 import { HubClient } from "./hub-client.js";
 import type {
@@ -51,6 +52,20 @@ export function renderArgs(
     arg.replace(/\{([a-z0-9_]+)\}/gu, (match, name: string) => {
       return variables[name] !== undefined ? variables[name] : match;
     }),
+  );
+}
+
+export function renderEnv(
+  env: Record<string, string>,
+  variables: Record<string, string>,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(env).map(([key, value]) => [
+      key,
+      value.replace(/\{([a-z0-9_]+)\}/gu, (match, name: string) => {
+        return variables[name] !== undefined ? variables[name] : match;
+      }),
+    ]),
   );
 }
 
@@ -129,19 +144,7 @@ export function discoverSessionId(cwd: string, glob: string): string | undefined
   return uuid ?? base;
 }
 
-const CREDENTIAL_ENV_PATTERN =
-  /^(AGENT_HUB_(NODE_)?TOKEN|AGENT_HUB_PASSWORD|AGENT_HUB_API_TOKEN|AGENT_REMOTE_API_KEY|AGENT_API_KEY|LLM_API_KEY|AGENT_HUB_USERNAME|AGENT_HUB_SECRET|AGENT_HUB_(NODE_TOKEN|TOKEN|PASSWORD)_CREDENTIAL_SERVICE)$/u;
-
-export function sanitizedAdapterEnv(
-  env: NodeJS.ProcessEnv,
-): NodeJS.ProcessEnv {
-  const sanitized: NodeJS.ProcessEnv = {};
-  for (const [key, value] of Object.entries(env)) {
-    if (CREDENTIAL_ENV_PATTERN.test(key)) continue;
-    sanitized[key] = value;
-  }
-  return sanitized;
-}
+export { sanitizedAdapterEnv } from "./child-env.js";
 
 function splitGlob(patternPath: string): [string, string] {  const marker = patternPath.indexOf("**");
   if (marker < 0) {
@@ -377,6 +380,11 @@ export class BridgeWorker {
       session_id: sessionId ?? "",
       sandbox:
         process.env.AGENT_ADAPTER_SANDBOX?.trim() || "workspace-write",
+      remote_api_key: this.config.remoteApiKey ?? "",
+      remote_base_url: this.config.remoteBaseUrl ?? "",
+      remote_model: this.config.remoteModel ?? "",
+      hub_url: this.config.hubUrl ?? "",
+      hub_token: this.config.hubNodeToken ?? this.config.hubToken ?? "",
     };
     const args =
       sessionId && this.adapter.session?.resume_args
@@ -407,7 +415,7 @@ export class BridgeWorker {
       cwd,
       env: {
         ...sanitizedAdapterEnv(process.env),
-        ...this.adapter.env,
+        ...renderEnv(this.adapter.env ?? {}, variables),
         AGENT_HUB_TASK_FILE: envelopePath,
         AGENT_HUB_WORKSPACE: cwd,
         AGENT_HUB_TASK_ID: task.task_id,

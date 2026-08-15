@@ -10,6 +10,11 @@ const KNOWN_PLACEHOLDERS = new Set([
   "workspace",
   "session_id",
   "sandbox",
+  "remote_api_key",
+  "remote_base_url",
+  "remote_model",
+  "hub_url",
+  "hub_token",
 ]);
 
 export function builtinAdaptersDir(): string {
@@ -74,6 +79,7 @@ export function validateAdapterManifest(value: unknown): AdapterManifest {
   const args = stringArray(item, "args");
   validateArgs(args);
   const env = optionalStringRecord(item, "env");
+  if (env) validateValues(Object.values(env));
   const resultMode = requiredString(item, "result_mode");
   if (resultMode !== "file" && resultMode !== "stdout_json") {
     throw new Error("result_mode must be file or stdout_json");
@@ -139,11 +145,15 @@ function validateSession(
 }
 
 function validateArgs(args: string[]): void {
-  for (const arg of args) {
-    for (const match of arg.matchAll(/\{([a-z0-9_]+)\}/gu)) {
+  validateValues(args);
+}
+
+function validateValues(values: string[]): void {
+  for (const value of values) {
+    for (const match of value.matchAll(/\{([a-z0-9_]+)\}/gu)) {
       const name = match[1];
       if (name && !KNOWN_PLACEHOLDERS.has(name)) {
-        throw new Error(`Unknown placeholder {${name}} in adapter args`);
+        throw new Error(`Unknown placeholder {${name}} in adapter manifest`);
       }
     }
   }

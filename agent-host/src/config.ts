@@ -14,6 +14,10 @@ export type RemotePiResourcePolicy =
   | "disabled"
   | "global"
   | "trusted_project";
+export type DshPermissionMode =
+  | "workspace-write"
+  | "read-only"
+  | "danger-full-access";
 
 export interface AgentHostConfig {
   hubEnabled: boolean;
@@ -55,6 +59,28 @@ export interface AgentHostConfig {
   contextWindow: number;
   maxOutputTokens: number;
   thinkingLevel: string;
+  /** DeepSeek Harness launcher, e.g. ["dsh"] or ["node", ".../apps/cli/lib/bin.js"]. */
+  dshCommand?: string[];
+  /** DeepSeek Harness JSON-RPC runtime executable, default "dsh-jsonrpc-agent". */
+  dshRuntimeBin?: string;
+  /** Extra args inserted before the runtime config path. */
+  dshRuntimeArgs?: string[];
+  /** Absolute path to the dsh worker cordis.yml, default agent-host/config/dsh-worker.cordis.yml. */
+  dshConfigPath?: string;
+  /** Model id requested from the dsh runtime, default remoteModel or deepseek-v4-flash. */
+  dshModel?: string;
+  /** dsh provider route, default deepseek-official. */
+  dshProvider?: string;
+  /** Session/persistence root for the dsh runtime, default <sessionDir>/dsh-sessions. */
+  dshSessionRoot?: string;
+  /** Sandbox permission mode for dsh worker sessions. */
+  dshPermissionMode?: DshPermissionMode;
+  /** Per-request output cap for the dsh runtime, default maxOutputTokens. */
+  dshMaxTokens?: number;
+  /** Mount AgentSociety Hub MCP tools in the dsh worker runtime (opt-in). */
+  dshHubMcp?: boolean;
+  /** Mount dsh's DeepSeek web_search provider in the worker runtime (opt-in). */
+  dshWebSearch?: boolean;
 }
 
 export function loadProjectEnv(path?: string): void {
@@ -130,6 +156,35 @@ function nonNegativeNumber(name: string, fallback: number): number {
 function stableSlug(value: string): string {
   const slug = value.toLowerCase().replace(/[^a-z0-9._-]+/gu, "-");
   return slug.replace(/^-+|-+$/gu, "") || "node";
+}
+
+/**
+ * Parse an optional command environment value. A JSON array is accepted for
+ * paths containing spaces; otherwise the value is split on whitespace.
+ */
+export function commandList(
+  name: string,
+  fallback: string[],
+): string[] {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  if (raw.startsWith("[")) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error(`${name} must be valid JSON when it starts with '['`);
+    }
+    if (
+      !Array.isArray(parsed) ||
+      parsed.length === 0 ||
+      parsed.some((entry) => typeof entry !== "string" || !entry.trim())
+    ) {
+      throw new Error(`${name} must be a JSON array of non-empty strings`);
+    }
+    return parsed.map((entry) => entry.trim());
+  }
+  return raw.split(/\s+/u).filter(Boolean);
 }
 
 export function assertRemoteUrl(value: string): string {
@@ -274,11 +329,44 @@ export function loadConfig(): AgentHostConfig {
       process.env.AGENT_REMOTE_API_KEY_KEYCHAIN_ACCOUNT?.trim(),
       "remote model",
     );
-  if (!piProvider && (!remoteBaseUrl || !remoteModel)) {
+  const dshConfigured = Boolean(
+    process.env.AGENT_DSH_CONFIG?.trim() ||
+      process.env.AGENT_DSH_RUNTIME_BIN?.trim(),
+  );
+  if (!piProvider && (!remoteBaseUrl || !remoteModel) && !dshConfigured) {
     throw new Error(
-      "Configure PI_PROVIDER/PI_MODEL or a remote LLM_BASE_URL/LLM_MODEL",
+      "Configure PI_PROVIDER/PI_MODEL, a remote LLM_BASE_URL/LLM_MODEL, or the DeepSeek Harness runtime (AGENT_DSH_CONFIG/AGENT_DSH_RUNTIME_BIN)",
     );
   }
+  const dshPermissionMode = (
+    process.env.AGENT_DSH_PERMISSION_MODE?.trim() ||
+    (remoteToolPolicy === "full" ? "workspace-write" : "read-only")
+  ) as DshPermissionMode;
+  if (
+    !["workspace-write", "read-only", "danger-full-access"].includes(
+      dshPermissionMode,
+    )
+  ) {
+    throw new Error(
+      "AGENT_DSH_PERMISSION_MODE must be workspace-write, read-only, or danger-full-access",
+    );
+  }
+  const dshRuntimeBin =
+    process.env.AGENT_DSH_RUNTIME_BIN?.trim() || "dsh-jsonrpc-agent";
+  const dshRuntimeArgs = commandList("AGENT_DSH_RUNTIME_ARGS", []);
+  const dshCommand = commandList("AGENT_DSH_COMMAND", ["dsh"]);
+  const dshModel =
+    process.env.AGENT_DSH_MODEL?.trim() ||
+    remoteModel ||
+    "deepseek-v4-flash";
+  const dshSessionRoot = resolve(
+    process.env.AGENT_DSH_SESSION_ROOT?.trim() ||
+      resolve(loadSessionDir(false), "dsh-sessions"),
+  );
+  const dshMaxTokens = positiveNumber(
+    "AGENT_DSH_MAX_TOKENS",
+    positiveNumber("AGENT_MODEL_MAX_TOKENS", 8_192),
+  );
 
   const workspaceRoot = resolve(
     process.env.AGENT_WORKSPACE_ROOT?.trim() || process.cwd(),
@@ -342,6 +430,20 @@ export function loadConfig(): AgentHostConfig {
     maxOutputTokens: positiveNumber("AGENT_MODEL_MAX_TOKENS", 8_192),
     thinkingLevel:
       process.env.AGENT_THINKING_LEVEL?.trim() || "off",
+    ...(process.env.AGENT_DSH_CONFIG?.trim()
+      ? { dshConfigPath: resolve(process.env.AGENT_DSH_CONFIG.trim()) }
+      : {}),
+    dshCommand,
+    dshRuntimeBin,
+    ...(dshRuntimeArgs.length ? { dshRuntimeArgs } : {}),
+    dshModel,
+    dshProvider:
+      process.env.AGENT_DSH_PROVIDER?.trim() || "deepseek-official",
+    dshSessionRoot,
+    dshPermissionMode,
+    dshMaxTokens,
+    dshHubMcp: process.env.AGENT_DSH_HUB_MCP === "1",
+    dshWebSearch: process.env.AGENT_DSH_WEB_SEARCH === "1",
   };
 }
 

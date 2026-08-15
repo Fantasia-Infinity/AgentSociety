@@ -10,7 +10,14 @@ import {
   runSelfUpdate,
   type SelfUpdateReport,
 } from "./self-update.js";
-import type { AgentEngine, HubClaim, HubTask } from "./types.js";
+import {
+  PI_ENGINE_PROFILE,
+  type AgentEngine,
+  type AgentEngineProfile,
+  type AgentSessionPosition,
+  type HubClaim,
+  type HubTask,
+} from "./types.js";
 import {
   WorkerSessionRegistry,
   type WorkerSessionRecord,
@@ -49,6 +56,7 @@ export class TaskWorker {
       process.exit(0);
     },
     private readonly workerSlot = 0,
+    private readonly engineProfile: AgentEngineProfile = PI_ENGINE_PROFILE,
   ) {
     this.registry = new RunSessionRegistry(config.sessionDir);
     this.workerSessions = new WorkerSessionRegistry(config.sessionDir);
@@ -73,7 +81,7 @@ export class TaskWorker {
 
   async runForever(signal: AbortSignal): Promise<void> {
     this.output(
-      `Pi worker ${this.workerSlot + 1} ready as ${this.config.actorId} on ${this.config.nodeId} (${this.config.workerSessionMode} sessions)`,
+      `${this.engineProfile.label} worker ${this.workerSlot + 1} ready as ${this.config.actorId} on ${this.config.nodeId} (${this.config.workerSessionMode} sessions)`,
     );
     try {
       while (!signal.aborted) {
@@ -102,6 +110,7 @@ export class TaskWorker {
     cwd: string,
     conversation: Awaited<ReturnType<AgentEngine["createConversation"]>>,
   ): Promise<void> {
+    if (!this.engineProfile.generateSessionTitles) return;
     // Ask a throwaway in-memory Pi session to summarize the objective into a
     // short session title. This keeps the summarizing exchange out of the
     // durable task session, and a failure never blocks the task itself.
@@ -134,6 +143,30 @@ export class TaskWorker {
     }
   }
 
+  private sessionFields(options: {
+    conversation: Awaited<ReturnType<AgentEngine["createConversation"]>>;
+    continuous: boolean;
+    reused: boolean;
+    turnStart?: AgentSessionPosition;
+    turnEnd?: AgentSessionPosition;
+  }): Record<string, unknown> {
+    const prefix = this.engineProfile.sessionFieldPrefix;
+    const turnPrefix = prefix.endsWith("_session")
+      ? prefix.slice(0, -"_session".length)
+      : prefix;
+    return {
+      [`${prefix}_id`]: options.conversation.sessionId,
+      [`${prefix}_mode`]: options.continuous ? "continuous" : "per_task",
+      [`${prefix}_reused`]: options.reused,
+      ...(options.turnStart
+        ? { [`${turnPrefix}_turn_start_entry`]: options.turnStart.entryCount }
+        : {}),
+      ...(options.turnEnd
+        ? { [`${turnPrefix}_turn_end_entry`]: options.turnEnd.entryCount }
+        : {}),
+    };
+  }
+
   private async execute(
     claim: HubClaim,
     signal?: AbortSignal,
@@ -164,7 +197,7 @@ export class TaskWorker {
       run_id: run.run_id,
       lease_token: leaseToken,
       status: "working",
-      message: "Pi session starting",
+      message: `${this.engineProfile.label} session starting`,
     });
 
     let renewalRunning = false;
@@ -193,7 +226,7 @@ export class TaskWorker {
           run_id: run.run_id,
           lease_token: leaseToken,
           status: "working",
-          message: "Pi session active",
+          message: `${this.engineProfile.label} session active`,
         })
         .catch((error: unknown) => {
           this.output(`Lease renewal failed: ${errorMessage(error)}`);
@@ -232,7 +265,9 @@ export class TaskWorker {
         return false;
       }
       if (!conversation.sessionFile) {
-        throw new Error("Remote Pi session did not create a persistent file");
+        throw new Error(
+          `Remote ${this.engineProfile.label} session did not create a persistent file`,
+        );
       }
       if (!continuous) await this.applySessionTitle(task, cwd, conversation);
       conversation.setTaskContext?.({
@@ -257,11 +292,13 @@ export class TaskWorker {
       await this.hub.updateRun(run.run_id, {
         status: "active",
         result: {
-          pi_session_id: conversation.sessionId,
-          pi_session_mode: continuous ? "continuous" : "per_task",
-          pi_session_reused: sessionReused,
+          ...this.sessionFields({
+            conversation,
+            continuous,
+            reused: sessionReused,
+            ...(turnStart ? { turnStart } : {}),
+          }),
           worker_slot: this.workerSlot,
-          ...(turnStart ? { pi_turn_start_entry: turnStart.entryCount } : {}),
         },
       });
       const result = await conversation.prompt(
@@ -285,17 +322,19 @@ export class TaskWorker {
         run_id: run.run_id,
         lease_token: leaseToken,
         status: "completed",
-        message: "Pi session completed",
+        message: `${this.engineProfile.label} session completed`,
         result: {
           text: result.text,
           provider: result.provider,
           model: result.model,
-          pi_session_id: result.sessionId,
-          pi_session_mode: continuous ? "continuous" : "per_task",
-          pi_session_reused: sessionReused,
+          ...this.sessionFields({
+            conversation,
+            continuous,
+            reused: sessionReused,
+            ...(turnStart ? { turnStart } : {}),
+            ...(turnEnd ? { turnEnd } : {}),
+          }),
           worker_slot: this.workerSlot,
-          ...(turnStart ? { pi_turn_start_entry: turnStart.entryCount } : {}),
-          ...(turnEnd ? { pi_turn_end_entry: turnEnd.entryCount } : {}),
         },
       });
       this.output(`Completed ${task.task_id}`);
@@ -365,13 +404,17 @@ export class TaskWorker {
     if (
       this.activeContinuous &&
       (this.activeContinuous.key !== key ||
+        this.activeContinuous.conversation.isUsable === false ||
         resetRequested ||
         this.shouldRotate(this.activeContinuous.record))
     ) {
       await this.dispose();
     }
 
-    if (this.activeContinuous?.key === key) {
+    if (
+      this.activeContinuous?.key === key &&
+      this.activeContinuous.conversation.isUsable !== false
+    ) {
       const record = this.workerSessions.upsert(
         scope,
         {
@@ -392,7 +435,7 @@ export class TaskWorker {
     let previous = resetRequested ? undefined : this.workerSessions.get(scope);
     if (previous && this.shouldRotate(previous)) {
       this.output(
-        `Rotating continuous Pi session ${previous.sessionId} for worker ${this.workerSlot + 1}`,
+        `Rotating continuous ${this.engineProfile.label} session ${previous.sessionId} for worker ${this.workerSlot + 1}`,
       );
       previous = undefined;
     }
@@ -410,11 +453,11 @@ export class TaskWorker {
         });
         reused = true;
         this.output(
-          `Resumed continuous Pi session ${conversation.sessionId} for worker ${this.workerSlot + 1}`,
+          `Resumed continuous ${this.engineProfile.label} session ${conversation.sessionId} for worker ${this.workerSlot + 1}`,
         );
       } catch (error) {
         this.output(
-          `Continuous Pi session recovery failed; creating a new session: ${errorMessage(error)}`,
+          `Continuous ${this.engineProfile.label} session recovery failed; creating a new session: ${errorMessage(error)}`,
         );
       }
     }
@@ -513,6 +556,7 @@ export class TaskWorker {
       if (task.status === "cancelled") return "cancelled";
     }
     if (
+      !this.engineProfile.supportsControls ||
       !conversation ||
       !this.hub.claimTaskControls ||
       !this.hub.acknowledgeTaskControl
@@ -525,11 +569,17 @@ export class TaskWorker {
     });
     for (const control of controls) {
       if (control.kind === "steer") {
-        if (!conversation.steer) throw new Error("Pi session does not support steering");
+        if (!conversation.steer) {
+          throw new Error(
+            `${this.engineProfile.label} session does not support steering`,
+          );
+        }
         await conversation.steer(control.message);
       } else {
         if (!conversation.followUp) {
-          throw new Error("Pi session does not support follow-up messages");
+          throw new Error(
+            `${this.engineProfile.label} session does not support follow-up messages`,
+          );
         }
         await conversation.followUp(control.message);
       }
@@ -660,7 +710,7 @@ function requireSessionFile(
   conversation: Awaited<ReturnType<AgentEngine["createConversation"]>>,
 ): string {
   if (!conversation.sessionFile) {
-    throw new Error("Remote Pi session did not create a persistent file");
+    throw new Error("Remote agent session did not create a persistent file");
   }
   return conversation.sessionFile;
 }

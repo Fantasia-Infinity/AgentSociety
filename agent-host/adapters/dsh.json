@@ -1,0 +1,13 @@
+{
+  "id": "dsh",
+  "display_name": "DeepSeek Harness",
+  "capabilities": ["code"],
+  "command": ["dsh", "--profile", "headless"],
+  "args": ["{prompt}"],
+  "env": {
+    "DSH_PERMISSION_MODE": "workspace-write"
+  },
+  "result_mode": "stdout_json",
+  "timeout_seconds": 3600,
+  "cancel_grace_seconds": 10
+}

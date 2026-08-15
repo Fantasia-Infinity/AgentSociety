@@ -20,6 +20,7 @@ import {
   parseStdoutResult,
   readAdapterResult,
   renderArgs,
+  renderEnv,
   writeTaskEnvelope,
 } from "../src/bridge.js";
 import { AdapterSessionRegistry } from "../src/adapter-session-registry.js";
@@ -538,4 +539,37 @@ test("bridge fails the task on timeout", async () => {
     await worker.dispose();
   }
   assert.equal(updates.at(-1)?.status, "failed");
+});
+
+test("bridge env placeholders resolve model and Hub credentials at spawn time", () => {
+  const env = renderEnv(
+    {
+      DEEPSEEK_API_KEY: "{remote_api_key}",
+      DEEPSEEK_BASE_URL: "{remote_base_url}",
+      DSH_MODEL: "{remote_model}",
+      AGENT_HUB_URL: "{hub_url}",
+      AGENT_HUB_TOKEN: "{hub_token}",
+    },
+    {
+      remote_api_key: "sk-test",
+      remote_base_url: "https://models.example/v1",
+      remote_model: "deepseek-v4-flash",
+      hub_url: "http://127.0.0.1:8090",
+      hub_token: "token",
+    },
+  );
+  assert.deepEqual(env, {
+    DEEPSEEK_API_KEY: "sk-test",
+    DEEPSEEK_BASE_URL: "https://models.example/v1",
+    DSH_MODEL: "deepseek-v4-flash",
+    AGENT_HUB_URL: "http://127.0.0.1:8090",
+    AGENT_HUB_TOKEN: "token",
+  });
+});
+
+test("dsh adapter manifest is valid", () => {
+  const value = JSON.parse(
+    readFileSync(join(process.cwd(), "adapters", "dsh.json"), "utf8"),
+  );
+  assert.equal(validateAdapterManifest(value).id, "dsh");
 });

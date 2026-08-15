@@ -21,7 +21,10 @@
     "sessions": "node dist/src/cli.js sessions",
     "doctor": "node dist/src/cli.js doctor",
     "worker": "node dist/src/cli.js worker",
-    "bridge": "node dist/src/cli.js bridge"
+    "bridge": "node dist/src/cli.js bridge",
+    "dsh-worker": "node dist/src/cli.js dsh-worker",
+    "dsh-once": "node dist/src/cli.js dsh-once",
+    "dsh-dispatch": "node dist/src/cli.js dsh-dispatch"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.84.0",
