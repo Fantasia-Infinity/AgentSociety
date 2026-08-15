@@ -23,11 +23,12 @@ if ($Command -eq "setup") {
 }
 
 $Config = Join-Path $RepositoryRoot ".env.agent"
+$PrivateConfig = Join-Path $RepositoryRoot ".private\env\agent.env"
 $Modules = Join-Path $AgentHost "node_modules"
 $Entrypoint = Join-Path $AgentHost "dist/src/cli.js"
 $CompletionMarker = Join-Path $AgentHost ".setup-complete"
 $DidSetup = $false
-if (-not (Test-Path $CompletionMarker) -or -not (Test-Path $Config) -or -not (Test-Path $Modules) -or -not (Test-Path $Entrypoint)) {
+if (-not (Test-Path $CompletionMarker) -or (-not (Test-Path $Config) -and -not (Test-Path $PrivateConfig)) -or -not (Test-Path $Modules) -or -not (Test-Path $Entrypoint)) {
     & $NpmCommand --prefix $AgentHost run setup
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $DidSetup = $true

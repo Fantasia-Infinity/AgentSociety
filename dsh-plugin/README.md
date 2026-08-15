@@ -61,6 +61,11 @@ node /path/to/dsh-TUI/bin/dsh-tui-local.js
 Set `AGENT_SOCIETY_WORKER=0` (or leave unset) so the interactive TUI does not
 claim Hub tasks.
 
+With the checkout layout above, `./agent` (from the AgentSociety checkout)
+launches this same source TUI automatically and passes the Hub MCP token.
+Set `AGENT_TUI_RUNTIME=pi` to force the legacy Pi TUI, or
+`AGENT_DSH_TUI_ROOT=/path/to/dsh-TUI` when the checkout lives elsewhere.
+
 ## Task input
 
 The worker reads the standard `task.input.workspace` field. Optional fields:

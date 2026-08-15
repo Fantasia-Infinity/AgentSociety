@@ -66,7 +66,7 @@ async function main() {
       mode: 0o600,
     });
     chmodSync(completionMarker, 0o600);
-    console.log("\nAgent setup is complete. Run ./agent to open the Pi TUI.");
+    console.log("\nAgent setup is complete. Run ./agent to open the DeepSeek Harness TUI (falls back to Pi).");
   }
 }
 

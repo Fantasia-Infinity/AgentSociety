@@ -67,7 +67,7 @@ PYTHONPATH=src python3 -m agent_hub.server
 ```bash
 git clone <repository-url> AgentSociety
 cd AgentSociety
-./agent               # Windows 用 ./agent.ps1
+./agent               # dsh TUI（缺 dsh-TUI 时回退 Pi）；Windows 用 ./agent.ps1
 ```
 
 首次运行会引导你填写模型连接信息（OpenAI-compatible URL、Model ID、API Key），

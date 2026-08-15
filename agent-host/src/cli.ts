@@ -3,6 +3,7 @@
 import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
@@ -71,10 +72,17 @@ async function main(): Promise<void> {
     return;
   }
 
+  const repositoryRoot = resolve(agentHostDir, "..");
   const pluginWorkerDefault =
     command === "worker" &&
     process.env.AGENT_WORKER_RUNTIME?.trim() !== "pi";
-  const config = loadConfig({ allowDshPlugin: pluginWorkerDefault });
+  const dshTuiDefault =
+    (command === "tui" || command === "interactive") &&
+    process.env.AGENT_TUI_RUNTIME?.trim() !== "pi";
+  const config = loadConfig({
+    allowDshPlugin: pluginWorkerDefault,
+    allowDshTui: dshTuiDefault,
+  });
   const hubRuntimeDisabled = process.env.AGENT_HUB_RUNTIME_DISABLED === "1";
   if (
     process.env.AGENT_HUB_RECEIVE_DISABLED?.trim() === "1" &&
@@ -269,6 +277,15 @@ async function main(): Promise<void> {
   }
 
   if (command === "interactive" || command === "tui" || command === "local") {
+    if (command !== "local") {
+      const started = await runDshTui(config, hub, repositoryRoot);
+      if (started) return;
+      console.warn(
+        "DeepSeek Harness TUI is unavailable; falling back to the Pi TUI. " +
+          "Run scripts/install-dsh-plugin.sh and keep the dsh-TUI checkout at " +
+          resolve(repositoryRoot, "..", "dsh-TUI") + ".",
+      );
+    }
     await runInteractive(config, hub);
     return;
   }
@@ -375,6 +392,135 @@ async function main(): Promise<void> {
     return;
   }
   throw new Error(`Unknown command: ${command}`);
+}
+
+async function runDshTui(
+  config: AgentHostConfig,
+  hub: HubClient | undefined,
+  repositoryRoot: string,
+): Promise<boolean> {
+  const runtime = process.env.AGENT_TUI_RUNTIME?.trim();
+  if (runtime !== undefined && runtime !== "dsh" && runtime !== "pi") {
+    throw new Error("AGENT_TUI_RUNTIME must be dsh or pi");
+  }
+  if (runtime === "pi") return false;
+  const forced = runtime === "dsh";
+  const tuiRoot =
+    process.env.AGENT_DSH_TUI_ROOT?.trim() ||
+    resolve(repositoryRoot, "..", "dsh-TUI");
+  const runScript = resolve(tuiRoot, "scripts", "run.ts");
+  const checkout =
+    process.env.DSH_CHECKOUT?.trim() ||
+    resolve(tuiRoot, "..", "deepseek-harness");
+  const dshHome =
+    process.env.DSH_HOME?.trim() || resolve(homedir(), ".dsh");
+  const pluginPatch = resolve(
+    dshHome,
+    "plugins",
+    "agent-society",
+    "cordis.patch.yml",
+  );
+  const missing: string[] = [];
+  if (!existsSync(runScript)) {
+    missing.push(`dsh-TUI source launcher (${runScript})`);
+  }
+  if (!existsSync(resolve(checkout, "apps", "cli", "package.json"))) {
+    missing.push(`DeepSeek Harness checkout (${checkout})`);
+  }
+  if (!existsSync(pluginPatch)) {
+    missing.push(`AgentSociety dsh plugin link (${pluginPatch})`);
+  }
+  if (missing.length > 0) {
+    const detail = missing.join("; ");
+    if (forced) throw new Error(`Cannot start dsh TUI: ${detail}.`);
+    console.warn(`Cannot start dsh TUI: ${detail}.`);
+    return false;
+  }
+
+  const require = createRequire(resolve(tuiRoot, "package.json"));
+  let tsxLoader: string;
+  try {
+    tsxLoader = require.resolve("tsx/esm");
+  } catch (error) {
+    const detail = `Cannot resolve tsx from ${tuiRoot}: ${error instanceof Error ? error.message : String(error)}`;
+    if (forced) throw new Error(detail);
+    console.warn(detail);
+    return false;
+  }
+
+  const env: NodeJS.ProcessEnv = {
+    ...sanitizedChildEnv(process.env),
+    DSH_CHECKOUT: checkout,
+    AGENT_SOCIETY_WORKER: "0",
+  };
+  if (hub && config.hubUrl) {
+    env.AGENT_SOCIETY_HUB_MCP = "1";
+    env.AGENT_SOCIETY_HUB_URL = config.hubUrl;
+    env.AGENT_SOCIETY_HUB_TOKEN = config.hubToken ?? hub.nodeToken;
+  } else {
+    env.AGENT_SOCIETY_HUB_MCP = "0";
+  }
+  if (config.remoteApiKey) {
+    env.DEEPSEEK_API_KEY = config.remoteApiKey;
+  }
+  if (config.remoteBaseUrl) {
+    env.DEEPSEEK_BASE_URL = config.remoteBaseUrl;
+  }
+  if (process.argv.includes("--resume")) {
+    let sessionId = "";
+    for (const dir of [".dsh-tui", ".dsh-cc"]) {
+      try {
+        sessionId = readFileSync(
+          resolve(homedir(), dir, "resume.txt"),
+          "utf8",
+        ).trim();
+        if (sessionId) break;
+      } catch {
+        // No resume marker is a normal cold-start case.
+      }
+    }
+    if (sessionId) {
+      env.DSH_TUI_RESUME_SESSION = sessionId;
+      env.DSH_CC_RESUME_SESSION = sessionId;
+    }
+  }
+
+  console.log(
+    `Starting dsh TUI from ${tuiRoot} (Hub tools ${hub ? "enabled" : "disabled"}).`,
+  );
+  const child = spawn(
+    process.execPath,
+    ["--import", tsxLoader, runScript],
+    { cwd: process.cwd(), stdio: "inherit", env },
+  );
+  return await new Promise<boolean>((resolveStart) => {
+    let settled = false;
+    const finish = (started: boolean): void => {
+      if (settled) return;
+      settled = true;
+      resolveStart(started);
+    };
+    const forwardSignal = (signal: NodeJS.Signals): void => {
+      child.kill(signal);
+    };
+    process.once("SIGINT", forwardSignal);
+    process.once("SIGTERM", forwardSignal);
+    child.once("error", (error) => {
+      const detail = `Could not start dsh TUI: ${error.message}`;
+      if (forced) throw new Error(detail);
+      console.warn(detail);
+      finish(false);
+    });
+    child.once("exit", (code, signal) => {
+      process.removeListener("SIGINT", forwardSignal);
+      process.removeListener("SIGTERM", forwardSignal);
+      if (code) process.exitCode = code;
+      if (signal && ["SIGINT", "SIGTERM"].includes(signal) === false) {
+        process.exitCode = 1;
+      }
+      finish(true);
+    });
+  });
 }
 
 async function runDshPluginWorker(

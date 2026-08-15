@@ -46,6 +46,17 @@ AGENT_SOCIETY_HUB_TOKEN='<token>' \
 node /path/to/dsh-TUI/bin/dsh-tui-local.js
 ```
 
+`./agent`（即 `./agent tui`）现在会优先直接启动同级 checkout 里的
+`dsh-TUI/scripts/run.ts`，并把 `~/.dsh/plugins/agent-society` 作为外部
+bundle 加载；`dsh-TUI`、DeepSeek Harness checkout 或插件链接缺失时自动回退
+Pi TUI。强制选择运行时：
+
+```bash
+AGENT_TUI_RUNTIME=dsh ./agent   # 缺 dsh-TUI 时直接报错
+AGENT_TUI_RUNTIME=pi ./agent    # 强制 Pi TUI
+AGENT_DSH_TUI_ROOT=/path/to/dsh-TUI ./agent
+```
+
 `./agent worker` 在检测到 `agent-society-worker` profile 时会默认启动
 上面的插件进程，并把 `AGENT_REMOTE_TOOL_POLICY` 映射为
 `AGENT_SOCIETY_TOOL_POLICY`；profile 不存在或 `dsh` 无法启动时自动回退到

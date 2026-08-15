@@ -230,7 +230,7 @@ function isBannedRemoteHost(host: string): boolean {
 }
 
 export function loadConfig(
-  options: { allowDshPlugin?: boolean } = {},
+  options: { allowDshPlugin?: boolean; allowDshTui?: boolean } = {},
 ): AgentHostConfig {
   loadProjectEnv(process.env.AGENT_ENV_FILE);
   const host = stableSlug(hostname());
@@ -357,7 +357,8 @@ export function loadConfig(
     !piProvider &&
     (!remoteBaseUrl || !remoteModel) &&
     !dshConfigured &&
-    !dshPluginConfigured
+    !dshPluginConfigured &&
+    options.allowDshTui !== true
   ) {
     throw new Error(
       "Configure PI_PROVIDER/PI_MODEL, a remote LLM_BASE_URL/LLM_MODEL, or the DeepSeek Harness runtime (AGENT_DSH_CONFIG/AGENT_DSH_RUNTIME_BIN)",
