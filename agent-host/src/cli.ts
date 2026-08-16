@@ -558,6 +558,27 @@ async function runDshTui(
   });
 }
 
+function profileIncludesCorePlugin(profilePackage: string): boolean {
+  try {
+    const manifest = JSON.parse(readFileSync(profilePackage, "utf8")) as {
+      dsh?: { profile?: { bundles?: unknown } };
+      dependencies?: Record<string, unknown>;
+    };
+    const bundles = Array.isArray(manifest.dsh?.profile?.bundles)
+      ? manifest.dsh.profile.bundles
+      : [];
+    return (
+      bundles.includes("@agent-society/dsh-agent-society") ||
+      Object.prototype.hasOwnProperty.call(
+        manifest.dependencies ?? {},
+        "@agent-society/dsh-agent-society",
+      )
+    );
+  } catch {
+    return false;
+  }
+}
+
 async function runDshWeb(
   config: AgentHostConfig,
   hub: HubClient | undefined,
@@ -571,6 +592,7 @@ async function runDshWeb(
     profile,
     "package.json",
   );
+  const profileReady = profileIncludesCorePlugin(profilePackage);
   const legacyPatch = resolve(
     dirname(fileURLToPath(import.meta.url)),
     "..",
@@ -579,12 +601,14 @@ async function runDshWeb(
     "agent-society.dsh.yml",
   );
   const webArgs = process.argv.slice(3);
-  const command = existsSync(profilePackage)
+  const command = profileReady
     ? [...(config.dshCommand ?? ["dsh"]), "--profile", profile, ...webArgs]
     : [...(config.dshCommand ?? ["dsh"]), "web", "--patch", legacyPatch, ...webArgs];
-  if (!existsSync(profilePackage)) {
+  if (!profileReady) {
     console.warn(
-      `dsh web profile "${profile}" not found; using legacy patch: ${legacyPatch}`,
+      existsSync(profilePackage)
+        ? `dsh web profile "${profile}" does not include the AgentSociety bundle; using legacy patch: ${legacyPatch}`
+        : `dsh web profile "${profile}" not found; using legacy patch: ${legacyPatch}`,
     );
   }
   console.log(`Starting dsh web: ${command.join(" ")}`);

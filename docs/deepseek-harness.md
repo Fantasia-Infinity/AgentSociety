@@ -71,7 +71,8 @@ profile；源码开发时可先执行 `sh scripts/install-dsh-plugin.sh`，再�
 AGENT_DSH_COMMAND='["node","/path/to/deepseek-harness/apps/cli/lib/bin.js"]' ./agent web
 ```
 
-profile 不存在时，`./agent web` 自动回退到
+profile 不存在（或不包含 `@agent-society/dsh-agent-society` bundle）时，
+`./agent web` 自动回退到
 `dsh web --patch agent-host/dsh/agent-society.dsh.yml`（兼容 `dsh-dispatch`
 之前的本地派发方式）。
 
