@@ -345,7 +345,7 @@ async function main(): Promise<void> {
   }
 
   if (command === "worker" && config.workerRuntime === "dsh-plugin") {
-    const started = await runDshPluginWorker(config, hub!);
+    const started = await runDshPluginWorker(config, hub!, repositoryRoot);
     if (started) return;
     console.warn(
       "DeepSeek Harness plugin worker is unavailable; falling back to Pi. " +
@@ -523,9 +523,12 @@ async function runDshTui(
   });
 }
 
+const DSH_SELF_UPDATE_EXIT_CODE = 75
+
 async function runDshPluginWorker(
   config: AgentHostConfig,
   hub: HubClient,
+  repositoryRoot: string,
 ): Promise<boolean> {
   const profile = config.dshPluginProfile ?? "agent-society-worker";
   const dshHome =
@@ -552,68 +555,83 @@ async function runDshPluginWorker(
   );
   const model =
     config.dshModel ?? config.remoteModel ?? "deepseek-v4-flash";
-  const child = spawn(command[0]!, command.slice(1), {
-    stdio: "inherit",
-    env: {
-      ...sanitizedChildEnv(process.env),
-      AGENT_SOCIETY_WORKER: "1",
-      AGENT_SOCIETY_HUB_URL: config.hubUrl!,
-      AGENT_SOCIETY_HUB_TOKEN: hub.nodeToken,
-      AGENT_SOCIETY_WORKSPACE_ROOT: config.workspaceRoot,
-      AGENT_SOCIETY_SESSION_MODE: config.workerSessionMode,
-      AGENT_SOCIETY_TOOL_POLICY: config.remoteToolPolicy,
-      AGENT_SOCIETY_POLL_SECONDS: String(config.pollSeconds),
-      AGENT_SOCIETY_LEASE_SECONDS: String(config.leaseSeconds),
-      AGENT_SOCIETY_ACTOR_ID: config.actorId,
-      AGENT_SOCIETY_NODE_ID: config.nodeId,
-      AGENT_SOCIETY_PRINCIPAL_ID: config.principalId,
-      AGENT_SOCIETY_DISPLAY_NAME: config.actorDisplayName,
-      AGENT_SOCIETY_PROVIDER: config.dshProvider ?? "deepseek-official",
-      AGENT_SOCIETY_MODEL: model,
-      DSH_MODEL: model,
-      AGENT_SOCIETY_MAX_TOKENS: String(
-        config.dshMaxTokens ?? config.maxOutputTokens,
-      ),
-      AGENT_SOCIETY_SESSION_COMPRESSION:
-        config.dshSessionCompression ?? "none",
-      AGENT_SOCIETY_HUB_MCP: config.dshHubMcp === false ? "0" : "1",
-    },
-  });
-  return await new Promise<boolean>((resolveStart) => {
-    let settled = false;
-    const finish = (started: boolean): void => {
-      if (settled) return;
-      settled = true;
-      resolveStart(started);
-    };
-    const forwardSignal = (signal: NodeJS.Signals): void => {
-      child.kill(signal);
-    };
-    process.once("SIGINT", forwardSignal);
-    process.once("SIGTERM", forwardSignal);
-    child.once("error", (error) => {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT") {
-        console.warn(
-          `Could not start ${command[0]!}: ${error.message}.`,
-        );
-        finish(false);
-        return;
-      }
-      console.error(`DeepSeek Harness plugin worker failed: ${error.message}`);
-      process.exitCode = 1;
-      finish(true);
-    });
-    child.once("exit", (code, signal) => {
-      process.removeListener("SIGINT", forwardSignal);
-      process.removeListener("SIGTERM", forwardSignal);
-      if (code) process.exitCode = code;
-      if (signal && ["SIGINT", "SIGTERM"].includes(signal) === false) {
-        process.exitCode = 1;
-      }
-      finish(true);
-    });
-  });
+  const env: NodeJS.ProcessEnv = {
+    ...sanitizedChildEnv(process.env),
+    AGENT_SOCIETY_WORKER: "1",
+    AGENT_SOCIETY_HUB_URL: config.hubUrl!,
+    AGENT_SOCIETY_HUB_TOKEN: hub.nodeToken,
+    AGENT_SOCIETY_WORKSPACE_ROOT: config.workspaceRoot,
+    AGENT_SOCIETY_SESSION_MODE: config.workerSessionMode,
+    AGENT_SOCIETY_TOOL_POLICY: config.remoteToolPolicy,
+    AGENT_SOCIETY_REPOSITORY_ROOT: repositoryRoot,
+    AGENT_SELF_UPDATE: config.selfUpdateEnabled === false ? "0" : "1",
+    AGENT_SOCIETY_POLL_SECONDS: String(config.pollSeconds),
+    AGENT_SOCIETY_LEASE_SECONDS: String(config.leaseSeconds),
+    AGENT_SOCIETY_ACTOR_ID: config.actorId,
+    AGENT_SOCIETY_NODE_ID: config.nodeId,
+    AGENT_SOCIETY_PRINCIPAL_ID: config.principalId,
+    AGENT_SOCIETY_DISPLAY_NAME: config.actorDisplayName,
+    AGENT_SOCIETY_PROVIDER: config.dshProvider ?? "deepseek-official",
+    AGENT_SOCIETY_MODEL: model,
+    DSH_MODEL: model,
+    AGENT_SOCIETY_MAX_TOKENS: String(
+      config.dshMaxTokens ?? config.maxOutputTokens,
+    ),
+    AGENT_SOCIETY_SESSION_COMPRESSION:
+      config.dshSessionCompression ?? "none",
+    AGENT_SOCIETY_HUB_MCP: config.dshHubMcp === false ? "0" : "1",
+  }
+  for (;;) {
+    const outcome = await new Promise<{ started: boolean; restart: boolean }>(
+      (resolveStart) => {
+        const child = spawn(command[0]!, command.slice(1), {
+          stdio: "inherit",
+          env,
+        })
+        let settled = false
+        const finish = (started: boolean, restart = false): void => {
+          if (settled) return
+          settled = true
+          resolveStart({ started, restart })
+        }
+        const forwardSignal = (signal: NodeJS.Signals): void => {
+          child.kill(signal)
+        }
+        process.once("SIGINT", forwardSignal)
+        process.once("SIGTERM", forwardSignal)
+        child.once("error", (error) => {
+          process.removeListener("SIGINT", forwardSignal)
+          process.removeListener("SIGTERM", forwardSignal)
+          const code = (error as NodeJS.ErrnoException).code
+          if (code === "ENOENT") {
+            console.warn(`Could not start ${command[0]!}: ${error.message}.`)
+            finish(false)
+            return
+          }
+          console.error(`DeepSeek Harness plugin worker failed: ${error.message}`)
+          process.exitCode = 1
+          finish(true)
+        })
+        child.once("exit", (code, signal) => {
+          process.removeListener("SIGINT", forwardSignal)
+          process.removeListener("SIGTERM", forwardSignal)
+          if (code === DSH_SELF_UPDATE_EXIT_CODE) {
+            console.log("Self-update applied; restarting dsh plugin worker.")
+            finish(true, true)
+            return
+          }
+          if (code) process.exitCode = code
+          if (signal && ["SIGINT", "SIGTERM"].includes(signal) === false) {
+            process.exitCode = 1
+          }
+          finish(true)
+        })
+      },
+    )
+    if (!outcome.started) return false
+    if (!outcome.restart) return true
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 1_000))
+  }
 }
 
 function adapterArgument(argv: string[]): string | undefined {

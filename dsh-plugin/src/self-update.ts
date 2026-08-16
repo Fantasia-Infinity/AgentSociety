@@ -1,0 +1,256 @@
+/**
+ * Self-update support for the in-process dsh worker plugin.
+ *
+ * A Hub task with `input.action === "self_update"` is handled by the worker
+ * process itself, exactly like the Pi worker path: it pulls the AgentSociety
+ * repository, installs changed dependencies, rebuilds both runtimes, reports
+ * the result to the Hub, and exits with a dedicated code that makes the CLI
+ * parent restart the dsh worker.
+ */
+
+import { spawn, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+} from 'node:fs'
+import { dirname, resolve } from 'node:path'
+
+import type { HubTask } from './hub-client.js'
+
+export const SELF_UPDATE_ACTION = 'self_update'
+export const SELF_UPDATE_EXIT_CODE = 75
+
+const SELF_UPDATE_BRANCH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u
+
+export interface PluginSelfUpdateReport {
+  ok: boolean
+  updated: boolean
+  needsRestart: boolean
+  steps: string[]
+  error?: string
+  before?: string
+  after?: string
+}
+
+export interface PluginSelfUpdateOptions {
+  repositoryRoot: string
+  enabled: boolean
+  nodePath: string
+}
+
+export function isSelfUpdateTask(task: HubTask): boolean {
+  return task.input?.action === SELF_UPDATE_ACTION
+}
+
+export async function runPluginSelfUpdate(
+  task: HubTask,
+  options: PluginSelfUpdateOptions,
+): Promise<PluginSelfUpdateReport> {
+  if (!options.enabled) {
+    throw new Error('Self-update is disabled on this host (AGENT_SELF_UPDATE=0)')
+  }
+  const steps: string[] = []
+  const record = (label: string, output: string) => {
+    const trimmed = output.trim()
+    steps.push(trimmed ? `${label}: ${trimmed.slice(0, 800)}` : label)
+  }
+  const repositoryRoot = options.repositoryRoot
+  const pluginDir = resolve(repositoryRoot, 'dsh-plugin')
+  const agentHostDir = resolve(repositoryRoot, 'agent-host')
+  if (!existsSync(resolve(repositoryRoot, '.git')) && !existsSync(resolve(repositoryRoot, 'agent-host', 'package.json'))) {
+    throw new Error(`Self-update repository root not found: ${repositoryRoot}`)
+  }
+  const branch = selfUpdateBranch(task)
+  const npm = resolveNpm(options.nodePath)
+
+  const before = (
+    await run(repositoryRoot, 'git', ['rev-parse', '--short', 'HEAD'], 'Current commit', record)
+  ).trim()
+  await run(repositoryRoot, 'git', ['fetch', 'origin'], 'Fetch origin', record)
+  await run(
+    repositoryRoot,
+    'git',
+    ['pull', '--ff-only', 'origin', branch],
+    `Pull origin/${branch}`,
+    record,
+  )
+  const after = (
+    await run(repositoryRoot, 'git', ['rev-parse', '--short', 'HEAD'], 'Updated commit', record)
+  ).trim()
+  const updated = after !== before
+
+  const stale =
+    needsRebuild(agentHostDir, ['dist']) ||
+    needsRebuild(pluginDir, ['lib'])
+
+  await run(
+    agentHostDir,
+    options.nodePath,
+    ['scripts/patch-pi-brace-expansion.mjs'],
+    'Apply security patch',
+    record,
+  )
+  await run(
+    agentHostDir,
+    options.nodePath,
+    ['scripts/patch-pi-brace-expansion.mjs', '--check'],
+    'Verify security patch',
+    record,
+  )
+
+  if (updated) {
+    await runNpm(npm, pluginDir, ['ci', '--ignore-scripts'], 'dsh-plugin npm ci', record)
+    await runNpm(npm, agentHostDir, ['ci', '--ignore-scripts'], 'agent-host npm ci', record)
+    await run(
+      agentHostDir,
+      options.nodePath,
+      ['scripts/patch-pi-brace-expansion.mjs'],
+      'Apply security patch after npm ci',
+      record,
+    )
+  }
+
+  if (updated || stale) {
+    await runNpm(npm, pluginDir, ['run', 'build'], 'dsh-plugin build', record)
+    await runNpm(npm, agentHostDir, ['run', 'build'], 'agent-host build', record)
+  } else {
+    record('Build', 'already up to date')
+  }
+
+  return {
+    ok: true,
+    updated,
+    needsRestart: updated || stale,
+    steps,
+    before,
+    after,
+  }
+}
+
+function selfUpdateBranch(task: HubTask): string {
+  const requested = task.input?.branch
+  if (typeof requested !== 'string' || requested.trim() === '') return 'main'
+  const branch = requested.trim()
+  const invalid =
+    branch.length > 200 ||
+    branch.startsWith('-') ||
+    !SELF_UPDATE_BRANCH_PATTERN.test(branch) ||
+    branch.split('/').includes('..') ||
+    branch.startsWith('/')
+  if (invalid) {
+    throw new Error(
+      'Self-update branch must match [A-Za-z0-9][A-Za-z0-9._/-]* without \'..\' segments',
+    )
+  }
+  return branch
+}
+
+function needsRebuild(dir: string, outputDirs: string[]): boolean {
+  for (const outputDir of outputDirs) {
+    const output = resolve(dir, outputDir)
+    if (!existsSync(output)) return true
+  }
+  const cli = resolve(dir, 'dist', 'src', 'cli.js')
+  const plugin = resolve(dir, 'lib', 'worker-plugin.js')
+  const marker = existsSync(cli) ? cli : plugin
+  const markerTime = statSync(marker).mtimeMs
+  const srcDir = resolve(dir, 'src')
+  if (!existsSync(srcDir)) return false
+  return latestSourceTime(srcDir) > markerTime
+}
+
+function latestSourceTime(dir: string): number {
+  let latest = 0
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const entryPath = resolve(dir, entry.name)
+    if (entry.isDirectory()) {
+      latest = Math.max(latest, latestSourceTime(entryPath))
+    } else if (
+      entry.isFile() &&
+      (entry.name.endsWith('.ts') || entry.name.endsWith('.mjs'))
+    ) {
+      latest = Math.max(latest, statSync(entryPath).mtimeMs)
+    }
+  }
+  return latest
+}
+
+interface NpmInvocation {
+  command: string
+  args: string[]
+}
+
+function resolveNpm(nodePath: string): NpmInvocation {
+  if (process.platform === 'win32') {
+    const probe = spawnSync('where.exe', ['npm'], { encoding: 'utf8' })
+    if (probe.status === 0) {
+      const line = (probe.stdout ?? '').trim().split(/\r?\n/u)[0]
+      if (line) {
+        const cli = resolve(
+          dirname(line),
+          'node_modules',
+          'npm',
+          'bin',
+          'npm-cli.js',
+        )
+        if (existsSync(cli)) return { command: nodePath, args: [cli] }
+      }
+    }
+    return { command: 'npm.cmd', args: [] }
+  }
+  return { command: 'npm', args: [] }
+}
+
+async function runNpm(
+  npm: NpmInvocation,
+  cwd: string,
+  args: string[],
+  label: string,
+  record: (label: string, output: string) => void,
+): Promise<void> {
+  await run(cwd, npm.command, [...npm.args, ...args], label, record)
+}
+
+async function run(
+  cwd: string,
+  command: string,
+  args: string[],
+  label: string,
+  record: (label: string, output: string) => void,
+): Promise<string> {
+  const timeoutMs = 10 * 60 * 1000
+  const child = spawn(command, args, {
+    cwd,
+    env: process.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  })
+  let stdout = ''
+  let stderr = ''
+  child.stdout.on('data', (chunk: Buffer) => {
+    stdout += chunk.toString()
+    if (stdout.length > 32 * 1024 * 1024) child.kill()
+  })
+  child.stderr.on('data', (chunk: Buffer) => {
+    stderr += chunk.toString()
+    if (stderr.length > 32 * 1024 * 1024) child.kill()
+  })
+  const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs)
+  const status = await new Promise<number | null>((resolveExit, reject) => {
+    child.once('error', reject)
+    child.once('exit', (code, signal) => {
+      if (signal) reject(new Error(`${label} timed out or was terminated (${signal})`))
+      else resolveExit(code)
+    })
+  })
+  clearTimeout(timer)
+  const output = `${stdout}${stderr}`.trim()
+  if (status !== 0) {
+    throw new Error(`${label} failed (exit ${status ?? '?'}): ${output.slice(-2000)}`)
+  }
+  record(label, output)
+  return output
+}

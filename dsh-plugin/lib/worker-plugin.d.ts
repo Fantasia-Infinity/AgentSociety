@@ -23,6 +23,8 @@ export interface Config {
     workspaceRoot?: string;
     sessionMode?: 'per_task' | 'continuous';
     toolPolicy?: ToolPolicy;
+    selfUpdateEnabled?: boolean;
+    repositoryRoot?: string;
     provider?: string;
     model?: string;
     maxTokens?: number;

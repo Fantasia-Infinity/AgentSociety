@@ -274,10 +274,16 @@ curl -X POST http://127.0.0.1:8090/v1/hub/tasks \
 ## 自更新任务模式
 
 `input.action = "self_update"` 是一个保留的任务类型：worker 领取后不经过 LLM，由 worker
-进程自身直接执行 `git fetch` → `git pull --ff-only` → 安全补丁 → `npm run build`（依赖未变时）
-或推迟到重启后的 `npm ci`（依赖变化时），成功后重启 worker 进程使新代码生效，并把
-before/after commit hash 写进任务结果。因为 shell 操作发生在 worker 进程里而不是模型工具里，
-`AGENT_REMOTE_TOOL_POLICY=read_only` 的设备也能自更新。
+进程自身直接执行 `git fetch` → `git pull --ff-only` → 安全补丁 → 依赖安装/构建，成功后重启
+worker 进程使新代码生效，并把 before/after commit hash 写进任务结果。因为 shell 操作发生在
+worker 进程里而不是模型工具里，`AGENT_REMOTE_TOOL_POLICY=read_only` 的设备也能自更新。
+
+Pi worker 和 dsh plugin worker 都支持该模式：
+
+- Pi worker：依赖变化时把 `npm ci` 推迟到重启后的新进程启动阶段。
+- dsh plugin worker：由 dsh 进程内完成 `git pull`、`npm ci`（依赖变化时）与
+  `agent-host` / `dsh-plugin` 构建，任务落库后以退出码 `75` 退出；`./agent worker`
+  的父进程检测到 `75` 会自动拉起新的 dsh worker。
 
 ```bash
 curl -X POST http://127.0.0.1:8090/v1/hub/tasks \

@@ -12,6 +12,10 @@ Current scope:
   - Hub controls: `agent.steer()` for `steer`, `agent.followup()` for
     `follow_up`, then Hub ACK.
   - Hub cancellation: `agent.cancel()` and cancelled Run reporting.
+  - Hub self-update tasks (`input.action: "self_update"`) run without an LLM:
+    `git pull --ff-only`, dependency install when needed, rebuild
+    `agent-host` + `dsh-plugin`, durable Hub result, then exit code `75` so
+    `./agent worker` restarts the dsh worker.
   - Per-task tool policy mapping:
     - `full`: all local dsh tools plus Hub MCP tools; `workspace-write`.
     - `read_only`: `read`, `read_image`, `glob`, `grep`, web, and external

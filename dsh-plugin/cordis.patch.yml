@@ -14,6 +14,8 @@
         workspaceRoot: !!js process.env.AGENT_SOCIETY_WORKSPACE_ROOT ?? process.cwd()
         sessionMode: !!js process.env.AGENT_SOCIETY_SESSION_MODE ?? 'per_task'
         toolPolicy: !!js process.env.AGENT_SOCIETY_TOOL_POLICY ?? 'full'
+        selfUpdateEnabled: !!js process.env.AGENT_SELF_UPDATE !== '0'
+        repositoryRoot: !!js process.env.AGENT_SOCIETY_REPOSITORY_ROOT
         actorId: !!js process.env.AGENT_SOCIETY_ACTOR_ID
         nodeId: !!js process.env.AGENT_SOCIETY_NODE_ID
         principalId: !!js process.env.AGENT_SOCIETY_PRINCIPAL_ID

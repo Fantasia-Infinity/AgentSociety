@@ -20,13 +20,18 @@ import { hostname, userInfo } from 'node:os'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   HubClient,
   type HubArtifact,
   type HubClaim,
   type HubTask,
 } from './hub-client.js'
+import {
+  isSelfUpdateTask,
+  runPluginSelfUpdate,
+  SELF_UPDATE_EXIT_CODE,
+} from './self-update.js'
 
 export const name = 'agent-society-worker'
 export const inject = ['timer', 'agents', 'sessions', 'sessionPersistence']
@@ -45,6 +50,8 @@ export interface Config {
   workspaceRoot?: string
   sessionMode?: 'per_task' | 'continuous'
   toolPolicy?: ToolPolicy
+  selfUpdateEnabled?: boolean
+  repositoryRoot?: string
   provider?: string
   model?: string
   maxTokens?: number
@@ -62,6 +69,8 @@ export const Config: Schema<Config> = Schema.object({
   workspaceRoot: Schema.string().required(false),
   sessionMode: Schema.union(['per_task', 'continuous']).default('per_task'),
   toolPolicy: Schema.union(['full', 'read_only', 'no_tools']).required(false),
+  selfUpdateEnabled: Schema.boolean().required(false),
+  repositoryRoot: Schema.string().required(false),
   provider: Schema.string().required(false),
   model: Schema.string().required(false),
   maxTokens: Schema.number().min(1).required(false),
@@ -170,6 +179,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
 
   const owner = stableSlug(userInfo().username)
   const host = stableSlug(hostname())
+  const selfUpdateEnabled = config.selfUpdateEnabled ?? process.env.AGENT_SELF_UPDATE !== '0'
+  const repositoryRoot = resolve(
+    config.repositoryRoot ??
+      process.env.AGENT_SOCIETY_REPOSITORY_ROOT ??
+      resolve(dirname(fileURLToPath(import.meta.url)), '..', '..'),
+  )
   const identity = {
     principalId: config.principalId ?? `human-${owner}`,
     actorId: config.actorId ?? `agent-society-${host}`,
@@ -184,6 +199,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     leaseSeconds: config.leaseSeconds ?? 300,
     sessionMode: config.sessionMode ?? 'per_task',
     toolPolicy,
+    selfUpdateEnabled,
+    repositoryRoot,
     provider: config.provider ?? 'deepseek-official',
     model: config.model ?? process.env.DSH_MODEL ?? 'deepseek-v4-flash',
     maxTokens: config.maxTokens,
@@ -214,6 +231,9 @@ class WorkerLoop {
   private busy = false
   private disposed = false
   private running: RunningTask | undefined
+  private selfUpdating:
+    | { taskId: string; runId: string; leaseToken: string }
+    | undefined
 
   constructor(
     private readonly ctx: Context,
@@ -229,6 +249,8 @@ class WorkerLoop {
       leaseSeconds: number
       sessionMode: 'per_task' | 'continuous'
       toolPolicy: ToolPolicy
+      selfUpdateEnabled: boolean
+      repositoryRoot: string
       provider: string
       model: string
       maxTokens: number | undefined
@@ -350,6 +372,10 @@ class WorkerLoop {
 
   private async execute(claim: HubClaim): Promise<void> {
     const { task, run } = claim
+    if (isSelfUpdateTask(task)) {
+      await this.executeSelfUpdate(claim)
+      return
+    }
     let cwd: string
     try {
       cwd = this.taskWorkspace(task)
@@ -628,6 +654,65 @@ class WorkerLoop {
         `agent-society-worker transcript artifact failed: ${message(error)}`,
       )
       return undefined
+    }
+  }
+
+  private async executeSelfUpdate(claim: HubClaim): Promise<void> {
+    const { task, run } = claim
+    this.selfUpdating = {
+      taskId: task.task_id,
+      runId: run.run_id,
+      leaseToken: claim.lease_token,
+    }
+    try {
+      this.ctx.logger.info(`agent-society-worker self-update ${task.task_id}`)
+      await this.hub.updateTask(task.task_id, {
+        run_id: run.run_id,
+        lease_token: claim.lease_token,
+        status: 'working',
+        message: 'Self-update starting',
+      })
+      await this.hub.updateRun(run.run_id, {
+        status: 'active',
+        result: {
+          adapter: 'agent-society-dsh-plugin',
+          action: 'self_update',
+        },
+      })
+      const report = await runPluginSelfUpdate(task, {
+        repositoryRoot: this.options.repositoryRoot,
+        enabled: this.options.selfUpdateEnabled,
+        nodePath: process.execPath,
+      })
+      const text = report.steps.join('\n')
+      await this.hub.updateTask(task.task_id, {
+        run_id: run.run_id,
+        lease_token: claim.lease_token,
+        status: 'completed',
+        message: report.needsRestart
+          ? 'Self-update applied; dsh worker restarting'
+          : 'Self-update: already up to date',
+        result: {
+          text,
+          before: report.before,
+          after: report.after,
+          updated: report.updated,
+          needs_restart: report.needsRestart,
+          adapter: 'agent-society-dsh-plugin',
+        },
+      })
+      this.ctx.logger.info(
+        `agent-society-worker self-update ${report.needsRestart ? 'applied' : 'already up to date'}`,
+      )
+      if (report.needsRestart) {
+        setTimeout(() => {
+          process.exit(SELF_UPDATE_EXIT_CODE)
+        }, 300)
+      }
+    } catch (error) {
+      await this.failTask(claim, message(error))
+    } finally {
+      this.selfUpdating = undefined
     }
   }
 
