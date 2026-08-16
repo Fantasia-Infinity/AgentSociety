@@ -5,13 +5,20 @@ AgentSociety 的默认 Agent 运行时现在是 [DeepSeek Harness](https://githu
 
 主路径：
 
-1. **dsh 作为交互 Agent**：`./agent` 默认打开带 AgentSociety bundle 的 dsh-TUI，
-   Hub 工具以 `mcp__agent-society__hub_*` 暴露。
-2. **dsh 作为 Hub worker**：`./agent worker` 默认启动
+1. **dsh 作为交互 Agent（TUI）**：`./agent` 默认打开带 AgentSociety bundle
+   的 dsh-TUI，Hub 工具以 `mcp__agent-society__hub_*` 暴露。
+2. **dsh 作为交互 Agent（Web）**：`./agent web` 启动 `agent-society-web`
+   profile，浏览器 UI 加载同一 AgentSociety bundle。
+3. **dsh 作为 Hub worker**：`./agent worker` 默认启动
    `dsh --profile agent-society-worker`，任务在 dsh 进程内执行。
-3. **一键安装**：
+4. **一键安装**：
    [dsh-agent-society-combo](https://github.com/Fantasia-Infinity/dsh-agent-society-combo)
    固定 dsh / dsh-TUI / AgentSociety / preset 的 commit 与兼容 patch。
+
+TUI 和 Web 都是 dsh core 之上的 UI adapter：Agent 循环、工具栈、preset、
+session 持久化和 AgentSociety 插件全部来自同一个 dsh core，两者共享
+`$DSH_HOME/sessions`；因此同一台机器上 TUI 与 Web 看到的是同一份会话历史，
+worker 也可以恢复其中标记的 continuous session。
 
 兼容通道仍保留：
 
@@ -53,6 +60,21 @@ AGENT_SOCIETY_HUB_TOKEN='<token>' \
 node /path/to/dsh-TUI/bin/dsh-tui-local.js
 ```
 
+dsh Web 本地集成：`agent-society-web` profile 同时加载 `dsh-base`、
+`dsh-web-app` 和 `@agent-society/dsh-agent-society`。combo 安装器会创建该
+profile；源码开发时可先执行 `sh scripts/install-dsh-plugin.sh`，再按上面的
+依赖结构手工创建 profile，或沿用旧 patch：
+
+```bash
+./agent web                      # 优先 agent-society-web profile
+./agent web --port 3081          # 透传 dsh web 参数（--host/--port/--trusted-host）
+AGENT_DSH_COMMAND='["node","/path/to/deepseek-harness/apps/cli/lib/bin.js"]' ./agent web
+```
+
+profile 不存在时，`./agent web` 自动回退到
+`dsh web --patch agent-host/dsh/agent-society.dsh.yml`（兼容 `dsh-dispatch`
+之前的本地派发方式）。
+
 `./agent`（即 `./agent tui`）现在会优先直接启动同级 checkout 里的
 `dsh-TUI/scripts/run.ts`，并把 `~/.dsh/plugins/agent-society` 作为外部
 bundle 加载；`dsh-TUI`、DeepSeek Harness checkout 或插件链接缺失时自动回退
@@ -84,9 +106,9 @@ dsh-TUI 的 `/resume` 使用 `ctx.agents.resume`；continuous worker 也会把
   工具目录的 preset 也不会把 Hub 工具裁掉（真正的 `tools.restrict()`
   拒绝仍然生效）；
 - 通过 `agent-society-web-tool-guard` 保持 dsh-base 的 `web_search` 可见；
-  `AGENT_WEB_SEARCH` / `AGENT_DSH_WEB_SEARCH` 决定 CLI 是否给 worker 与
-  TUI 注入 `AGENT_SOCIETY_WEB_SEARCH=1`，设为 `0` 会移除整个 DeepSeek
-  搜索 provider 栈；
+  `AGENT_WEB_SEARCH` / `AGENT_DSH_WEB_SEARCH` 决定 CLI 是否给 worker、
+  TUI 与 Web 注入 `AGENT_SOCIETY_WEB_SEARCH=1`，设为 `0` 会移除整个
+  DeepSeek 搜索 provider 栈；
 
 - 按任务 `input.tool_policy`（回退到 `AGENT_SOCIETY_TOOL_POLICY`）映射
   `full` / `read_only` / `no_tools`，并写入每个 session 的 `sandbox/mode`；

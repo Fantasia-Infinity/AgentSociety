@@ -2,31 +2,49 @@
 
 ## 当前主架构：Hub + dsh 插件
 
-当前默认执行面是 DeepSeek Harness 进程内插件，而不是独立 Pi 进程：
+当前默认执行面是 DeepSeek Harness 进程内插件，而不是独立 Pi 进程。
+TUI 和 Web 都是 **UI adapter**，共享的 Agent core 尽可能与界面无关：
 
 ```text
 AgentSociety Hub (Python)
   ▲ REST: claim / update / controls / heartbeat / artifacts
   │
-dsh 进程内插件 dsh-plugin/
-  ├─ agent-society-worker      领取任务、continuous resume、steer/follow-up/cancel、
-  │                            工具策略、session 标题、transcript artifact、self-update
-  ├─ agent-society-hub-mcp     mcp__agent-society__hub_* 派发工具
-  └─ agent-society-hub-tool-guard
-       确保 preset 过滤后 Hub 工具仍在模型目录中
-  ▼
-dsh Agent Loop + 工具栈（dsh-TUI / dsh web / dsh worker profile）
+dsh core：Agent Loop + 工具栈 + preset + session 持久化 + AgentSociety 插件
+  │
+  ├─ UI adapter: dsh-TUI      ./agent          agent-society-worker profile + 外部 bundle
+  └─ UI adapter: dsh Web      ./agent web      agent-society-web profile
+       ▲                                        （dsh-base + dsh-web-app + 同一插件）
+       │
+  dsh 进程内插件 dsh-plugin/  @agent-society/dsh-agent-society
+    ├─ agent-society-worker            领取任务、continuous resume、steer/follow-up/cancel、
+    │                                  工具策略、session 标题、transcript artifact、self-update
+    ├─ agent-society-hub-mcp           mcp__agent-society__hub_* 派发工具
+    ├─ agent-society-hub-tool-guard    确保 preset 过滤后 Hub 工具仍在模型目录中
+    └─ agent-society-web-tool-guard    保持 dsh-base 的 web_search 可见
 ```
+
+独立性边界：
+
+- AgentSociety 插件不 import dsh-TUI / dsh Web 代码；两个 UI 通过同一个
+  cordis bundle 消费 `ctx.agents`、`ctx.tools`、`session/*` 等 core 服务。
+- TUI 与 Web 共享 `$DSH_HOME/sessions`、插件链接、preset 与模型凭据；同一
+  会话既可以在 TUI 里 `/resume`，也可以在 Web 里继续。
+- `agent-host` 只负责解析环境（模型密钥、Hub MCP token、web_search 开关、
+  worker 参数）并 spawn 对应 profile，不含任何 UI 渲染或 Agent loop 逻辑。
 
 - `./agent` 默认打开同级 dsh-TUI checkout，并把 `~/.dsh/plugins/agent-society`
   作为外部 bundle 加载；缺失时回退 Pi TUI。
+- `./agent web` 默认启动 `dsh --profile agent-society-web`；profile 不存在时
+  回退 `dsh web --patch agent-host/dsh/agent-society.dsh.yml`，并把
+  `--host/--port/--trusted-host` 透传给 dsh web。
 - `./agent worker` 默认启动 `dsh --profile agent-society-worker`；缺失时回退
   Pi worker。
 - Pi SDK、`./agent bridge --adapter dsh` 和 JSON-RPC `dsh-worker` 均保留为
   兼容路径。
 - 一键部署由
   [dsh-agent-society-combo](https://github.com/Fantasia-Infinity/dsh-agent-society-combo)
-  固定四个仓库的 commit 与兼容 patch。
+  固定四个仓库的 commit 与兼容 patch；`agent-society-web` profile 由安装器
+  生成，`--with-ssh` 只向该 profile 追加 SSH 运维插件，不复制核心插件。
 
 ## 目标拓扑（含历史链路）
 

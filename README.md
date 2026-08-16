@@ -78,8 +78,10 @@ curl -fsSL https://raw.githubusercontent.com/Fantasia-Infinity/dsh-agent-society
 # irm https://raw.githubusercontent.com/Fantasia-Infinity/dsh-agent-society-combo/main/install.ps1 | iex
 ```
 
-安装完成后，`agent` 默认启动带 AgentSociety Hub 工具的 dsh-TUI，`agent worker`
-默认启动 dsh 进程内 worker；缺少 dsh-TUI / DeepSeek Harness 时自动回退 Pi。
+安装完成后，`agent` 默认启动带 AgentSociety Hub 工具的 dsh-TUI，`agent web`
+启动带同一插件的 dsh Web UI，`agent worker` 默认启动 dsh 进程内 worker；
+TUI / Web / worker 共享 `~/.dsh` 里的 session 与插件配置。缺少 dsh-TUI /
+DeepSeek Harness 时 TUI 和 worker 自动回退 Pi。
 
 源码开发方式仍支持：
 
@@ -88,6 +90,7 @@ git clone <repository-url> AgentSociety
 cd AgentSociety
 sh scripts/install-dsh-plugin.sh
 ./agent               # dsh TUI；Windows 用 ./agent.ps1
+./agent web           # dsh Web UI（同一 ~/.dsh session）
 ```
 
 首次运行会引导你填写模型连接信息（OpenAI-compatible URL、Model ID、API Key），
@@ -97,6 +100,7 @@ sh scripts/install-dsh-plugin.sh
 ```bash
 ./agent setup         # 重新配置，可补填 Hub URL / 用户名 / 密码
 ./agent connect       # 用 Hub 账号密码换本机节点凭据
+./agent web           # 浏览器 UI（--port 可改端口）
 ./agent worker        # 作为常驻 worker 开始领取 Hub 任务
 ./agent doctor        # 体检：Hub 连接、workspace、模型、session
 ```
@@ -112,7 +116,7 @@ Secret Service），配置文件里没有明文密钥。
 - **Web 仪表盘**：`/web` 登录后创建任务、查看进度和结果。
 - **Codex / OpenCode / Claude**：Hub 暴露 MCP 工具（`hub_create_task`、
   `hub_get_task`、`hub_cancel_task` 等），配置后即可直接在对话里派活。
-- **本机 TUI**：通过 Hub 工具在对话里派发。
+- **本机 TUI / Web UI**：`./agent` 或 `./agent web`，通过 Hub 工具在对话里派发。
 - **REST API**：`/v1/hub/tasks`，适合脚本和自动化。
 
 用 Codex 连接 Hub 的 MCP（推荐走系统钥匙串，先运行 `agent connect` 保存节点凭据）：
@@ -146,8 +150,10 @@ AgentSociety 不要求所有设备都用同一种 Agent：
   提供 Hub worker（claim / heartbeat / controls / cancel / self-update）、
   `ctx.agents.create/resume` 连续会话、工具策略映射、session 标题与
   transcript artifact，并把 Hub 暴露为 `mcp__agent-society__hub_*` 工具。
-  `./agent` 默认打开带该插件的 dsh-TUI，`./agent worker` 默认启动 dsh
-  plugin worker。详见 [DeepSeek Harness 集成](docs/deepseek-harness.md)。
+  `./agent` 默认打开带该插件的 dsh-TUI，`./agent web` 打开同一插件的
+  dsh Web UI，`./agent worker` 默认启动 dsh plugin worker。TUI 与 Web
+  只是两个 UI adapter，共享 dsh core / AgentSociety 插件 / `~/.dsh` session；
+  详见 [DeepSeek Harness 集成](docs/deepseek-harness.md)。
 - **Pi Agent（保留兼容）**：完整的内建工具（Sub-agent、plan/todo、长期记忆、
   LSP、MCP、后台进程、Web 搜索）。`AGENT_TUI_RUNTIME=pi` /
   `AGENT_WORKER_RUNTIME=pi` 可强制回退，代码与 Pi 会话存储继续保留。

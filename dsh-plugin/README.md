@@ -80,6 +80,22 @@ Set `AGENT_TUI_RUNTIME=pi` to force the legacy Pi TUI, or
 For a pinned one-command install of dsh + dsh-TUI + AgentSociety + preset,
 use [dsh-agent-society-combo](https://github.com/Fantasia-Infinity/dsh-agent-society-combo).
 
+### dsh Web integration
+
+The combo installer also creates the `agent-society-web` profile:
+
+```text
+bundles:
+  - @deepseek-ai/dsh-base
+  - @deepseek-ai/dsh-web-app
+  - @agent-society/dsh-agent-society
+```
+
+The same plugin therefore serves the browser UI, the TUI, and the worker
+profile. `./agent web` starts that profile (or falls back to the legacy
+`dsh web --patch .../agent-society.dsh.yml` when the profile is missing), and
+forwards dsh web flags such as `--port`. All three share `$DSH_HOME/sessions`.
+
 ## Task input
 
 The worker reads the standard `task.input.workspace` field. Optional fields:

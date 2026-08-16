@@ -276,6 +276,11 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === "web") {
+    await runDshWeb(config, hub);
+    return;
+  }
+
   if (command === "interactive" || command === "tui" || command === "local") {
     if (command !== "local") {
       const started = await runDshTui(config, hub, repositoryRoot);
@@ -406,6 +411,38 @@ function pluginWebSearchEnabled(config: AgentHostConfig): boolean {
   }
 }
 
+function buildDshCommonEnv(
+  config: AgentHostConfig,
+  hub: HubClient | undefined,
+  options: {
+    worker: boolean;
+    hubMcp: boolean;
+    hubConnection?: boolean;
+  },
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...sanitizedChildEnv(process.env),
+    AGENT_SOCIETY_WORKER: options.worker ? "1" : "0",
+    AGENT_SOCIETY_WEB_SEARCH: pluginWebSearchEnabled(config) ? "1" : "0",
+  };
+  if (hub && config.hubUrl) {
+    if (options.hubConnection) {
+      env.AGENT_SOCIETY_HUB_URL = config.hubUrl;
+      env.AGENT_SOCIETY_HUB_TOKEN = config.hubToken ?? hub.nodeToken;
+    }
+    env.AGENT_SOCIETY_HUB_MCP = options.hubMcp ? "1" : "0";
+    if (options.hubMcp) {
+      env.AGENT_SOCIETY_HUB_URL = config.hubUrl;
+      env.AGENT_SOCIETY_HUB_TOKEN = config.hubToken ?? hub.nodeToken;
+    }
+  } else {
+    env.AGENT_SOCIETY_HUB_MCP = "0";
+  }
+  if (config.remoteApiKey) env.DEEPSEEK_API_KEY = config.remoteApiKey;
+  if (config.remoteBaseUrl) env.DEEPSEEK_BASE_URL = config.remoteBaseUrl;
+  return env;
+}
+
 async function runDshTui(
   config: AgentHostConfig,
   hub: HubClient | undefined,
@@ -461,24 +498,9 @@ async function runDshTui(
   }
 
   const env: NodeJS.ProcessEnv = {
-    ...sanitizedChildEnv(process.env),
+    ...buildDshCommonEnv(config, hub, { worker: false, hubMcp: Boolean(hub) }),
     DSH_CHECKOUT: checkout,
-    AGENT_SOCIETY_WORKER: "0",
-    AGENT_SOCIETY_WEB_SEARCH: pluginWebSearchEnabled(config) ? "1" : "0",
   };
-  if (hub && config.hubUrl) {
-    env.AGENT_SOCIETY_HUB_MCP = "1";
-    env.AGENT_SOCIETY_HUB_URL = config.hubUrl;
-    env.AGENT_SOCIETY_HUB_TOKEN = config.hubToken ?? hub.nodeToken;
-  } else {
-    env.AGENT_SOCIETY_HUB_MCP = "0";
-  }
-  if (config.remoteApiKey) {
-    env.DEEPSEEK_API_KEY = config.remoteApiKey;
-  }
-  if (config.remoteBaseUrl) {
-    env.DEEPSEEK_BASE_URL = config.remoteBaseUrl;
-  }
   if (process.argv.includes("--resume")) {
     let sessionId = "";
     for (const dir of [".dsh-tui", ".dsh-cc"]) {
@@ -536,6 +558,69 @@ async function runDshTui(
   });
 }
 
+async function runDshWeb(
+  config: AgentHostConfig,
+  hub: HubClient | undefined,
+): Promise<void> {
+  const dshHome =
+    process.env.DSH_HOME?.trim() || resolve(homedir(), ".dsh");
+  const profile = "agent-society-web";
+  const profilePackage = resolve(
+    dshHome,
+    "profiles",
+    profile,
+    "package.json",
+  );
+  const legacyPatch = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "..",
+    "dsh",
+    "agent-society.dsh.yml",
+  );
+  const webArgs = process.argv.slice(3);
+  const command = existsSync(profilePackage)
+    ? [...(config.dshCommand ?? ["dsh"]), "--profile", profile, ...webArgs]
+    : [...(config.dshCommand ?? ["dsh"]), "web", "--patch", legacyPatch, ...webArgs];
+  if (!existsSync(profilePackage)) {
+    console.warn(
+      `dsh web profile "${profile}" not found; using legacy patch: ${legacyPatch}`,
+    );
+  }
+  console.log(`Starting dsh web: ${command.join(" ")}`);
+  const env = buildDshCommonEnv(config, hub, {
+    worker: false,
+    hubMcp: Boolean(hub),
+  });
+  const child = spawn(command[0]!, command.slice(1), {
+    stdio: "inherit",
+    env,
+  });
+  await new Promise<void>((resolveExit) => {
+    const forwardSignal = (signal: NodeJS.Signals): void => {
+      child.kill(signal);
+    };
+    process.once("SIGINT", forwardSignal);
+    process.once("SIGTERM", forwardSignal);
+    child.once("error", (error) => {
+      process.removeListener("SIGINT", forwardSignal);
+      process.removeListener("SIGTERM", forwardSignal);
+      console.error(`Could not start dsh web: ${error.message}`);
+      process.exitCode = 1;
+      resolveExit();
+    });
+    child.once("exit", (code, signal) => {
+      process.removeListener("SIGINT", forwardSignal);
+      process.removeListener("SIGTERM", forwardSignal);
+      if (code) process.exitCode = code;
+      if (signal && ["SIGINT", "SIGTERM"].includes(signal) === false) {
+        process.exitCode = 1;
+      }
+      resolveExit();
+    });
+  });
+}
+
 const DSH_SELF_UPDATE_EXIT_CODE = 75
 
 async function runDshPluginWorker(
@@ -569,10 +654,11 @@ async function runDshPluginWorker(
   const model =
     config.dshModel ?? config.remoteModel ?? "deepseek-v4-flash";
   const env: NodeJS.ProcessEnv = {
-    ...sanitizedChildEnv(process.env),
-    AGENT_SOCIETY_WORKER: "1",
-    AGENT_SOCIETY_HUB_URL: config.hubUrl!,
-    AGENT_SOCIETY_HUB_TOKEN: hub.nodeToken,
+    ...buildDshCommonEnv(config, hub, {
+      worker: true,
+      hubMcp: config.dshHubMcp !== false,
+      hubConnection: true,
+    }),
     AGENT_SOCIETY_WORKSPACE_ROOT: config.workspaceRoot,
     AGENT_SOCIETY_SESSION_MODE: config.workerSessionMode,
     AGENT_SOCIETY_TOOL_POLICY: config.remoteToolPolicy,
@@ -592,17 +678,6 @@ async function runDshPluginWorker(
     ),
     AGENT_SOCIETY_SESSION_COMPRESSION:
       config.dshSessionCompression ?? "none",
-    AGENT_SOCIETY_HUB_MCP: config.dshHubMcp === false ? "0" : "1",
-    AGENT_SOCIETY_WEB_SEARCH: pluginWebSearchEnabled(config) ? "1" : "0",
-  }
-  // The dsh LLM adapter (llm-deepseek) reads the key from $DEEPSEEK_API_KEY
-  // (and $DEEPSEEK_BASE_URL). Mirror the dsh TUI path below so the worker's
-  // sessions can reach the remote model.
-  if (config.remoteApiKey) {
-    env.DEEPSEEK_API_KEY = config.remoteApiKey;
-  }
-  if (config.remoteBaseUrl) {
-    env.DEEPSEEK_BASE_URL = config.remoteBaseUrl;
   }
   for (;;) {
     const outcome = await new Promise<{ started: boolean; restart: boolean }>(

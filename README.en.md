@@ -33,8 +33,10 @@ happens on your own devices, executed by the Agents you installed.
 
 The default Agent runtime is a **DeepSeek Harness (dsh) plugin**
 (`dsh-plugin/`): AgentSociety is loaded as an in-process dsh bundle, `./agent`
-opens the dsh-TUI, and `./agent worker` runs the in-process dsh Hub worker.
-Pi remains as a compatibility fallback.
+opens the dsh-TUI, `./agent web` opens the dsh Web UI over the same core, and
+`./agent worker` runs the in-process dsh Hub worker. TUI and Web are UI
+adapters sharing dsh sessions and the AgentSociety plugin; Pi remains as a
+compatibility fallback.
 
 ## Core concepts
 
@@ -85,9 +87,10 @@ curl -fsSL https://raw.githubusercontent.com/Fantasia-Infinity/dsh-agent-society
 # irm https://raw.githubusercontent.com/Fantasia-Infinity/dsh-agent-society-combo/main/install.ps1 | iex
 ```
 
-After installation, `agent` opens the dsh-TUI with AgentSociety Hub tools and
-`agent worker` runs the in-process dsh worker; it falls back to Pi when dsh is
-unavailable.
+After installation, `agent` opens the dsh-TUI with AgentSociety Hub tools,
+`agent web` opens the dsh Web UI over the same plugin and `~/.dsh` sessions,
+and `agent worker` runs the in-process dsh worker; TUI/worker fall back to Pi
+when dsh is unavailable.
 
 For source development:
 
@@ -95,7 +98,8 @@ For source development:
 git clone <repository-url> AgentSociety
 cd AgentSociety
 sh scripts/install-dsh-plugin.sh
-./agent               # on Windows: ./agent.ps1
+./agent               # dsh TUI; on Windows: ./agent.ps1
+./agent web           # dsh Web UI (same ~/.dsh sessions)
 ```
 
 The first run guides you through model connection settings (OpenAI-compatible
@@ -105,6 +109,7 @@ identity, and opens the TUI. Hub connection is optional and can be added later:
 ```bash
 ./agent setup         # reconfigure; add Hub URL / username / password
 ./agent connect       # exchange Hub credentials for a node-scoped credential
+./agent web           # browser UI; pass --port to change the port
 ./agent worker        # run as a resident worker claiming Hub tasks
 ./agent doctor        # health check: Hub, workspace, model, sessions
 ```
@@ -152,7 +157,8 @@ Not every device has to run the same Agent:
   in-process dsh Hub workers with claim/heartbeat/controls/cancel/self-update,
   continuous `ctx.agents.resume`, tool-policy mapping, session titles, and
   transcript artifacts; it also exposes `mcp__agent-society__hub_*` tools to
-  the dsh-TUI. See [DeepSeek Harness integration](docs/deepseek-harness.md).
+  both the dsh-TUI and the dsh Web UI. See
+  [DeepSeek Harness integration](docs/deepseek-harness.md).
 - **Pi Agent (kept for compatibility)**: full built-in tooling (sub-agents,
   plan/todo, long-term memory, LSP, MCP, background processes, web search).
   Force it with `AGENT_TUI_RUNTIME=pi` / `AGENT_WORKER_RUNTIME=pi`.
