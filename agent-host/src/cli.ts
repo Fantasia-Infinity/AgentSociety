@@ -424,6 +424,7 @@ function buildDshCommonEnv(
     ...sanitizedChildEnv(process.env),
     AGENT_SOCIETY_WORKER: options.worker ? "1" : "0",
     AGENT_SOCIETY_WEB_SEARCH: pluginWebSearchEnabled(config) ? "1" : "0",
+    AGENT_SOCIETY_SESSION_COMPRESSION: config.dshSessionCompression,
   };
   if (hub && config.hubUrl) {
     if (options.hubConnection) {
