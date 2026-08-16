@@ -30,6 +30,9 @@ Current scope:
   model catalog even when a preset (for example `anchored-standard`)
   filters the system-prompt tool list. Real `tools.restrict()` denials still
   win.
+- `agent-society-web-tool-guard`: keeps dsh-base's `web_search` tool visible
+  under the same preset filters. Disable the whole DeepSeek web provider
+  stack with `AGENT_SOCIETY_WEB_SEARCH=0`.
 
 The Python Hub and its REST contract remain unchanged.
 
@@ -95,6 +98,7 @@ The worker reads the standard `task.input.workspace` field. Optional fields:
 | `AGENT_SOCIETY_HUB_URL` | — | Hub base URL |
 | `AGENT_SOCIETY_HUB_TOKEN` | — | Hub bearer token |
 | `AGENT_SOCIETY_HUB_MCP` | unset | Expose `mcp__agent-society__hub_*` tools |
+| `AGENT_SOCIETY_WEB_SEARCH` | unset | `1` keeps `web_search`; `0` removes the dsh web provider stack |
 | `AGENT_SOCIETY_WORKSPACE_ROOT` | process cwd | Allowed task workspace root |
 | `AGENT_SOCIETY_SESSION_MODE` | `per_task` | `per_task` or `continuous` |
 | `AGENT_SOCIETY_TOOL_POLICY` | `full` | Default `full` / `read_only` / `no_tools` |

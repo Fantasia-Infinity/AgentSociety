@@ -44,6 +44,18 @@
         reconnect:
           enabled: true
 
+    # Keep web_search visible even when a preset filters the assembled
+    # catalog. With AGENT_SOCIETY_WEB_SEARCH=0 the same guard removes it
+    # from every assembled catalog.
+    - id: agent-society-web-tool-guard
+      name: '@agent-society/dsh-agent-society/web-tool-guard'
+
+# Host-level DeepSeek web tool. The provider services stay mounted because
+# presets may register their own tool-web row; disabling the host tool plus
+# the assembly guard is enough to keep web_search out of the model catalog.
+- id: tool-web
+  disabled: !!js process.env.AGENT_SOCIETY_WEB_SEARCH === '0'
+
 # Readable transcripts: the worker attaches these to Hub runs and `agent
 # observe` reads them locally. zstd remains available by setting
 # AGENT_SOCIETY_SESSION_COMPRESSION=zstd.

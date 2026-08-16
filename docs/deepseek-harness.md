@@ -83,6 +83,10 @@ dsh-TUI 的 `/resume` 使用 `ctx.agents.resume`；continuous worker 也会把
   注入 `mcp__agent-society__hub_*`，因此 `anchored-standard` 这类会裁剪
   工具目录的 preset 也不会把 Hub 工具裁掉（真正的 `tools.restrict()`
   拒绝仍然生效）；
+- 通过 `agent-society-web-tool-guard` 保持 dsh-base 的 `web_search` 可见；
+  `AGENT_WEB_SEARCH` / `AGENT_DSH_WEB_SEARCH` 决定 CLI 是否给 worker 与
+  TUI 注入 `AGENT_SOCIETY_WEB_SEARCH=1`，设为 `0` 会移除整个 DeepSeek
+  搜索 provider 栈；
 
 - 按任务 `input.tool_policy`（回退到 `AGENT_SOCIETY_TOOL_POLICY`）映射
   `full` / `read_only` / `no_tools`，并写入每个 session 的 `sandbox/mode`；

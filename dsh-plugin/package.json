@@ -19,6 +19,10 @@
       "types": "./lib/hub-tool-guard.d.ts",
       "default": "./lib/hub-tool-guard.js"
     },
+    "./web-tool-guard": {
+      "types": "./lib/web-tool-guard.d.ts",
+      "default": "./lib/web-tool-guard.js"
+    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },

@@ -394,6 +394,18 @@ async function main(): Promise<void> {
   throw new Error(`Unknown command: ${command}`);
 }
 
+function pluginWebSearchEnabled(config: AgentHostConfig): boolean {
+  if (config.dshWebSearch === false || config.webSearchMode === 'disabled') {
+    return false;
+  }
+  if (config.webSearchMode === 'deepseek') return true;
+  try {
+    return new URL(config.remoteBaseUrl ?? '').hostname.toLowerCase() === 'api.deepseek.com';
+  } catch {
+    return false;
+  }
+}
+
 async function runDshTui(
   config: AgentHostConfig,
   hub: HubClient | undefined,
@@ -452,6 +464,7 @@ async function runDshTui(
     ...sanitizedChildEnv(process.env),
     DSH_CHECKOUT: checkout,
     AGENT_SOCIETY_WORKER: "0",
+    AGENT_SOCIETY_WEB_SEARCH: pluginWebSearchEnabled(config) ? "1" : "0",
   };
   if (hub && config.hubUrl) {
     env.AGENT_SOCIETY_HUB_MCP = "1";
@@ -580,6 +593,7 @@ async function runDshPluginWorker(
     AGENT_SOCIETY_SESSION_COMPRESSION:
       config.dshSessionCompression ?? "none",
     AGENT_SOCIETY_HUB_MCP: config.dshHubMcp === false ? "0" : "1",
+    AGENT_SOCIETY_WEB_SEARCH: pluginWebSearchEnabled(config) ? "1" : "0",
   }
   // The dsh LLM adapter (llm-deepseek) reads the key from $DEEPSEEK_API_KEY
   // (and $DEEPSEEK_BASE_URL). Mirror the dsh TUI path below so the worker's
