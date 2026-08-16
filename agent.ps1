@@ -50,7 +50,7 @@ switch ($Command) {
         break
     }
     default {
-        throw "Usage: .\\agent.ps1 [setup|tui|web|local|worker|bridge --adapter ID|doctor|sessions|register|once|observe ID|attach ID]"
+        throw "Usage: .\\agent.ps1 [setup|tui|web|local|worker|connect|bridge --adapter ID|doctor|dsh-doctor|sessions|register|once|observe ID|attach ID|steer|follow-up|cancel|control|dsh-worker|dsh-once|dsh-dispatch]"
     }
 }
 exit $LASTEXITCODE
