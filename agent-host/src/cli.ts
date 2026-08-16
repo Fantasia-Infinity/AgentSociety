@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { homedir, userInfo } from "node:os";
@@ -490,7 +490,7 @@ async function runDshTui(
   );
   const child = spawn(
     process.execPath,
-    ["--import", tsxLoader, runScript],
+    ["--import", pathToFileURL(tsxLoader).href, runScript],
     { cwd: process.cwd(), stdio: "inherit", env },
   );
   return await new Promise<boolean>((resolveStart) => {
