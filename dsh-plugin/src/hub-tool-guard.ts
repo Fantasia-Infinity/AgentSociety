@@ -18,10 +18,13 @@ export const name = 'agent-society-hub-tool-guard'
 export const inject: string[] = []
 
 const HUB_TOOL_PREFIX = 'mcp__agent-society__hub_'
+const HUB_TOOL_READY_TIMEOUT_MS = 10_000
 
 interface ToolRuntimeLike {
   schemas(scope?: object): readonly ToolSchema[]
 }
+
+let waitedForHubTools = false
 
 export function apply(ctx: Context): void {
   ctx.on(
@@ -30,13 +33,15 @@ export function apply(ctx: Context): void {
       const assembled = await next()
       try {
         const tools = ctx.get('tools') as ToolRuntimeLike | undefined
-        const visible = tools?.schemas(context.scope) ?? []
-        const hubTools = visible.filter((tool) =>
-          tool.name.startsWith(HUB_TOOL_PREFIX),
-        )
-        if (hubTools.length === 0) return assembled
+        if (!tools) return assembled
+        let visible = hubToolsIn(tools, context.scope)
+        if (visible.length === 0 && !waitedForHubTools) {
+          waitedForHubTools = true
+          visible = await waitForHubTools(tools, context.scope)
+        }
+        if (visible.length === 0) return assembled
         const existing = new Set(assembled.tools.map((tool) => tool.name))
-        const missing = hubTools.filter(
+        const missing = visible.filter(
           (tool) => !existing.has(tool.name),
         )
         if (missing.length === 0) return assembled
@@ -53,4 +58,23 @@ export function apply(ctx: Context): void {
     },
     { prepend: true },
   )
+}
+
+function hubToolsIn(tools: ToolRuntimeLike, scope?: object): ToolSchema[] {
+  return (tools.schemas(scope) ?? []).filter((tool) =>
+    tool.name.startsWith(HUB_TOOL_PREFIX),
+  )
+}
+
+async function waitForHubTools(
+  tools: ToolRuntimeLike,
+  scope?: object,
+): Promise<ToolSchema[]> {
+  const deadline = Date.now() + HUB_TOOL_READY_TIMEOUT_MS
+  for (;;) {
+    const visible = hubToolsIn(tools, scope)
+    if (visible.length > 0) return visible
+    if (Date.now() >= deadline) return []
+    await new Promise((resolve) => setTimeout(resolve, 100))
+  }
 }
