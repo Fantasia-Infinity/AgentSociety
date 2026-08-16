@@ -389,8 +389,11 @@ export function loadConfig(
     process.env.AGENT_DSH_SESSION_ROOT?.trim() ||
       resolve(loadSessionDir(false), "dsh-sessions"),
   );
+  // zstd matches the harness base bundle default (used by the dsh TUI);
+  // the worker shares the same session root, so a mismatched default makes
+  // every session turn fail with an artifact compression error.
   const dshSessionCompression = (
-    process.env.AGENT_DSH_SESSION_COMPRESSION?.trim() || "none"
+    process.env.AGENT_DSH_SESSION_COMPRESSION?.trim() || "zstd"
   ) as "none" | "zstd";
   if (!["none", "zstd"].includes(dshSessionCompression)) {
     throw new Error("AGENT_DSH_SESSION_COMPRESSION must be none or zstd");

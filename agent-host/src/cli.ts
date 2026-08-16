@@ -581,6 +581,15 @@ async function runDshPluginWorker(
       config.dshSessionCompression ?? "none",
     AGENT_SOCIETY_HUB_MCP: config.dshHubMcp === false ? "0" : "1",
   }
+  // The dsh LLM adapter (llm-deepseek) reads the key from $DEEPSEEK_API_KEY
+  // (and $DEEPSEEK_BASE_URL). Mirror the dsh TUI path below so the worker's
+  // sessions can reach the remote model.
+  if (config.remoteApiKey) {
+    env.DEEPSEEK_API_KEY = config.remoteApiKey;
+  }
+  if (config.remoteBaseUrl) {
+    env.DEEPSEEK_BASE_URL = config.remoteBaseUrl;
+  }
   for (;;) {
     const outcome = await new Promise<{ started: boolean; restart: boolean }>(
       (resolveStart) => {
