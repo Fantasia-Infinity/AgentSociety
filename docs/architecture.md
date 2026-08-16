@@ -1,6 +1,34 @@
 # 架构
 
-## 目标拓扑
+## 当前主架构：Hub + dsh 插件
+
+当前默认执行面是 DeepSeek Harness 进程内插件，而不是独立 Pi 进程：
+
+```text
+AgentSociety Hub (Python)
+  ▲ REST: claim / update / controls / heartbeat / artifacts
+  │
+dsh 进程内插件 dsh-plugin/
+  ├─ agent-society-worker      领取任务、continuous resume、steer/follow-up/cancel、
+  │                            工具策略、session 标题、transcript artifact、self-update
+  ├─ agent-society-hub-mcp     mcp__agent-society__hub_* 派发工具
+  └─ agent-society-hub-tool-guard
+       确保 preset 过滤后 Hub 工具仍在模型目录中
+  ▼
+dsh Agent Loop + 工具栈（dsh-TUI / dsh web / dsh worker profile）
+```
+
+- `./agent` 默认打开同级 dsh-TUI checkout，并把 `~/.dsh/plugins/agent-society`
+  作为外部 bundle 加载；缺失时回退 Pi TUI。
+- `./agent worker` 默认启动 `dsh --profile agent-society-worker`；缺失时回退
+  Pi worker。
+- Pi SDK、`./agent bridge --adapter dsh` 和 JSON-RPC `dsh-worker` 均保留为
+  兼容路径。
+- 一键部署由
+  [dsh-agent-society-combo](https://github.com/Fantasia-Infinity/dsh-agent-society-combo)
+  固定四个仓库的 commit 与兼容 patch。
+
+## 目标拓扑（含历史链路）
 
 ```text
 Windows 微信设备                       平台无关的 Bot/模型服务器
@@ -18,9 +46,9 @@ Windows 微信设备                       平台无关的 Bot/模型服务器
 ```
 
 这条微信链路现在是通用 Agent 平台的一个 Channel Adapter。独立部署的 Coordination Hub
-管理 Principal、Actor、Node、Task、Run 和 Artifact；它不在微信 Core 进程中。各开发设备
-上的 Pi Agent Host 同时提供本机用户入口和远程任务入口。详细模型、API 与演进边界见
-[Pi Agent 协作平台](agent-platform.md)。
+管理 Principal、Actor、Node、Task、Run 和 Artifact；它不在微信 Core 进程中。各设备上的
+Agent Host 现在默认通过 dsh 插件提供本机用户入口和远程任务入口，Pi Agent Host 保留为
+兼容回退。详细模型、API 与演进边界见 [Pi Agent 协作平台](agent-platform.md)。
 
 ## 运行边界
 
@@ -93,7 +121,7 @@ llama.cpp。`LLM_BACKEND` 支持三种路由：
 | 会话历史 | Mac SQLite | PostgreSQL |
 | 微信接入 | Windows Gateway + mock/wxauto 适配器 | 其他合规渠道适配器 |
 | Gateway 消息与发送账本 | 本地 SQLite | SQLite 可继续使用 |
-| Agent 运行时 | Pi SDK Agent Host + 通用 Bridge（codex/opencode/generic） | Pi、其他框架及 A2A Adapter 并存 |
+| Agent 运行时 | dsh 进程内插件（默认）+ Pi SDK Agent Host（回退）+ 通用 Bridge | Pi、其他框架及 A2A Adapter 并存 |
 | Agent 工具 | 托管 Sub-agent/plan/memory/background + Pi LSP/MCP + Channel MCP | 更多 MCP 客户端与节点策略 |
 | 协作任务 | SQLite 或可选 PostgreSQL；Artifact URI 或 file/S3 对象存储 | 事件总线与 Hub 联邦 |
 | 鉴权 | Bearer token（bootstrap/租户/节点）+ OIDC | TLS + 短期凭证与密钥轮换 |

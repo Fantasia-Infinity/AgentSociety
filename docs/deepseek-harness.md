@@ -1,22 +1,29 @@
 # DeepSeek Harness 集成
 
-AgentSociety 与 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
-（`dsh`）之间有两条内置通道：
+AgentSociety 的默认 Agent 运行时现在是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
+（`dsh`）插件：`dsh-plugin/`（`@agent-society/dsh-agent-society`）。
 
-1. **dsh 作为派发端**：`dsh web` 会话内加载 AgentSociety Hub 的 MCP 工具
-   （`hub_create_task`、`hub_list_tasks`、`hub_get_task` 等）。
-2. **dsh 作为执行端**：
-   - `./agent bridge --adapter dsh`：每个任务运行一次 `dsh --profile headless`，
-     适合快速接入，无流式进度和连续会话。
-   - `./agent dsh-worker`：通过 dsh SDK JSON-RPC runtime 常驻执行 Hub 任务，
-     支持文本流式、工具策略映射和同进程连续会话。
+主路径：
 
-## 新的主路径：dsh 进程内插件
+1. **dsh 作为交互 Agent**：`./agent` 默认打开带 AgentSociety bundle 的 dsh-TUI，
+   Hub 工具以 `mcp__agent-society__hub_*` 暴露。
+2. **dsh 作为 Hub worker**：`./agent worker` 默认启动
+   `dsh --profile agent-society-worker`，任务在 dsh 进程内执行。
+3. **一键安装**：
+   [dsh-agent-society-combo](https://github.com/Fantasia-Infinity/dsh-agent-society-combo)
+   固定 dsh / dsh-TUI / AgentSociety / preset 的 commit 与兼容 patch。
 
-AgentSociety 现在提供一个本地 dsh bundle：`dsh-plugin/`
-（`@agent-society/dsh-agent-society`）。它直接运行在 dsh 进程内，使用
-`ctx.agents.create()` / `ctx.agents.resume()`，因此具备跨进程 resume，
-也不再受 JSON-RPC SDK 的 cancel/steer 限制。
+兼容通道仍保留：
+
+- `./agent bridge --adapter dsh`：每个任务运行一次 `dsh --profile headless`。
+- `./agent dsh-worker`：通过 dsh SDK JSON-RPC runtime 常驻执行 Hub 任务。
+- `AGENT_TUI_RUNTIME=pi` / `AGENT_WORKER_RUNTIME=pi`：回退 Pi。
+
+## dsh 进程内插件
+
+`dsh-plugin/` 直接运行在 dsh 进程内，使用 `ctx.agents.create()` /
+`ctx.agents.resume()`，因此具备跨进程 resume，也不再受 JSON-RPC SDK 的
+cancel/steer 限制。
 
 安装：
 
@@ -82,7 +89,10 @@ dsh-TUI 的 `/resume` 使用 `ctx.agents.resume`；continuous worker 也会把
 - 把任务标题写入 `session/title`，在 Run/Task 结果中返回
   `dsh_session_title`；
 - flush 后把 dsh transcript 作为 Hub artifact 挂到 Run/Task
-  （`dsh_transcript_artifact_id`），`./agent observe` 可读取本机文件 artifact。
+  （`dsh_transcript_artifact_id`），`./agent observe` 可读取本机文件 artifact；
+- `input.action = "self_update"` 由 dsh worker 自己执行 `git pull --ff-only`、
+  依赖安装与 `agent-host` / `dsh-plugin` 构建，任务落库后以退出码 `75`
+  退出，`./agent worker` 父进程自动重启 dsh worker。
 
 详见 [`dsh-plugin/README.md`](../dsh-plugin/README.md)。
 

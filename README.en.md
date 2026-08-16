@@ -31,6 +31,11 @@ AgentSociety only handles **coordination**: who is who, who is running what,
 how far it has progressed, and where the results live. The actual work always
 happens on your own devices, executed by the Agents you installed.
 
+The default Agent runtime is a **DeepSeek Harness (dsh) plugin**
+(`dsh-plugin/`): AgentSociety is loaded as an in-process dsh bundle, `./agent`
+opens the dsh-TUI, and `./agent worker` runs the in-process dsh Hub worker.
+Pi remains as a compatibility fallback.
+
 ## Core concepts
 
 | Concept | Meaning |
@@ -67,11 +72,29 @@ or another reverse proxy.
 
 ### 2. Install an Agent on a device
 
-You need Git and Node.js 22.19+ (PowerShell on Windows):
+The recommended path is the pinned one-command installer
+[dsh-agent-society-combo](https://github.com/Fantasia-Infinity/dsh-agent-society-combo),
+which installs DeepSeek Harness + dsh-TUI + AgentSociety + the default
+`anchored-standard` preset:
+
+```bash
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/Fantasia-Infinity/dsh-agent-society-combo/main/install.sh | bash
+
+# Windows PowerShell
+# irm https://raw.githubusercontent.com/Fantasia-Infinity/dsh-agent-society-combo/main/install.ps1 | iex
+```
+
+After installation, `agent` opens the dsh-TUI with AgentSociety Hub tools and
+`agent worker` runs the in-process dsh worker; it falls back to Pi when dsh is
+unavailable.
+
+For source development:
 
 ```bash
 git clone <repository-url> AgentSociety
 cd AgentSociety
+sh scripts/install-dsh-plugin.sh
 ./agent               # on Windows: ./agent.ps1
 ```
 
@@ -100,7 +123,7 @@ Once the Hub is configured, dispatch from anywhere:
 - **Codex / OpenCode / Claude**: the Hub exposes MCP tools (`hub_create_task`,
   `hub_get_task`, `hub_cancel_task`, ...); configure once and dispatch
   directly from the conversation.
-- **Local TUI**: use the Hub tools from your Pi session.
+- **Local TUI**: use the Hub tools from your dsh-TUI session.
 - **REST API**: `/v1/hub/tasks`, for scripts and automation.
 
 Example: connect Codex to the Hub's MCP endpoint:
@@ -124,9 +147,15 @@ codex mcp add hub --url https://hub.example.com/mcp \
 
 Not every device has to run the same Agent:
 
-- **Pi Agent (default)**: full built-in tooling (sub-agents, plan/todo,
-  long-term memory, LSP, MCP, background processes, web search), with a local
-  TUI and remote task support.
+- **DeepSeek Harness dsh plugin (default)**: `dsh-plugin/`
+  (`@agent-society/dsh-agent-society`) is the primary runtime. It runs
+  in-process dsh Hub workers with claim/heartbeat/controls/cancel/self-update,
+  continuous `ctx.agents.resume`, tool-policy mapping, session titles, and
+  transcript artifacts; it also exposes `mcp__agent-society__hub_*` tools to
+  the dsh-TUI. See [DeepSeek Harness integration](docs/deepseek-harness.md).
+- **Pi Agent (kept for compatibility)**: full built-in tooling (sub-agents,
+  plan/todo, long-term memory, LSP, MCP, background processes, web search).
+  Force it with `AGENT_TUI_RUNTIME=pi` / `AGENT_WORKER_RUNTIME=pi`.
 - **Codex / OpenCode**: run as Hub workers through the generic Bridge
   (`./agent bridge --adapter codex`), with cross-task continuous sessions;
   sessions appear under the “AgentHub” project in the Codex GUI.
@@ -163,10 +192,11 @@ REST first.
   revocable credential via `agent connect` — no shared tokens.
 - **Data isolation**: users can only see their own Principal / Actor / Node /
   Task / Run.
-- **Policy controls**: remote tasks can run in `read_only` / `no_tools` mode,
-  and Pi plugin resources are not executed in workers by default. See the
-  [authentication doc](docs/authentication.md) and the
-  [Agent platform doc](docs/agent-platform.md).
+- **Policy controls**: remote tasks can run in `read_only` / `no_tools` mode;
+  the dsh plugin worker maps tasks to `full` / `read_only` / `no_tools` tool
+  catalogs and sandbox modes, and Pi plugin resources are not executed in
+  workers by default. See the [authentication doc](docs/authentication.md)
+  and the [Agent platform doc](docs/agent-platform.md).
 
 ### Dispatch-only mode
 
@@ -195,7 +225,8 @@ src/agent_hub/       Hub coordinator (REST/MCP/A2A/Web, storage, auth)
 src/wechatd/         Windows WeChat daemon (local HTTP API, optional)
 src/wechat_core/     WeChat Core (deprecated, reference only)
 src/agent_channel/   Channel MCP tools for agents
-agent-host/          Agent host (Pi worker, Bridge, CLI)
+dsh-plugin/          Default runtime: in-process DeepSeek Harness bundle
+agent-host/          Agent host CLI, Pi worker (fallback), Bridge
 deploy/              Docker/Caddy deployment templates for the Hub
 docs/                Architecture, deployment, adapters, auth docs
 tests/               Tests (Python + Node)
@@ -207,17 +238,25 @@ tests/               Tests (Python + Node)
 # Python (Hub / WeChat)
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 
-# Node (agent-host)
+# Node (agent-host + dsh-plugin)
 npm --prefix agent-host test
+npm --prefix dsh-plugin run check
+npm --prefix dsh-plugin run build
 ```
 
 ## Project status
 
+- Default runtime: AgentSociety loads as a dsh plugin; `./agent` opens the
+  dsh-TUI and `./agent worker` runs the in-process dsh worker. Pi remains as
+  a compatibility fallback.
 - Available now: cross-device task dispatch, continuous sessions, MCP/Web/REST
   entry points, password accounts with node credentials, multi-tenant
-  isolation, Codex/OpenCode adapters.
-- In development: one-command installation and releases, WeChat channel
-  improvements, more Agent adapters, tenant self-service in the web UI.
+  isolation, Codex/OpenCode adapters, dsh steer/follow-up/cancel, tool
+  policies, transcript artifacts, and self-update.
+- In development: release/install polish via the
+  [combo repo](https://github.com/Fantasia-Infinity/dsh-agent-society-combo),
+  WeChat channel improvements, more Agent adapters, tenant self-service in the
+  web UI.
 
 To dig deeper, start with the [architecture doc](docs/architecture.md).
 

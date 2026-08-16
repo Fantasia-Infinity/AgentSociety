@@ -7,6 +7,10 @@ Windows、云上的服务器，以及任何带命令行工具的机器，连成�
 每一台设备上的 Agent 都是你的一名赛博同事——你可以从任何一端派活、看进度、
 收结果，也可以让不同设备上的 Agent 互相协作。
 
+默认 Agent 运行时是 **DeepSeek Harness（dsh）插件**（`dsh-plugin/`）：
+AgentSociety 作为 dsh 进程内 bundle 加载，`./agent` 打开 dsh-TUI，
+`./agent worker` 启动 dsh 进程内 Hub worker；Pi 作为兼容回退继续保留。
+
 ```mermaid
 flowchart LR
     You[你 / Codex / Web 仪表盘] --> Hub((Hub 协调中枢))
@@ -62,12 +66,28 @@ PYTHONPATH=src python3 -m agent_hub.server
 
 ### 2. 在一台设备上安装 Agent
 
-需要 Git 和 Node.js 22.19+（Windows 用 PowerShell）：
+推荐使用 [dsh-agent-society-combo](https://github.com/Fantasia-Infinity/dsh-agent-society-combo)：
+它把 DeepSeek Harness、dsh-TUI、AgentSociety 和默认 `anchored-standard` preset 固定到
+一组验证过的 commit，并打上兼容补丁：
+
+```bash
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/Fantasia-Infinity/dsh-agent-society-combo/main/install.sh | bash
+
+# Windows PowerShell
+# irm https://raw.githubusercontent.com/Fantasia-Infinity/dsh-agent-society-combo/main/install.ps1 | iex
+```
+
+安装完成后，`agent` 默认启动带 AgentSociety Hub 工具的 dsh-TUI，`agent worker`
+默认启动 dsh 进程内 worker；缺少 dsh-TUI / DeepSeek Harness 时自动回退 Pi。
+
+源码开发方式仍支持：
 
 ```bash
 git clone <repository-url> AgentSociety
 cd AgentSociety
-./agent               # dsh TUI（缺 dsh-TUI 时回退 Pi）；Windows 用 ./agent.ps1
+sh scripts/install-dsh-plugin.sh
+./agent               # dsh TUI；Windows 用 ./agent.ps1
 ```
 
 首次运行会引导你填写模型连接信息（OpenAI-compatible URL、Model ID、API Key），
@@ -121,17 +141,19 @@ enabled = true
 
 AgentSociety 不要求所有设备都用同一种 Agent：
 
-- **Pi Agent（默认）**：完整的内建工具（Sub-agent、plan/todo、长期记忆、LSP、
-  MCP、后台进程、Web 搜索），支持本机 TUI 和远程任务。
+- **DeepSeek Harness dsh 插件（默认）**：`dsh-plugin/`
+  （`@agent-society/dsh-agent-society`）是当前主执行路径。它在 dsh 进程内
+  提供 Hub worker（claim / heartbeat / controls / cancel / self-update）、
+  `ctx.agents.create/resume` 连续会话、工具策略映射、session 标题与
+  transcript artifact，并把 Hub 暴露为 `mcp__agent-society__hub_*` 工具。
+  `./agent` 默认打开带该插件的 dsh-TUI，`./agent worker` 默认启动 dsh
+  plugin worker。详见 [DeepSeek Harness 集成](docs/deepseek-harness.md)。
+- **Pi Agent（保留兼容）**：完整的内建工具（Sub-agent、plan/todo、长期记忆、
+  LSP、MCP、后台进程、Web 搜索）。`AGENT_TUI_RUNTIME=pi` /
+  `AGENT_WORKER_RUNTIME=pi` 可强制回退，代码与 Pi 会话存储继续保留。
 - **Codex / OpenCode**：通过通用 Bridge 作为 Hub worker
   （`./agent bridge --adapter codex`），支持跨任务连续会话，任务会出现在
   Codex GUI 的 “AgentHub” 项目里。
-- **DeepSeek Harness（新主路径）**：通过本地 dsh bundle `dsh-plugin/`
-  在 dsh 进程内执行 Hub 任务，支持 `ctx.agents.resume` 跨进程恢复和
-  dsh-TUI 交互。安装 profile 后 `./agent worker` 默认使用该路径，Pi
-  自动作为回退（`AGENT_WORKER_RUNTIME=pi` 可强制回退）；兼容入口仍保留
-  `./agent bridge --adapter dsh` 和 `./agent dsh-worker`，见
-  [集成文档](docs/deepseek-harness.md)。
 - **Generic**：任何带非交互 CLI 的工具都可以通过
   [适配器规范](docs/agent-adapters.md) 接入。
 
@@ -160,8 +182,9 @@ AGENT_WORKER_SESSION_MODE=continuous
 - **节点凭据**：每台设备用 `agent connect` 换取独立、可单独吊销的节点凭据，
   不再使用共享 token。
 - **数据隔离**：用户只能看到自己的 Principal / Actor / Node / Task / Run。
-- **权限策略**：远程任务可设为 `read_only` / `no_tools`，Pi 插件资源默认
-  不在 worker 中执行。详见 [认证文档](docs/authentication.md) 和
+- **权限策略**：远程任务可设为 `read_only` / `no_tools`；dsh plugin worker
+  按任务映射 `full` / `read_only` / `no_tools` 工具目录与 sandbox 模式，Pi
+  插件资源默认不在 worker 中执行。详见 [认证文档](docs/authentication.md) 和
   [Agent 平台文档](docs/agent-platform.md)。
 
 ### 仅派发模式（dispatch-only）
@@ -187,7 +210,8 @@ src/agent_hub/       Hub 协调中枢（REST/MCP/A2A/Web、存储、认证）
 src/wechatd/         Windows 微信守护进程（本地 HTTP API，可选）
 src/wechat_core/     微信 Core（已弃用，仅作参考）
 src/agent_channel/   面向 Agent 的 Channel MCP 工具
-agent-host/          Agent 宿主（Pi worker、Bridge、CLI）
+dsh-plugin/          默认 Agent 运行时：DeepSeek Harness 进程内 bundle
+agent-host/          Agent 宿主 CLI、Pi worker（回退）、Bridge
 deploy/              Hub 的 Docker/Caddy 部署模板
 docs/                架构、部署、适配器、认证文档
 tests/               测试（Python + Node）
@@ -199,15 +223,21 @@ tests/               测试（Python + Node）
 # Python（Hub / 微信）
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 
-# Node（agent-host）
+# Node（agent-host + dsh-plugin）
 npm --prefix agent-host test
+npm --prefix dsh-plugin run check
+npm --prefix dsh-plugin run build
 ```
 
 ## 项目状态
 
+- 默认运行时：AgentSociety 作为 dsh 插件加载；`./agent` 打开 dsh-TUI，
+  `./agent worker` 启动 dsh 进程内 worker；Pi 保留为兼容回退。
 - 已可用：跨设备任务派发、连续会话、MCP/Web/REST 入口、账号与节点凭据、
-  多租户隔离、Codex/OpenCode 适配器。
-- 开发中：一键安装与发布、微信通道完善、更多 Agent 适配器、Web 租户自助管理。
+  多租户隔离、Codex/OpenCode 适配器、dsh worker 的 steer/follow-up/cancel、
+  工具策略、transcript artifact 和自更新。
+- 开发中：发布与安装体验（[combo repo](https://github.com/Fantasia-Infinity/dsh-agent-society-combo)）、
+  微信通道完善、更多 Agent 适配器、Web 租户自助管理。
 
 想深入了解，从 [架构文档](docs/architecture.md) 开始。
 

@@ -74,6 +74,9 @@ launches this same source TUI automatically and passes the Hub MCP token.
 Set `AGENT_TUI_RUNTIME=pi` to force the legacy Pi TUI, or
 `AGENT_DSH_TUI_ROOT=/path/to/dsh-TUI` when the checkout lives elsewhere.
 
+For a pinned one-command install of dsh + dsh-TUI + AgentSociety + preset,
+use [dsh-agent-society-combo](https://github.com/Fantasia-Infinity/dsh-agent-society-combo).
+
 ## Task input
 
 The worker reads the standard `task.input.workspace` field. Optional fields:
@@ -102,6 +105,8 @@ The worker reads the standard `task.input.workspace` field. Optional fields:
 | `AGENT_SOCIETY_NODE_ID` | hostname | Node identity |
 | `AGENT_SOCIETY_PRINCIPAL_ID` | `human-<user>` | Principal identity |
 | `AGENT_SOCIETY_DISPLAY_NAME` | `AgentSociety dsh worker on <host>` | Registration display name |
+| `AGENT_SOCIETY_REPOSITORY_ROOT` | plugin location's repo root | AgentSociety checkout updated by self-update tasks |
+| `AGENT_SELF_UPDATE` | `1` | Allow Hub `input.action: "self_update"` tasks |
 | `AGENT_SOCIETY_PROVIDER` | `deepseek-official` | dsh provider route |
 | `AGENT_SOCIETY_MODEL` / `DSH_MODEL` | `deepseek-v4-flash` | dsh model id |
 | `AGENT_SOCIETY_MAX_TOKENS` | `8192` | Per-request output cap |

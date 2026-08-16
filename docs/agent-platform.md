@@ -1,5 +1,10 @@
 # AgentSociety：基于 Pi 的本地优先 Agent 平台
 
+> 本文档描述的是 **Pi 兼容执行路径**。当前默认执行路径是 dsh 插件
+> （`dsh-plugin/`），`./agent` 与 `./agent worker` 默认走 dsh-TUI / dsh
+> worker，Pi 通过 `AGENT_TUI_RUNTIME=pi` / `AGENT_WORKER_RUNTIME=pi` 回退。
+> 主路径见 [DeepSeek Harness 集成](deepseek-harness.md)。
+
 ## 已落地的第一条纵切
 
 项目现在不再把“微信机器人”当成最终架构，而是把微信视为一个通信适配器。Coordination
