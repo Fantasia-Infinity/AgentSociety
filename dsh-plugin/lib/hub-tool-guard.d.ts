@@ -4,7 +4,7 @@
  * Agent presets are allowed to filter the assembled tool catalog (for
  * example the anchored-standard preset starts with a deliberately small
  * bootstrap catalog). Hub coordination tools are deployment-level dispatch
- * surface rather than preset capabilities, so this plugin re-appends them
+ * surface rather than preset capabilities, so this guard re-appends them
  * after the ordinary assembly waterfall has run. It reads the scoped tool
  * registry AFTER restrictions, so a real `tools.restrict()` denial is still
  * honored.

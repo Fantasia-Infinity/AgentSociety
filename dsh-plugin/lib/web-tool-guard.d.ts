@@ -8,6 +8,9 @@
  * `tools.restrict()` denial is still honored.
  */
 import type { Context } from '@deepseek-ai/cordis';
+import type { ToolSchema } from '@deepseek-ai/dsh-llm';
+import { type ToolRuntimeLike } from './tool-guard.js';
 export declare const name = "agent-society-web-tool-guard";
 export declare const inject: string[];
 export declare function apply(ctx: Context): void;
+export type { ToolSchema, ToolRuntimeLike };

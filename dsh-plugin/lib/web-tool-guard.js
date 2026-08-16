@@ -7,36 +7,26 @@
  * the scoped tool registry AFTER restrictions, so an explicit
  * `tools.restrict()` denial is still honored.
  */
+import { createToolGuard } from './tool-guard.js';
 export const name = 'agent-society-web-tool-guard';
 export const inject = [];
 const WEB_TOOL_NAME = 'web_search';
 export function apply(ctx) {
-    const disabled = process.env.AGENT_SOCIETY_WEB_SEARCH === "0";
-    ctx.on('system-prompt/assemble', async (assembly, context, next) => {
-        const assembled = await next();
-        try {
-            if (disabled) {
-                return {
-                    ...assembled,
-                    tools: assembled.tools.filter((tool) => tool.name !== WEB_TOOL_NAME),
-                };
-            }
-            const tools = ctx.get('tools');
-            const webTool = (tools?.schemas(context.scope) ?? []).find((tool) => tool.name === WEB_TOOL_NAME);
-            if (!webTool)
-                return assembled;
-            if (assembled.tools.some((tool) => tool.name === WEB_TOOL_NAME)) {
-                return assembled;
-            }
+    const disabled = process.env.AGENT_SOCIETY_WEB_SEARCH === '0';
+    createToolGuard(ctx, {
+        name,
+        before: (assembly) => {
+            if (!disabled)
+                return undefined;
             return {
-                ...assembled,
-                tools: [...assembled.tools, webTool],
+                ...assembly,
+                tools: assembly.tools.filter((tool) => tool.name !== WEB_TOOL_NAME),
             };
-        }
-        catch (error) {
-            ctx.logger.warn(`agent-society-web-tool-guard failed; keeping the assembled catalog: ${error instanceof Error ? error.message : String(error)}`);
-            return assembled;
-        }
-    }, { prepend: true });
+        },
+        collect: (tools, scope) => {
+            const webTool = (tools?.schemas(scope) ?? []).find((tool) => tool.name === WEB_TOOL_NAME);
+            return webTool === undefined ? [] : [webTool];
+        },
+    });
 }
 //# sourceMappingURL=web-tool-guard.js.map

@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -11,6 +10,7 @@ import { homedir, userInfo } from "node:os";
 import { Writable } from "node:stream";
 
 import { sanitizedChildEnv } from "./child-env.js";
+import { runDshChild } from "./dsh-child.js";
 import { listAdapterIds, loadAdapterManifest } from "./adapter-registry.js";
 import { BridgeWorker } from "./bridge.js";
 import { agentHubProjectDir } from "./codex-project.js";
@@ -524,39 +524,19 @@ async function runDshTui(
   console.log(
     `Starting dsh TUI from ${tuiRoot} (Hub tools ${hub ? "enabled" : "disabled"}).`,
   );
-  const child = spawn(
-    process.execPath,
-    ["--import", pathToFileURL(tsxLoader).href, runScript],
-    { cwd: process.cwd(), stdio: "inherit", env },
+  const result = await runDshChild(
+    [process.execPath, "--import", pathToFileURL(tsxLoader).href, runScript],
+    env,
+    {
+      onError: (error) => {
+        const detail = `Could not start dsh TUI: ${error.message}`;
+        if (forced) throw new Error(detail);
+        console.warn(detail);
+        return false;
+      },
+    },
   );
-  return await new Promise<boolean>((resolveStart) => {
-    let settled = false;
-    const finish = (started: boolean): void => {
-      if (settled) return;
-      settled = true;
-      resolveStart(started);
-    };
-    const forwardSignal = (signal: NodeJS.Signals): void => {
-      child.kill(signal);
-    };
-    process.once("SIGINT", forwardSignal);
-    process.once("SIGTERM", forwardSignal);
-    child.once("error", (error) => {
-      const detail = `Could not start dsh TUI: ${error.message}`;
-      if (forced) throw new Error(detail);
-      console.warn(detail);
-      finish(false);
-    });
-    child.once("exit", (code, signal) => {
-      process.removeListener("SIGINT", forwardSignal);
-      process.removeListener("SIGTERM", forwardSignal);
-      if (code) process.exitCode = code;
-      if (signal && ["SIGINT", "SIGTERM"].includes(signal) === false) {
-        process.exitCode = 1;
-      }
-      finish(true);
-    });
-  });
+  return result.started;
 }
 
 function profileIncludesCorePlugin(profilePackage: string): boolean {
@@ -617,32 +597,12 @@ async function runDshWeb(
     worker: false,
     hubMcp: Boolean(hub),
   });
-  const child = spawn(command[0]!, command.slice(1), {
-    stdio: "inherit",
-    env,
-  });
-  await new Promise<void>((resolveExit) => {
-    const forwardSignal = (signal: NodeJS.Signals): void => {
-      child.kill(signal);
-    };
-    process.once("SIGINT", forwardSignal);
-    process.once("SIGTERM", forwardSignal);
-    child.once("error", (error) => {
-      process.removeListener("SIGINT", forwardSignal);
-      process.removeListener("SIGTERM", forwardSignal);
+  await runDshChild(command, env, {
+    onError: (error) => {
       console.error(`Could not start dsh web: ${error.message}`);
       process.exitCode = 1;
-      resolveExit();
-    });
-    child.once("exit", (code, signal) => {
-      process.removeListener("SIGINT", forwardSignal);
-      process.removeListener("SIGTERM", forwardSignal);
-      if (code) process.exitCode = code;
-      if (signal && ["SIGINT", "SIGTERM"].includes(signal) === false) {
-        process.exitCode = 1;
-      }
-      resolveExit();
-    });
+      return true;
+    },
   });
 }
 
@@ -705,52 +665,25 @@ async function runDshPluginWorker(
       config.dshSessionCompression ?? "none",
   }
   for (;;) {
-    const outcome = await new Promise<{ started: boolean; restart: boolean }>(
-      (resolveStart) => {
-        const child = spawn(command[0]!, command.slice(1), {
-          stdio: "inherit",
-          env,
-        })
-        let settled = false
-        const finish = (started: boolean, restart = false): void => {
-          if (settled) return
-          settled = true
-          resolveStart({ started, restart })
+    const outcome = await runDshChild(command, env, {
+      onError: (error) => {
+        const code = (error as NodeJS.ErrnoException).code
+        if (code === "ENOENT") {
+          console.warn(`Could not start ${command[0]!}: ${error.message}.`)
+          return false
         }
-        const forwardSignal = (signal: NodeJS.Signals): void => {
-          child.kill(signal)
-        }
-        process.once("SIGINT", forwardSignal)
-        process.once("SIGTERM", forwardSignal)
-        child.once("error", (error) => {
-          process.removeListener("SIGINT", forwardSignal)
-          process.removeListener("SIGTERM", forwardSignal)
-          const code = (error as NodeJS.ErrnoException).code
-          if (code === "ENOENT") {
-            console.warn(`Could not start ${command[0]!}: ${error.message}.`)
-            finish(false)
-            return
-          }
-          console.error(`DeepSeek Harness plugin worker failed: ${error.message}`)
-          process.exitCode = 1
-          finish(true)
-        })
-        child.once("exit", (code, signal) => {
-          process.removeListener("SIGINT", forwardSignal)
-          process.removeListener("SIGTERM", forwardSignal)
-          if (code === DSH_SELF_UPDATE_EXIT_CODE) {
-            console.log("Self-update applied; restarting dsh plugin worker.")
-            finish(true, true)
-            return
-          }
-          if (code) process.exitCode = code
-          if (signal && ["SIGINT", "SIGTERM"].includes(signal) === false) {
-            process.exitCode = 1
-          }
-          finish(true)
-        })
+        console.error(`DeepSeek Harness plugin worker failed: ${error.message}`)
+        process.exitCode = 1
+        return true
       },
-    )
+      onExit: (code) => {
+        if (code === DSH_SELF_UPDATE_EXIT_CODE) {
+          console.log("Self-update applied; restarting dsh plugin worker.")
+          return true
+        }
+        return false
+      },
+    })
     if (!outcome.started) return false
     if (!outcome.restart) return true
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 1_000))
@@ -800,22 +733,17 @@ async function runDshDispatch(
   console.log(
     `Starting DeepSeek Harness web with AgentSociety Hub MCP tools (${command.join(" ")})`,
   );
-  const child = spawn(command[0]!, command.slice(1), {
-    stdio: "inherit",
-    env: {
-      ...sanitizedChildEnv(process.env),
-      AGENT_SOCIETY_HUB_URL: config.hubUrl!,
-      AGENT_SOCIETY_HUB_MCP_TOKEN: hub.nodeToken,
+  await runDshChild(command, {
+    ...sanitizedChildEnv(process.env),
+    AGENT_SOCIETY_HUB_URL: config.hubUrl!,
+    AGENT_SOCIETY_HUB_MCP_TOKEN: hub.nodeToken,
+  }, {
+    onError: (error) => {
+      console.error(`Could not start ${command[0]}: ${error.message}`);
+      process.exitCode = 1;
+      return false;
     },
   });
-  const exitCode = await new Promise<number | null>((resolveExit) => {
-    child.once("error", (error) => {
-      console.error(`Could not start ${command[0]}: ${error.message}`);
-      resolveExit(null);
-    });
-    child.once("exit", (code) => resolveExit(code));
-  });
-  if (exitCode !== 0) process.exitCode = exitCode ?? 1;
 }
 
 type WorkerRuntimeKind = "pi" | "dsh";
