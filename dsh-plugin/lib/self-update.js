@@ -48,8 +48,8 @@ export async function runPluginSelfUpdate(task, options) {
         await run(agentHostDir, options.nodePath, ['scripts/patch-pi-brace-expansion.mjs'], 'Apply security patch after npm ci', record);
     }
     if (updated || stale) {
-        await runNpm(npm, pluginDir, ['run', 'build'], 'dsh-plugin build', record);
-        await runNpm(npm, agentHostDir, ['run', 'build'], 'agent-host build', record);
+        await buildTypeScript(npm, options.nodePath, pluginDir, 'dsh-plugin build', record);
+        await buildTypeScript(npm, options.nodePath, agentHostDir, 'agent-host build', record);
     }
     else {
         record('Build', 'already up to date');
@@ -121,6 +121,14 @@ function resolveNpm(nodePath) {
         return { command: 'npm.cmd', args: [] };
     }
     return { command: 'npm', args: [] };
+}
+async function buildTypeScript(npm, nodePath, dir, label, record) {
+    const tsc = resolve(dir, 'node_modules', 'typescript', 'bin', 'tsc');
+    if (existsSync(tsc)) {
+        await run(dir, nodePath, [tsc, '-p', 'tsconfig.json'], label, record);
+        return;
+    }
+    await runNpm(npm, dir, ['run', 'build'], label, record);
 }
 async function runNpm(npm, cwd, args, label, record) {
     await run(cwd, npm.command, [...npm.args, ...args], label, record);

@@ -114,8 +114,8 @@ export async function runPluginSelfUpdate(
   }
 
   if (updated || stale) {
-    await runNpm(npm, pluginDir, ['run', 'build'], 'dsh-plugin build', record)
-    await runNpm(npm, agentHostDir, ['run', 'build'], 'agent-host build', record)
+    await buildTypeScript(npm, options.nodePath, pluginDir, 'dsh-plugin build', record)
+    await buildTypeScript(npm, options.nodePath, agentHostDir, 'agent-host build', record)
   } else {
     record('Build', 'already up to date')
   }
@@ -202,6 +202,21 @@ function resolveNpm(nodePath: string): NpmInvocation {
     return { command: 'npm.cmd', args: [] }
   }
   return { command: 'npm', args: [] }
+}
+
+async function buildTypeScript(
+  npm: NpmInvocation,
+  nodePath: string,
+  dir: string,
+  label: string,
+  record: (label: string, output: string) => void,
+): Promise<void> {
+  const tsc = resolve(dir, 'node_modules', 'typescript', 'bin', 'tsc')
+  if (existsSync(tsc)) {
+    await run(dir, nodePath, [tsc, '-p', 'tsconfig.json'], label, record)
+    return
+  }
+  await runNpm(npm, dir, ['run', 'build'], label, record)
 }
 
 async function runNpm(
