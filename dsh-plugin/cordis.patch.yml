@@ -68,6 +68,12 @@
         toolPolicy: !!js process.env.AGENT_SOCIETY_TOOL_POLICY ?? 'full'
         pullSeconds: !!js Number(process.env.AGENT_SOCIETY_DIRECTORY_PULL_SECONDS ?? 10)
 
+    # Bounded shared-context prompt injection: consensus one-liners + the
+    # session directory index, read from the local mirror after assembly.
+    - id: agent-society-directory-index
+      name: '@agent-society/dsh-agent-society/directory-index'
+      disabled: !!js process.env.AGENT_SOCIETY_DIRECTORY === '0'
+
 # Host-level DeepSeek web tool. The provider services stay mounted because
 # presets may register their own tool-web row; disabling the host tool plus
 # the assembly guard is enough to keep web_search out of the model catalog.

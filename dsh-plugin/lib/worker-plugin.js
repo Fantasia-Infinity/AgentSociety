@@ -765,6 +765,7 @@ class WorkerLoop {
             title: options.title,
             sessionMode: this.options.sessionMode,
             toolPolicy: options.toolPolicy,
+            actorId: this.options.actorId,
             invocation,
         });
         mirror.rows[options.session.id] = merged;

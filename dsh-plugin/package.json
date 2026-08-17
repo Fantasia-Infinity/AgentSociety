@@ -27,6 +27,10 @@
       "types": "./lib/directory-plugin.d.ts",
       "default": "./lib/directory-plugin.js"
     },
+    "./directory-index": {
+      "types": "./lib/prompt-guard.d.ts",
+      "default": "./lib/prompt-guard.js"
+    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },

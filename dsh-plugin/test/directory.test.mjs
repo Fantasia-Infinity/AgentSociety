@@ -47,6 +47,7 @@ test('loadMirror tolerates missing and corrupt files', () => {
       seq: 0,
       updated_at: 0,
       rows: {},
+      consensus: { seq: 0, entries: [] },
     })
     const path = join(dir, 'bad.json')
     saveMirror(path, { seq: 1, updated_at: 1, rows: { 's1': { junk: true } } })
@@ -156,4 +157,56 @@ test('HubClient directory methods shape requests', async () => {
 
   await client.getDirectoryRow('s1', 2)
   assert.ok(captured.url.includes('/v1/hub/directory/s1?depth=2'))
+})
+
+test('prompt sections respect the 4KB budget and ranking', async () => {
+  const { buildSharedContextSections } = await import('../lib/directory.js')
+  const rows = {}
+  for (let index = 0; index < 40; index += 1) {
+    rows[`session-${index}`] = {
+      session_id: `session-${index}`,
+      actor_id: `actor-${index % 3}`,
+      title: `Title ${index} `.repeat(10),
+      workspace: '/w',
+      status: index === 1 ? 'working' : 'idle',
+      last_active_at: index === 1 ? 999 : 1000 - index,
+      session_mode: 'per_task',
+      tool_policy: 'full',
+      invocations: [],
+    }
+  }
+  const mirror = {
+    seq: 100,
+    updated_at: 1,
+    rows,
+    consensus: {
+      seq: 50,
+      entries: Array.from({ length: 30 }, (_, index) => ({
+        seq: index,
+        kind: 'digest',
+        session_id: `session-${index}`,
+        summary: `Summary ${index} `.repeat(20),
+      })),
+    },
+  }
+  const sections = buildSharedContextSections(mirror)
+  const total = sections.reduce((sum, s) => sum + s.text.length, 0)
+  assert.ok(total <= 4000, `total ${total} exceeds budget`)
+  const indexText = sections.find((s) => s.name === 'agent-society:directory-index').text
+  assert.ok(indexText.includes('| working'), 'working row is ranked first')
+  assert.ok(
+    indexText.indexOf('session-1 |') < indexText.indexOf('session-0 |'),
+    'working row appears before idle rows',
+  )
+})
+
+test('empty mirror yields no sections', async () => {
+  const { buildSharedContextSections } = await import('../lib/directory.js')
+  const sections = buildSharedContextSections({
+    seq: 0,
+    updated_at: 0,
+    rows: {},
+    consensus: { seq: 0, entries: [] },
+  })
+  assert.deepEqual(sections, [])
 })

@@ -66,8 +66,6 @@ export function apply(ctx, config) {
             after_seq: state.mirror.seq,
             limit: 200,
         });
-        if (rows.length === 0)
-            return;
         let maxSeq = state.mirror.seq;
         for (const event of rows) {
             const seq = Number(event.seq);
@@ -79,6 +77,7 @@ export function apply(ctx, config) {
                 continue;
             state.mirror.rows[sessionId] = {
                 session_id: sessionId,
+                ...(typeof event.actor_id === 'string' ? { actor_id: event.actor_id } : {}),
                 workspace: String(payload.workspace ?? ''),
                 status: String(payload.status ?? 'idle'),
                 last_active_at: Number(payload.last_active_at ?? 0),
@@ -91,8 +90,45 @@ export function apply(ctx, config) {
                 maxSeq = seq;
         }
         state.mirror = { ...state.mirror, seq: maxSeq, updated_at: Date.now() };
+        await pullConsensus();
         saveMirror(path, state.mirror);
         ctx.logger.debug(`agent-society-directory pulled ${rows.length} row(s) (seq ${state.mirror.seq})`);
+    }
+    /** Incremental pull of consensus entries into the mirror cache. */
+    async function pullConsensus() {
+        const events = await hub.listSharedEvents({
+            after_seq: state.mirror.consensus.seq,
+            scope: 'consensus',
+            limit: 200,
+        });
+        if (events.length === 0)
+            return;
+        let maxSeq = state.mirror.consensus.seq;
+        const entries = [...state.mirror.consensus.entries];
+        for (const event of events) {
+            const seq = Number(event.seq);
+            if (!Number.isFinite(seq) || seq <= maxSeq)
+                continue;
+            const kind = String(event.kind ?? 'note');
+            const payload = event.payload;
+            const summary = summarizeConsensus(kind, payload);
+            if (!summary)
+                continue;
+            entries.unshift({
+                seq,
+                kind,
+                ...(typeof event.session_id === 'string' && event.session_id
+                    ? { session_id: event.session_id }
+                    : {}),
+                summary,
+            });
+            if (seq > maxSeq)
+                maxSeq = seq;
+        }
+        state.mirror = {
+            ...state.mirror,
+            consensus: { seq: maxSeq, entries: entries.slice(0, 24) },
+        };
     }
     async function pushLocalSessions() {
         const persistence = ctx.get('sessionPersistence');
@@ -109,6 +145,7 @@ export function apply(ctx, config) {
                 continue;
             const row = buildLocalRow({
                 sessionId: header.id,
+                actorId,
                 title: titles.get(header.id),
                 workspace: header.cwd ?? workspaceRoot,
                 lastActiveAt: now,
@@ -131,5 +168,22 @@ export function apply(ctx, config) {
 function stableSlug(value) {
     const slug = value.toLowerCase().replace(/[^a-z0-9._-]+/gu, '-');
     return slug.replace(/^-+|-+$/gu, '') || 'node';
+}
+/** Deterministic one-line summary for a consensus entry. */
+function summarizeConsensus(kind, payload) {
+    if (!payload || typeof payload !== 'object')
+        return undefined;
+    const candidates = [
+        payload.summary,
+        payload.title,
+        payload.result,
+    ];
+    for (const candidate of candidates) {
+        if (typeof candidate === 'string' && candidate.trim()) {
+            const line = candidate.replace(/\s+/gu, ' ').trim();
+            return line.length > 160 ? `${line.slice(0, 160)}…` : line;
+        }
+    }
+    return undefined;
 }
 //# sourceMappingURL=directory-plugin.js.map
