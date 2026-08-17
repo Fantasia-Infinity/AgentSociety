@@ -121,10 +121,6 @@ export function apply(ctx: Context, config: Config): void {
   ctx.logger.warn(
     `agent-society-session-digest active (hub=${hubUrl}, summarize=${summarize}, poll=${pollSeconds}s, idle=${idleSeconds}s)`,
   )
-  // DIAGNOSTIC PROBE — remove after verification
-  try {
-    writeFileSync('/tmp/watcher-probe.txt', `alive ${Date.now()}\n`, { flag: 'a' })
-  } catch { /* ignore */ }
 
   const hub = new HubClient(hubUrl, hubToken)
   const statePath = resolve(
@@ -150,12 +146,6 @@ export function apply(ctx: Context, config: Config): void {
     { prepend: true },
   )
 
-  const probe = (message: string): void => {
-    try {
-      writeFileSync('/tmp/watcher-probe.txt', `${message} ${Date.now()}\n`, { flag: 'a' })
-    } catch { /* ignore */ }
-  }
-
   const timer = ctx.setInterval(() => {
     void tick()
   }, pollSeconds * 1_000)
@@ -172,7 +162,6 @@ export function apply(ctx: Context, config: Config): void {
       | undefined
     const now = Date.now()
     const liveIds = new Set<string>()
-    probe(`tick sessions=${Boolean(sessions)} persistence=${Boolean(persistence)}`)
     ctx.logger.debug(
       `agent-society-session-digest tick (sessions=${Boolean(sessions)}, persistence=${Boolean(persistence)})`,
     )
@@ -214,7 +203,6 @@ export function apply(ctx: Context, config: Config): void {
           if (now - lastPromptAt < idleSeconds * 1_000) continue
           if (inFlight.has(header.id)) continue
           if (attempts.get(header.id) ?? 0 >= MAX_ATTEMPTS) continue
-          probe(`hit ${header.id} lastPromptAt=${lastPromptAt}`)
           inFlight.add(header.id)
           try {
             const inspection = await persistence.inspect(header.id)
@@ -245,7 +233,6 @@ export function apply(ctx: Context, config: Config): void {
               },
             )
             await hub.appendSharedEvent(digest)
-            probe(`appended ${header.id} round=${count}`)
             state[header.id] = { count, lastPromptAt, digestAt: now }
             saveState(statePath, state)
             attempts.delete(header.id)
@@ -380,8 +367,10 @@ export function apply(ctx: Context, config: Config): void {
 }
 
 function messageTextOf(event: unknown): string {
-  const data = (event as { data?: { message?: { content?: unknown } } }).data
-  const content = data?.message?.content
+  const data = (event as {
+    data?: { message?: { content?: unknown }; content?: unknown }
+  }).data
+  const content = data?.message?.content ?? data?.content
   if (!Array.isArray(content)) return ''
   return content
     .filter(
