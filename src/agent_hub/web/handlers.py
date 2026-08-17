@@ -188,9 +188,15 @@ class WebHandlersMixin:
             return
         if path == "/web/contexts":
             query = parse_qs(query_string)
-            scope = (query.get("scope") or [None])[0]
+            # The Consensus page is about shared memory: default to the
+            # consensus scope so the flood of directory upserts never shows
+            # up here. Directory rows have their own page (/web/directory);
+            # "all" is available explicitly.
+            scope = (query.get("scope") or ["consensus"])[0]
+            if scope not in {"consensus", "qa", "directory", "all"}:
+                scope = "consensus"
             params = "limit=200"
-            if scope and scope in {"consensus", "qa"}:
+            if scope != "all":
                 params += f"&scope={quote(scope)}"
             _, events = self.server.api.get(
                 "/v1/hub/contexts", params, context
@@ -199,7 +205,7 @@ class WebHandlersMixin:
                 HTTPStatus.OK,
                 contexts_page(
                     events["events"],
-                    scope_filter=scope if scope in {"consensus", "qa"} else None,
+                    scope_filter=scope,
                     admin=is_admin,
                 ),
             )

@@ -797,16 +797,16 @@ def contexts_page(
                 return value.strip().replace("\n", " ")[:160]
         return ""
 
-    filters = ["all", "consensus", "qa"]
+    filters = ["consensus", "qa", "directory", "all"]
     links = []
     for name in filters:
         if name == "all":
-            href = "/web/contexts"
+            href = "/web/contexts?scope=all"
             label = "All"
         else:
             href = f"/web/contexts?scope={name}"
             label = name.capitalize()
-        cls = ' class="active" aria-current="page"' if name == (scope_filter or "all") else ""
+        cls = ' class="active" aria-current="page"' if name == (scope_filter or "consensus") else ""
         links.append(f'<a href="{href}"{cls}>{label}</a>')
     rows = ""
     for event in events:
