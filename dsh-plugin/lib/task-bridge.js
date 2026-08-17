@@ -42,7 +42,10 @@ export function apply(ctx, config) {
     const owner = stableSlug(userInfo().username);
     const host = stableSlug(hostname());
     const principalId = config.principalId ?? `human-${owner}`;
-    const actorId = config.actorId ?? `agent-society-${host}`;
+    // agent-host registers this process as `pi-${host}`; match it so tasks
+    // delegated to the interactive actor are claimed (env is set by the
+    // launcher, this default only matters for standalone runs).
+    const actorId = config.actorId ?? process.env.AGENT_SOCIETY_ACTOR_ID?.trim() ?? `pi-${host}`;
     const nodeId = config.nodeId ?? host;
     const workspaceRoot = resolve(config.workspaceRoot ?? process.cwd());
     const pollSeconds = config.pollSeconds ?? 10;
