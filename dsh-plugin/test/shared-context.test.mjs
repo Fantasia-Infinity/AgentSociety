@@ -119,3 +119,14 @@ test('HubClient question methods shape requests', async () => {
   await client.getQuestion('q1')
   assert.ok(captured.url.endsWith('/v1/hub/questions/q1'))
 })
+
+test('extractAnswer pulls the marked answer or falls back to full text', async () => {
+  const { extractAnswer, ANSWER_MARKER } = await import('../lib/answer.js')
+  assert.equal(
+    extractAnswer(`Some preamble\n${ANSWER_MARKER} the answer is 42`),
+    'the answer is 42',
+  )
+  assert.equal(extractAnswer('plain answer text'), 'plain answer text')
+  const long = extractAnswer('x'.repeat(20_000))
+  assert.ok(long.length <= 8000)
+})

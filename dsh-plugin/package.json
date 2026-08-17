@@ -31,6 +31,10 @@
       "types": "./lib/prompt-guard.d.ts",
       "default": "./lib/prompt-guard.js"
     },
+    "./question-bridge": {
+      "types": "./lib/question-bridge.d.ts",
+      "default": "./lib/question-bridge.js"
+    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },

@@ -17,6 +17,7 @@ import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { HubClient, } from './hub-client.js';
 import { buildSessionDigest } from './digest.js';
+import { answerQuestionWithSession } from './answer.js';
 import { loadMirror, mergeInvocation, mirrorPath, saveMirror, } from './directory.js';
 import { isSelfUpdateTask, runPluginSelfUpdate, SELF_UPDATE_EXIT_CODE, } from './self-update.js';
 export const name = 'agent-society-worker';
@@ -369,42 +370,15 @@ class WorkerLoop {
     }
     /** One bounded, tool-free answering turn. */
     async generateAnswer(question) {
-        const sessionId = `agent-society-question-${randomUUID().replaceAll('-', '')}`;
-        const handle = await this.ctx.agents.create({
-            sessionId: SessionId(sessionId),
-            agentOptions: {
-                provider: this.options.provider,
-                model: this.options.model,
-                ...(this.options.maxTokens === undefined
-                    ? {}
-                    : { maxTokens: Math.min(this.options.maxTokens, 2048) }),
-            },
-            meta: { cwd: this.options.workspaceRoot },
+        return answerQuestionWithSession(this.ctx, question, {
+            provider: this.options.provider,
+            model: this.options.model,
+            ...(this.options.maxTokens === undefined
+                ? {}
+                : { maxTokens: this.options.maxTokens }),
+            cwd: this.options.workspaceRoot,
             setup: agentSetup('no_tools'),
         });
-        try {
-            const agent = handle.agent;
-            agent.followup(createUserMessage({
-                content: [{
-                        type: 'text',
-                        text: 'Answer the question below concisely and factually, using only ' +
-                            'your own knowledge. Reply with exactly one text block, ' +
-                            `format: ANSWER: <text>\n\nQuestion: ${question}`,
-                    }],
-                source: { kind: 'user' },
-            }));
-            await agent.whenIdle();
-            const text = lastAssistantText(agent.session.events);
-            const marker = 'ANSWER:';
-            const markerIndex = text.indexOf(marker);
-            const answer = markerIndex >= 0
-                ? text.slice(markerIndex + marker.length).trim()
-                : text;
-            return answer.slice(0, 8_000);
-        }
-        finally {
-            await handle.dispose();
-        }
     }
     async claimControls(running) {
         try {
