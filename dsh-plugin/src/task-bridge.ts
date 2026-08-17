@@ -117,9 +117,33 @@ export function apply(ctx: Context, config: Config): void {
     return undefined
   }
 
+  /** Debug state dump for diagnosis; removed after verification. */
+  function debugDump(tag: string): void {
+    try {
+      const agents = ctx.get('agents') as
+        | { list(): Agent[] }
+        | undefined
+      const list = agents && typeof agents.list === 'function' ? agents.list() : null
+      const rows = Array.isArray(list)
+        ? list.map((agent) => ({
+            id: String(agent?.session?.id ?? agent?.id ?? '?'),
+            status: agent?.status,
+          }))
+        : null
+      const { writeFileSync } = require('node:fs') as typeof import('node:fs')
+      writeFileSync(
+        '/tmp/task-bridge-debug.json',
+        `${JSON.stringify({ ts: Date.now(), tag, agentsVisible: agents !== undefined, rows }, null, 2)}\n`,
+      )
+    } catch {
+      // Diagnostics must never break the bridge.
+    }
+  }
+
   async function poll(): Promise<void> {
     if (state.busy) return
     if (activeClaim === null && idleSessionAgent() === undefined) {
+      debugDump('skip-idle')
       return // the human is talking; wait for the next idle round
     }
     state.busy = true
@@ -135,13 +159,17 @@ export function apply(ctx: Context, config: Config): void {
       if (activeClaim === null) return
       const { task, run, lease_token: leaseToken } = activeClaim
       const agent = idleSessionAgent()
-      if (agent === undefined) return // conversation became active; try next poll
+      if (agent === undefined) {
+        debugDump('claimed-but-busy')
+        return // conversation became active; try next poll
+      }
       await execute(agent, task, run, leaseToken)
       activeClaim = null
     } catch (error) {
       ctx.logger.warn(
         `agent-society-task-bridge failed: ${error instanceof Error ? error.message : String(error)}`,
       )
+      debugDump(`error:${error instanceof Error ? error.message : String(error)}`)
       if (activeClaim !== null) {
         const { task, run, lease_token: leaseToken } = activeClaim
         try {
