@@ -150,8 +150,92 @@ class QuestionStore:
                 """,
                 (answer_text[:50_000], now, question_id),
             )
-            # The answer joins the shared memory: future askers can read it
-            # without asking again.
+            self._write_answer_events(question, question_id, answer_text, now)
+            self._condition.notify_all()
+            return self._question(question_id)
+
+    def answer_question_web(
+        self,
+        question_id: str,
+        *,
+        actor_id: str | None,
+        answer_text: str,
+        tenant_id: str,
+        principal_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Human answer from the web UI.
+
+        Only `pending` questions can be answered this way (a `claimed`
+        question is being answered by a worker; web does not preempt it).
+        `actor_id` is optional (web users have no actor); the principal
+        check (or admin) is the authority here.
+        """
+        now = time.time()
+        answer_text = answer_text.strip()
+        if not answer_text:
+            raise ValueError("answer_text is required")
+        with self._condition, self._connection:
+            question = self._question(question_id)
+            if question["tenant_id"] != tenant_id:
+                raise LookupError("question not found")
+            if principal_id is not None and question["principal_id"] != principal_id:
+                raise PermissionError("question does not belong to your principal")
+            if question["status"] == "answered":
+                return question
+            if question["status"] != "pending":
+                raise PermissionError(
+                    "only pending questions can be answered from the web "
+                    f"(current: {question['status']})"
+                )
+            if actor_id is not None:
+                actor = self._actor(actor_id)
+                if actor["tenant_id"] != tenant_id:
+                    raise PermissionError("actor does not belong to tenant")
+            self._connection.execute(
+                """
+                UPDATE hub_questions
+                SET status='answered', answer_text=?, answered_at=?, lease_until=0
+                WHERE question_id=?
+                """,
+                (answer_text[:50_000], now, question_id),
+            )
+            self._write_answer_events(question, question_id, answer_text, now)
+            self._condition.notify_all()
+            return self._question(question_id)
+
+    def decline_question(
+        self,
+        question_id: str,
+        *,
+        actor_id: str | None,
+        reason: str | None,
+        tenant_id: str,
+        principal_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Human rejection from the web UI: pending/claimed -> declined."""
+        now = time.time()
+        with self._condition, self._connection:
+            question = self._question(question_id)
+            if question["tenant_id"] != tenant_id:
+                raise LookupError("question not found")
+            if principal_id is not None and question["principal_id"] != principal_id:
+                raise PermissionError("question does not belong to your principal")
+            if question["status"] in {"answered", "expired", "unsupported", "declined"}:
+                return question
+            if actor_id is not None:
+                actor = self._actor(actor_id)
+                if actor["tenant_id"] != tenant_id:
+                    raise PermissionError("actor does not belong to tenant")
+            self._connection.execute(
+                """
+                UPDATE hub_questions
+                SET status='declined', lease_until=0, answered_at=?
+                WHERE question_id=?
+                """,
+                (now, question_id),
+            )
+            # The rejection joins the shared memory so the asker side can
+            # read it without polling the question table.
             self._connection.execute(
                 """
                 INSERT INTO hub_shared_events(
@@ -172,7 +256,8 @@ class QuestionStore:
                             "asker_session_id": question["asker_session_id"],
                             "asker_task_id": question["asker_task_id"],
                             "question": question["message"],
-                            "answer": answer_text[:10_000],
+                            "status": "declined",
+                            "reason": (reason or "declined")[:10_000],
                             "answered_at": now,
                         }
                     ),
@@ -180,28 +265,67 @@ class QuestionStore:
                     now,
                 ),
             )
-            if question["asker_task_id"] is not None:
-                # The asker's running task can observe the answer through its
-                # own event stream without polling the question table. The
-                # task may have ended already; then the answer still lives in
-                # the shared event log above.
-                task_row = self._connection.execute(
-                    "SELECT 1 FROM hub_tasks WHERE task_id=?",
-                    (question["asker_task_id"],),
-                ).fetchone()
-                if task_row is not None:
-                    self._event(
-                        question["asker_task_id"],
-                        "question.answered",
-                        payload={
-                            "question_id": question_id,
-                            "answer": answer_text[:10_000],
-                        },
-                        tenant_id=question["tenant_id"],
-                        now=now,
-                    )
             self._condition.notify_all()
             return self._question(question_id)
+
+    def _write_answer_events(
+        self,
+        question: dict[str, Any],
+        question_id: str,
+        answer_text: str,
+        now: float,
+    ) -> None:
+        """Shared-memory answer entry + asker task event (both answer paths)."""
+        # The answer joins the shared memory: future askers can read it
+        # without asking again.
+        self._connection.execute(
+            """
+            INSERT INTO hub_shared_events(
+                event_id, tenant_id, principal_id, scope, kind, session_id,
+                actor_id, node_id, payload_json, ttl_hours, expires_at, created_at
+            ) VALUES (?, ?, ?, 'qa', 'answer', ?, ?, NULL, ?, 4320, ?, ?)
+            """,
+            (
+                f"answer_{uuid.uuid4().hex}",
+                question["tenant_id"],
+                question["principal_id"],
+                question["asker_session_id"],
+                question["asker_actor_id"],
+                _json(
+                    {
+                        "question_id": question_id,
+                        "target_actor_id": question["target_actor_id"],
+                        "asker_session_id": question["asker_session_id"],
+                        "asker_task_id": question["asker_task_id"],
+                        "question": question["message"],
+                        "answer": answer_text[:10_000],
+                        "answered_at": now,
+                    }
+                ),
+                now + 4320 * 3600,
+                now,
+            ),
+        )
+        if question["asker_task_id"] is not None:
+            # The asker's running task can observe the answer through its
+            # own event stream without polling the question table. The
+            # task may have ended already; then the answer still lives in
+            # the shared event log above.
+            task_row = self._connection.execute(
+                "SELECT 1 FROM hub_tasks WHERE task_id=?",
+                (question["asker_task_id"],),
+            ).fetchone()
+            if task_row is not None:
+                self._event(
+                    question["asker_task_id"],
+                    "question.answered",
+                    payload={
+                        "question_id": question_id,
+                        "answer": answer_text[:10_000],
+                    },
+                    tenant_id=question["tenant_id"],
+                    now=now,
+                )
 
     def list_questions(
         self,

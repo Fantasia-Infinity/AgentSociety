@@ -6,18 +6,22 @@ from http.cookies import SimpleCookie
 import hmac
 import json
 from typing import Any
-from urllib.parse import parse_qs, quote
+from urllib.parse import parse_qs, quote, unquote
 
 from ..auth import AuthenticatedContext
 from ..errors import ApiError, map_error
 from .pages import (
     account_page,
     artifacts_page,
+    contexts_page,
     dashboard_page,
+    directory_detail_page,
+    directory_page,
     landing_page,
     login_page,
     nodes_page,
     not_found_page,
+    questions_page,
     register_page,
     runs_page,
     task_detail_page,
@@ -100,6 +104,11 @@ class WebHandlersMixin:
                     runs["runs"],
                     user=user,
                     admin=is_admin,
+                    pending_questions=len(
+                        self.server.api.get(
+                            "/v1/hub/questions", "status=pending&limit=1", context
+                        )[1]["questions"]
+                    ),
                 ),
             )
             return
@@ -156,6 +165,68 @@ class WebHandlersMixin:
                     nodes["nodes"],
                     admin=is_admin,
                 ),
+            )
+            return
+        if path == "/web/questions":
+            query = parse_qs(query_string)
+            status = (query.get("status") or [None])[0]
+            params = "limit=200"
+            if status:
+                params += f"&status={quote(status)}"
+            _, questions = self.server.api.get(
+                "/v1/hub/questions", params, context
+            )
+            self._send_html(
+                HTTPStatus.OK,
+                questions_page(
+                    questions["questions"],
+                    status_filter=status,
+                    csrf=self.server.web.csrf(session_id),
+                    admin=is_admin,
+                ),
+            )
+            return
+        if path == "/web/contexts":
+            query = parse_qs(query_string)
+            scope = (query.get("scope") or [None])[0]
+            params = "limit=200"
+            if scope and scope in {"consensus", "qa"}:
+                params += f"&scope={quote(scope)}"
+            _, events = self.server.api.get(
+                "/v1/hub/contexts", params, context
+            )
+            self._send_html(
+                HTTPStatus.OK,
+                contexts_page(
+                    events["events"],
+                    scope_filter=scope if scope in {"consensus", "qa"} else None,
+                    admin=is_admin,
+                ),
+            )
+            return
+        if path == "/web/directory":
+            _, rows = self.server.api.get(
+                "/v1/hub/directory", "limit=200", context
+            )
+            self._send_html(
+                HTTPStatus.OK,
+                directory_page(rows["rows"], admin=is_admin),
+            )
+            return
+        if path.startswith("/web/directory/"):
+            session_id = unquote(path[len("/web/directory/") :])
+            try:
+                _, row = self.server.api.get(
+                    f"/v1/hub/directory/{quote(session_id, safe='')}",
+                    "depth=3",
+                    context,
+                )
+            except ApiError as exc:
+                self._send_html(exc.status, not_found_page())
+                return
+            self._send_html(
+                HTTPStatus.OK,
+                directory_detail_page(row["row"], admin=is_admin),
             )
             return
         if path == "/web/account":
@@ -578,6 +649,80 @@ class WebHandlersMixin:
             return
 
         parts = [part for part in path.split("/") if part]
+        if (
+            len(parts) == 4
+            and parts[0] == "web"
+            and parts[1] == "questions"
+            and parts[3] == "answer"
+        ):
+            question_id = unquote(parts[2])
+            answer_text = (form.get("answer_text") or [""])[0]
+            principal_id = None if is_admin else context.principal_id
+            error = None
+            try:
+                self.server.api.store.answer_question_web(
+                    question_id,
+                    actor_id=None,
+                    answer_text=answer_text,
+                    tenant_id=tenant_id,
+                    principal_id=principal_id,
+                )
+            except (LookupError, PermissionError, ValueError) as exc:
+                error = str(exc)
+            if error:
+                _, questions = self.server.api.get(
+                    "/v1/hub/questions", "limit=200", context
+                )
+                self._send_html(
+                    HTTPStatus.OK,
+                    questions_page(
+                        questions["questions"],
+                        status_filter=None,
+                        csrf=self.server.web.csrf(session_id),
+                        admin=is_admin,
+                        error=error,
+                    ),
+                )
+                return
+            self._redirect("/web/questions")
+            return
+        if (
+            len(parts) == 4
+            and parts[0] == "web"
+            and parts[1] == "questions"
+            and parts[3] == "decline"
+        ):
+            question_id = unquote(parts[2])
+            reason = (form.get("reason") or [""])[0].strip() or None
+            principal_id = None if is_admin else context.principal_id
+            error = None
+            try:
+                self.server.api.store.decline_question(
+                    question_id,
+                    actor_id=None,
+                    reason=reason,
+                    tenant_id=tenant_id,
+                    principal_id=principal_id,
+                )
+            except (LookupError, PermissionError, ValueError) as exc:
+                error = str(exc)
+            if error:
+                _, questions = self.server.api.get(
+                    "/v1/hub/questions", "limit=200", context
+                )
+                self._send_html(
+                    HTTPStatus.OK,
+                    questions_page(
+                        questions["questions"],
+                        status_filter=None,
+                        csrf=self.server.web.csrf(session_id),
+                        admin=is_admin,
+                        error=error,
+                    ),
+                )
+                return
+            self._redirect("/web/questions")
+            return
         if parts == ["web", "tenants", "create"]:
             if not is_admin:
                 self._send_html(HTTPStatus.FORBIDDEN, not_found_page())

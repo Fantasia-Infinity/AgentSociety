@@ -484,22 +484,37 @@ class McpService:
         arguments: dict[str, Any],
         context: AuthenticatedContext | None,
     ) -> dict[str, Any]:
-        """Create a question and block until it is answered (bounded)."""
+        """Create a question and block until it is answered (bounded).
+
+        Pass `question_id` to resume waiting on an existing question (e.g.
+        after a timeout); the question must belong to the caller's principal.
+        """
         tenant_id = self._tenant(context, arguments)
         self._ensure_identity(tenant_id)
-        payload = dict(arguments)
-        payload.setdefault("principal_id", self._gateway_principal_id(tenant_id))
-        payload.setdefault("asker_actor_id", self._gateway_actor_id(tenant_id))
-        _, result = self.api.post("/v1/hub/questions", payload, context)
-        question = result["question"]
-        question_id = str(question["question_id"])
-        if question["status"] == "unsupported":
-            return {
-                "status": "unsupported",
-                "question_id": question_id,
-                "answer": None,
-                "detail": "target actor has no online node",
-            }
+        existing = arguments.get("question_id")
+        if isinstance(existing, str) and existing.strip():
+            question_id = existing.strip()
+            _, current = self.api.get(
+                f"/v1/hub/questions/{quote(question_id, safe='')}",
+                "",
+                context,
+            )
+            question = current["question"]
+        else:
+            payload = dict(arguments)
+            payload.pop("wait_seconds", None)
+            payload.setdefault("principal_id", self._gateway_principal_id(tenant_id))
+            payload.setdefault("asker_actor_id", self._gateway_actor_id(tenant_id))
+            _, result = self.api.post("/v1/hub/questions", payload, context)
+            question = result["question"]
+            question_id = str(question["question_id"])
+            if question["status"] == "unsupported":
+                return {
+                    "status": "unsupported",
+                    "question_id": question_id,
+                    "answer": None,
+                    "detail": "target actor has no online node",
+                }
         raw_wait = arguments.get("wait_seconds", 60)
         wait_seconds = raw_wait if isinstance(raw_wait, int) else 60
         wait_seconds = min(max(wait_seconds, 1), 300)
@@ -519,7 +534,7 @@ class McpService:
                     "answer": current["question"].get("answer_text"),
                     "answered_by": current["question"].get("target_actor_id"),
                 }
-            if status in {"expired", "unsupported"}:
+            if status in {"expired", "unsupported", "declined"}:
                 return {
                     "status": status,
                     "question_id": question_id,

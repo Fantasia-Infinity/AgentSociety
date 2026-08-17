@@ -11,10 +11,23 @@ def _esc(value: Any) -> str:
     return escape("" if value is None else str(value))
 
 
-def _fmt(timestamp: float | None) -> str:
+def _norm_ts(timestamp: float | None) -> float | None:
+    """Normalize epoch timestamps: milliseconds (directory rows use JS
+    Date.now()) to seconds. Second-epoch values are far below 1e11, so the
+    threshold never misfires for regular Hub timestamps."""
     if timestamp is None:
+        return None
+    value = float(timestamp)
+    if value > 1e11:
+        value /= 1000
+    return value
+
+
+def _fmt(timestamp: float | None) -> str:
+    value = _norm_ts(timestamp)
+    if value is None:
         return "-"
-    return datetime.fromtimestamp(float(timestamp), timezone.utc).strftime(
+    return datetime.fromtimestamp(value, timezone.utc).strftime(
         "%Y-%m-%d %H:%M:%S UTC"
     )
 
@@ -22,9 +35,9 @@ def _fmt(timestamp: float | None) -> str:
 def _fmt_relative(timestamp: float | None) -> str:
     """Short human-friendly time: 'just now', '5 min ago', or a date."""
 
-    if timestamp is None:
+    value = _norm_ts(timestamp)
+    if value is None:
         return "-"
-    value = float(timestamp)
     delta = time.time() - value
     if delta < 0:
         return _fmt(value)
@@ -91,6 +104,12 @@ h2 { font-size: 1.1rem; margin-top: 1.5rem; }
 .pill.status-failed { background: #fee2e2; color: #991b1b; }
 .pill.status-cancelled { background: #e2e8f0; color: #475569; }
 .pill.status-active { background: #dbeafe; color: #1d4ed8; }
+.pill.status-pending { background: #fef3c7; color: #92400e; }
+.pill.status-claimed { background: #dbeafe; color: #1d4ed8; }
+.pill.status-answered { background: #dcfce7; color: #166534; }
+.pill.status-expired { background: #e2e8f0; color: #475569; }
+.pill.status-unsupported { background: #f3e8ff; color: #6b21a8; }
+.pill.status-declined { background: #fee2e2; color: #991b1b; }
 .short-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
             font-size: 0.82rem; }
 .time { white-space: nowrap; color: #64748b; font-size: 0.82rem; }
@@ -164,6 +183,9 @@ def _layout(
         '<a href="/web"><b>AgentSociety Hub</b></a>'
         f'<a href="/web"{" class=\"active\" aria-current=\"page\"" if active == "dashboard" else ""}>Dashboard</a>'
         f'<a href="/web/tasks"{" class=\"active\" aria-current=\"page\"" if active == "tasks" else ""}>Tasks</a>'
+        f'<a href="/web/questions"{" class=\"active\" aria-current=\"page\"" if active == "questions" else ""}>Questions</a>'
+        f'<a href="/web/contexts"{" class=\"active\" aria-current=\"page\"" if active == "contexts" else ""}>Consensus</a>'
+        f'<a href="/web/directory"{" class=\"active\" aria-current=\"page\"" if active == "directory" else ""}>Directory</a>'
         f'<a href="/web/nodes"{" class=\"active\" aria-current=\"page\"" if active == "nodes" else ""}>Devices</a>'
         f'{tenants_link}'
         f'<a href="/web/account"{" class=\"active\" aria-current=\"page\"" if active == "account" else ""}>Account</a>'
@@ -372,6 +394,7 @@ def dashboard_page(
     *,
     user: dict[str, Any] | None = None,
     admin: bool = False,
+    pending_questions: int = 0,
 ) -> str:
     if user:
         identity = (
@@ -398,6 +421,8 @@ def dashboard_page(
         "<span>Devices online</span></div>"
         f'<div class="card"><b>{_esc(active_tasks)}</b>'
         "<span>Active tasks</span></div>"
+        f'<div class="card"><b>{_esc(pending_questions)}</b>'
+        '<span><a href="/web/questions?status=pending">Pending questions</a></span></div>'
         f'<div class="card"><b>{_esc(stats.get("tasks_completed", 0))}</b>'
         "<span>Completed tasks</span></div>"
         f'<div class="card"><b>{_esc(failed_tasks)}</b>'
@@ -599,6 +624,30 @@ def task_detail_page(
         if result_text
         else ""
     )
+    partial_events = [
+        event for event in events if event["type"] == "task.partial_result"
+    ]
+    progress_panel = ""
+    if partial_events:
+        latest = partial_events[-1]
+        progress = (latest.get("payload") or {}).get("partial_result") or {}
+        fields = "".join(
+            f"<tr><th>{_esc(name)}</th><td>{_esc(str(progress.get(name) or '-'))}</td></tr>"
+            for name in ("phase", "toolCount", "messageCount", "lastTool")
+            if name in progress
+        )
+        progress_panel = (
+            '<div class="panel"><h3>Live progress</h3>'
+            f'<table style="max-width:420px">{fields}</table>'
+            f'<p class="muted">Reported {_fmt_relative(latest.get("created_at"))} '
+            f'(<span class="time" title="{_fmt(latest.get("created_at"))}">'
+            f"{_fmt(latest.get('created_at'))}</span>)</p></div>"
+        )
+    elif task["status"] == "working":
+        progress_panel = (
+            '<div class="panel"><h3>Live progress</h3>'
+            '<p class="muted">The worker has not reported progress yet.</p></div>'
+        )
     cancel_form = ""
     if task["status"] not in {"completed", "failed", "cancelled"}:
         cancel_form = (
@@ -626,6 +675,7 @@ def task_detail_page(
         f"<tr><th>Objective</th><td>{_esc(task['objective'])}</td></tr>"
         f"<tr><th>Error</th><td>{_esc(task.get('error') or '-')}</td></tr>"
         f"<tr><th>Attempts</th><td>{_esc(task['attempts'])}</td></tr></table>"
+        f"{progress_panel}"
         f"{result_panel}"
         "<details><summary>Raw input / result JSON</summary>"
         f"<h3>Input</h3><pre>{_json_text(task['input'])}</pre>"
@@ -646,6 +696,249 @@ def task_detail_page(
     )
     return _layout(
         f"Task {task['task_id']}", body, csrf=csrf, active="tasks", admin=admin
+    )
+
+
+def questions_page(
+    questions: list[dict[str, Any]],
+    *,
+    status_filter: str | None,
+    csrf: str | None = None,
+    admin: bool = False,
+    error: str | None = None,
+) -> str:
+    filters = ["all", "pending", "claimed", "answered", "expired", "unsupported", "declined"]
+    links = []
+    for name in filters:
+        if name == "all":
+            href = "/web/questions"
+            label = "All"
+        else:
+            href = f"/web/questions?status={name}"
+            label = name.capitalize()
+        cls = ' class="active" aria-current="page"' if name == (status_filter or "all") else ""
+        links.append(f'<a href="{href}"{cls}>{label}</a>')
+    rows = ""
+    for question in questions:
+        qid = str(question["question_id"])
+        status = str(question["status"])
+        message = _esc(str(question.get("message") or "")[:200])
+        actions = ""
+        if status == "pending" and csrf:
+            actions = (
+                f'<form method="post" action="/web/questions/{_esc(qid)}/answer" style="margin:0">'
+                f'<input type="hidden" name="csrf_token" value="{_esc(csrf)}">'
+                '<label>Your answer</label>'
+                '<textarea name="answer_text" rows="2" maxlength="50000" required></textarea>'
+                '<button type="submit">Answer</button></form>'
+                f'<form method="post" action="/web/questions/{_esc(qid)}/decline" style="margin:0">'
+                f'<input type="hidden" name="csrf_token" value="{_esc(csrf)}">'
+                '<input name="reason" maxlength="10000" placeholder="reason (optional)">'
+                '<button class="secondary" type="submit">Decline</button></form>'
+            )
+        elif status == "claimed":
+            actions = '<span class="muted">Worker is answering…</span>'
+        elif status == "answered":
+            actions = (
+                '<p style="white-space:pre-wrap">'
+                f"{_esc(str(question.get('answer_text') or ''))}</p>"
+            )
+        elif status == "declined":
+            actions = '<span class="muted">Declined by human</span>'
+        elif status == "expired":
+            actions = '<span class="muted">No answer within the TTL</span>'
+        elif status == "unsupported":
+            actions = '<span class="muted">Target has no online node</span>'
+        rows += (
+            "<tr>"
+            f'<td class="short-id">{_esc(_short_id(qid))}</td>'
+            f"<td>{_status_pill(status)}</td>"
+            f'<td class="short-id">{_esc(_short_id(question.get("asker_actor_id") or "-"))}</td>'
+            f'<td class="short-id">{_esc(_short_id(question.get("target_actor_id") or "-"))}</td>'
+            f"<td>{message}</td>"
+            f'<td class="time" title="{_fmt(question.get("created_at"))}">'
+            f"{_fmt_relative(question.get('created_at'))}</td>"
+            f"<td>{actions}</td>"
+            "</tr>"
+        )
+    if not rows:
+        rows = (
+            '<tr><td colspan="7" class="muted">No questions. Agents ask '
+            "questions through <code>hub_ask</code> while working; pending "
+            'ones can be answered right here.</td></tr>'
+        )
+    body = (
+        "<h1>Questions</h1>"
+        '<p class="muted">Questions are asked by agents during tasks '
+        "(<code>hub_ask</code>). A pending question can be answered or "
+        "declined by a human from this page; the asking agent receives the "
+        "answer in its current turn.</p>"
+        f'{"<div class=\"error\">" + _esc(error) + "</div>" if error else ""}'
+        f'<div class="panel" style="display:flex;gap:1rem;flex-wrap:wrap">{ "".join(links) }</div>'
+        '<div class="table-wrap"><table><tr><th>Question</th><th>Status</th>'
+        "<th>Asker</th><th>Target</th><th>Message</th><th>Created</th>"
+        "<th>Answer / action</th></tr>"
+        f"{rows}</table></div>"
+    )
+    return _layout("Questions", body, csrf=csrf, active="questions", admin=admin)
+
+
+def contexts_page(
+    events: list[dict[str, Any]],
+    *,
+    scope_filter: str | None,
+    admin: bool = False,
+) -> str:
+    def summary_of(event: dict[str, Any]) -> str:
+        payload = event.get("payload") or {}
+        for key in ("summary", "title", "result", "answer"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip().replace("\n", " ")[:160]
+        return ""
+
+    filters = ["all", "consensus", "qa"]
+    links = []
+    for name in filters:
+        if name == "all":
+            href = "/web/contexts"
+            label = "All"
+        else:
+            href = f"/web/contexts?scope={name}"
+            label = name.capitalize()
+        cls = ' class="active" aria-current="page"' if name == (scope_filter or "all") else ""
+        links.append(f'<a href="{href}"{cls}>{label}</a>')
+    rows = ""
+    for event in events:
+        payload = event.get("payload") or {}
+        rows += (
+            "<tr>"
+            f"<td>{_esc(event['seq'])}</td>"
+            f"<td>{_esc(event['kind'])}</td>"
+            f'<td class="short-id">{_esc(_short_id(event.get("session_id") or "-"))}</td>'
+            f"<td>{_esc(summary_of(event))}</td>"
+            f'<td class="time" title="{_fmt(event.get("created_at"))}">'
+            f"{_fmt_relative(event.get('created_at'))}</td>"
+            "<td><details><summary>payload</summary>"
+            f"<pre>{_json_text(payload)}</pre></details></td>"
+            "</tr>"
+        )
+    if not rows:
+        rows = (
+            '<tr><td colspan="6" class="muted">No shared memory entries yet. '
+            "Workers append digests with <code>AGENT_SOCIETY_CONTEXT=1</code>; "
+            "question answers appear here automatically.</td></tr>"
+        )
+    body = (
+        "<h1>Consensus context</h1>"
+        '<p class="muted">The principal shared memory: session digests, '
+        "facts, decisions, and question answers. Entries expire after their "
+        "TTL; the log is append-only.</p>"
+        f'<div class="panel" style="display:flex;gap:1rem;flex-wrap:wrap">{ "".join(links) }</div>'
+        '<div class="table-wrap"><table><tr><th>Seq</th><th>Kind</th>'
+        "<th>Session</th><th>Summary</th><th>Time</th><th></th></tr>"
+        f"{rows}</table></div>"
+    )
+    return _layout("Consensus", body, active="contexts", admin=admin)
+
+
+def directory_page(rows: list[dict[str, Any]], *, admin: bool = False) -> str:
+    table_rows = ""
+    for row in rows:
+        payload = row.get("payload") or {}
+        session_id = str(row.get("session_id") or "-")
+        invocations = payload.get("invocations") or []
+        table_rows += (
+            "<tr>"
+            f'<td class="short-id"><a href="/web/directory/{_esc(session_id)}">'
+            f"{_esc(_short_id(session_id))}</a></td>"
+            f'<td class="short-id">{_esc(_short_id(row.get("actor_id") or "-"))}</td>'
+            f"<td>{_esc(str(payload.get('title') or '-'))}</td>"
+            f"<td class=\"short-id\">{_esc(str(payload.get('workspace') or '-'))}</td>"
+            f"<td>{_status_pill(payload.get('status') or 'idle')}</td>"
+            f'<td class="time" title="{_fmt(payload.get("last_active_at"))}">'
+            f"{_fmt_relative(payload.get('last_active_at'))}</td>"
+            f"<td>{len(invocations)}</td>"
+            "</tr>"
+        )
+    if not table_rows:
+        table_rows = (
+            '<tr><td colspan="7" class="muted">No sessions in the directory '
+            "yet. Devices push rows through the AgentSociety bundle; remote "
+            "sessions appear here within the sync interval.</td></tr>"
+        )
+    body = (
+        "<h1>Session directory</h1>"
+        '<p class="muted">One row per session across your devices: identity, '
+        "workspace, status, and invocation history. Click a session for its "
+        "consensus digests and artifacts.</p>"
+        '<div class="table-wrap"><table><tr><th>Session</th><th>Actor</th>'
+        "<th>Title</th><th>Workspace</th><th>Status</th>"
+        "<th>Last active</th><th>Invocations</th></tr>"
+        f"{table_rows}</table></div>"
+    )
+    return _layout("Directory", body, active="directory", admin=admin)
+
+
+def directory_detail_page(row: dict[str, Any], *, admin: bool = False) -> str:
+    payload = row.get("payload") or {}
+    session_id = str(row.get("session_id") or "-")
+    consensus = row.get("consensus") or []
+    artifacts = row.get("artifacts") or []
+    consensus_rows = "".join(
+        f"<tr><td>{_esc(event['seq'])}</td><td>{_esc(event['kind'])}</td>"
+        f"<td>{_esc(str((event.get('payload') or {}).get('summary') or (event.get('payload') or {}).get('answer') or ''))}</td>"
+        f'<td class="time" title="{_fmt(event.get("created_at"))}">'
+        f"{_fmt_relative(event.get('created_at'))}</td></tr>"
+        for event in consensus
+    )
+    if not consensus_rows:
+        consensus_rows = '<tr><td colspan="4" class="muted">No consensus entries for this session.</td></tr>'
+    artifact_rows = "".join(
+        f"<tr><td>{_esc(a['name'])}</td><td>{_esc(a['media_type'])}</td>"
+        f'<td class="short-id">{_esc(a.get("uri") or "-")}</td>'
+        f'<td class="short-id">{_esc(a.get("task_id") or a.get("run_id") or "-")}</td></tr>'
+        for a in artifacts
+    )
+    if not artifact_rows:
+        artifact_rows = '<tr><td colspan="4" class="muted">No artifacts recorded for this session.</td></tr>'
+    body = (
+        f"<h1>Session <span class=\"short-id\">{_esc(session_id)}</span></h1>"
+        f'<p><a href="/web/directory">&larr; Back to directory</a></p>'
+        "<table>"
+        f"<tr><th>Actor</th><td>{_esc(row.get('actor_id') or '-')}</td></tr>"
+        f"<tr><th>Node</th><td>{_esc(row.get('node_id') or '-')}</td></tr>"
+        f"<tr><th>Title</th><td>{_esc(str(payload.get('title') or '-'))}</td></tr>"
+        f"<tr><th>Workspace</th><td>{_esc(str(payload.get('workspace') or '-'))}</td></tr>"
+        f"<tr><th>Status</th><td>{_status_pill(payload.get('status') or 'idle')}</td></tr>"
+        f"<tr><th>Session mode</th><td>{_esc(str(payload.get('session_mode') or '-'))}</td></tr>"
+        f"<tr><th>Tool policy</th><td>{_esc(str(payload.get('tool_policy') or '-'))}</td></tr>"
+        f'<tr><th>Last active</th><td class="time" title="{_fmt(payload.get("last_active_at"))}">'
+        f"{_fmt_relative(payload.get('last_active_at'))}</td></tr>"
+        "</table>"
+        "<h2>Invocations</h2>"
+        '<div class="table-wrap"><table><tr><th>Run</th><th>Status</th>'
+        "<th>Objective</th><th>At</th></tr>"
+        + "".join(
+            f'<tr><td class="short-id">{_esc(_short_id(inv.get("run_id") or "-"))}</td>'
+            f"<td>{_status_pill(inv.get('status') or '-')}</td>"
+            f"<td>{_esc(str(inv.get('objective') or '')[:120])}</td>"
+            f'<td class="time" title="{_fmt(inv.get("at"))}">'
+            f"{_fmt_relative(inv.get('at'))}</td></tr>"
+            for inv in (payload.get("invocations") or [])
+        )
+        + "</table></div>"
+        "<h2>Consensus</h2>"
+        '<div class="table-wrap"><table><tr><th>Seq</th><th>Kind</th>'
+        "<th>Summary</th><th>Time</th></tr>"
+        f"{consensus_rows}</table></div>"
+        "<h2>Artifacts</h2>"
+        '<div class="table-wrap"><table><tr><th>Name</th><th>Type</th>'
+        "<th>URI</th><th>Task/Run</th></tr>"
+        f"{artifact_rows}</table></div>"
+    )
+    return _layout(
+        f"Session {session_id}", body, active="directory", admin=admin
     )
 
 
