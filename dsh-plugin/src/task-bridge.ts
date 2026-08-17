@@ -92,6 +92,9 @@ export function apply(ctx: Context, config: Config): void {
     for (const agent of agents.list()) {
       if (agent === undefined) continue
       if (typeof agent.status !== 'string') continue
+      // Worker sessions belong to the worker plugin; only interactive UI
+      // sessions are eligible for the bridge.
+      if (agent.session?.id?.startsWith('agent-society-')) continue
       if (agent.status === 'idle') return agent
     }
     return undefined

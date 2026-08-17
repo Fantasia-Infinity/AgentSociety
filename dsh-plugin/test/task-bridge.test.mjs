@@ -213,6 +213,41 @@ test('does not claim while the session agent is busy', async () => {
   }
 })
 
+test('never targets worker sessions even when idle', async () => {
+  const oldUrl = process.env.AGENT_SOCIETY_HUB_URL
+  const oldToken = process.env.AGENT_SOCIETY_HUB_TOKEN
+  const oldFetch = globalThis.fetch
+  process.env.AGENT_SOCIETY_HUB_URL = 'http://hub.test'
+  process.env.AGENT_SOCIETY_HUB_TOKEN = 'token'
+  try {
+    const { ctx, polls } = mockCtx({ agentStatus: 'idle' })
+    const worker = {
+      status: 'idle',
+      session: { id: 'agent-society-worker-session-1', events: [] },
+    }
+    const ui = ctx.agents.list()[0]
+    ctx.agents.list = () => [worker, ui]
+    const hub = mockHub()
+    globalThis.fetch = hub.fetchImpl
+    apply(ctx, { hubUrl: 'http://hub.test', pollSeconds: 30 })
+    for (const poll of polls) await poll()
+    await new Promise((r) => setTimeout(r, 10))
+    const appends = hub.calls.filter((c) => c.path === '/v1/hub/contexts/append')
+    assert.equal(appends.length, 1, 'the task executed in the UI session')
+    assert.equal(
+      appends[0].body.session_id,
+      'ui-session-1',
+      'worker session must not be picked',
+    )
+  } finally {
+    globalThis.fetch = oldFetch
+    if (oldUrl === undefined) delete process.env.AGENT_SOCIETY_HUB_URL
+    else process.env.AGENT_SOCIETY_HUB_URL = oldUrl
+    if (oldToken === undefined) delete process.env.AGENT_SOCIETY_HUB_TOKEN
+    else process.env.AGENT_SOCIETY_HUB_TOKEN = oldToken
+  }
+})
+
 test('marks the task failed when execution throws', async () => {
   const oldUrl = process.env.AGENT_SOCIETY_HUB_URL
   const oldToken = process.env.AGENT_SOCIETY_HUB_TOKEN

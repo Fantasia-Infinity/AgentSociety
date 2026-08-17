@@ -67,6 +67,10 @@ export function apply(ctx, config) {
                 continue;
             if (typeof agent.status !== 'string')
                 continue;
+            // Worker sessions belong to the worker plugin; only interactive UI
+            // sessions are eligible for the bridge.
+            if (agent.session?.id?.startsWith('agent-society-'))
+                continue;
             if (agent.status === 'idle')
                 return agent;
         }
