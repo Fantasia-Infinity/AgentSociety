@@ -24,6 +24,7 @@ import { homedir, hostname, userInfo } from 'node:os';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { HubClient } from './hub-client.js';
+import { loadProjectionActivity } from './directory.js';
 import { buildSessionDigest } from './digest.js';
 import { deterministicSummary, summarizeLiveSession, summarizeStandalone, } from './summarizer.js';
 export const name = 'agent-society-session-digest';
@@ -87,73 +88,149 @@ export function apply(ctx, config) {
     void tick();
     async function tick() {
         const sessions = ctx.get('sessions');
-        if (!sessions || typeof sessions.list !== 'function')
-            return;
+        const persistence = ctx.get('sessionPersistence');
         const now = Date.now();
-        for (const session of sessions.list()) {
-            if (!session || typeof session.id !== 'string')
-                continue;
-            if (session.id.startsWith(TASK_SESSION_PREFIX))
-                continue;
-            const events = session.events ?? [];
-            const count = events.length;
-            const prior = state[session.id];
-            if (prior !== undefined && count <= prior.count)
-                continue;
-            // A round is over only after an idle gap since the last event.
-            const lastEventTime = lastEventTimeMs(events);
-            if (lastEventTime !== undefined && now - lastEventTime < idleSeconds * 1_000) {
-                continue;
+        const liveIds = new Set();
+        // Path 1: live sessions in THIS process (best KV-cache behaviour:
+        // session-derived prefix + trailing instruction).
+        if (sessions && typeof sessions.list === 'function') {
+            for (const session of sessions.list()) {
+                if (!session || typeof session.id !== 'string')
+                    continue;
+                if (session.id.startsWith(TASK_SESSION_PREFIX))
+                    continue;
+                liveIds.add(session.id);
+                await handleRound(session.id, session.events ?? [], { live: true });
             }
-            if (inFlight.has(session.id))
-                continue;
-            if (attempts.get(session.id) ?? 0 >= MAX_ATTEMPTS)
-                continue;
-            inFlight.add(session.id);
+        }
+        // Path 2: persisted sessions not live here (the web may recreate agent
+        // fibers per turn, so between turns the store can be empty). Uses the
+        // projection cache's lastPromptAt as the activity watermark and
+        // standalone summarization (no session context copy).
+        if (persistence && typeof persistence.list === 'function') {
             try {
-                const summary = await summarizeFor(session, count);
-                const digest = buildSessionDigest({
-                    principalId,
-                    sessionId: session.id,
-                    actorId,
-                    nodeId,
-                    title: summary.title,
-                    workspace: workspaceRoot,
-                    objective: summary.objective,
-                    status: 'done',
-                    resultText: summary.resultText,
-                    toolCount: summary.toolCount,
-                    messageCount: summary.messageCount,
-                    createdAt: now,
-                }, {
-                    eventId: digestEventIdForRound(principalId, session.id, count),
-                    summary: summary.summary,
-                });
-                await hub.appendSharedEvent(digest);
-                state[session.id] = { count, digestAt: now };
-                saveState(statePath, state);
-                attempts.delete(session.id);
-                ctx.logger.info(`agent-society-session-digest wrote digest for ${session.id} (round ${count})`);
+                const headers = await persistence.list();
+                const activity = loadProjectionActivity(process.env.DSH_HOME?.trim() || resolve(homedir(), '.dsh'));
+                for (const header of headers) {
+                    if (!header || typeof header.id !== 'string')
+                        continue;
+                    if (header.id.startsWith(TASK_SESSION_PREFIX))
+                        continue;
+                    if (liveIds.has(header.id))
+                        continue;
+                    const info = activity.get(header.id);
+                    const lastPromptAt = info?.lastPromptAt;
+                    if (lastPromptAt === undefined)
+                        continue;
+                    const prior = state[header.id];
+                    if (prior !== undefined && prior.lastPromptAt !== undefined && lastPromptAt <= prior.lastPromptAt)
+                        continue;
+                    // A round is over only after an idle gap since the last prompt.
+                    if (now - lastPromptAt < idleSeconds * 1_000)
+                        continue;
+                    if (inFlight.has(header.id))
+                        continue;
+                    if (attempts.get(header.id) ?? 0 >= MAX_ATTEMPTS)
+                        continue;
+                    inFlight.add(header.id);
+                    try {
+                        const inspection = await persistence.inspect(header.id);
+                        const count = (inspection.events ?? []).length;
+                        const summary = await summarizeFor({ id: header.id, events: inspection.events }, count, { live: false, ...(info === undefined ? {} : { title: info.title }) });
+                        const digest = buildSessionDigest({
+                            principalId,
+                            sessionId: header.id,
+                            actorId,
+                            nodeId,
+                            title: summary.title,
+                            workspace: header.cwd ?? workspaceRoot,
+                            objective: summary.objective,
+                            status: 'done',
+                            resultText: summary.resultText,
+                            toolCount: summary.toolCount,
+                            messageCount: summary.messageCount,
+                            createdAt: now,
+                        }, {
+                            eventId: digestEventIdForRound(principalId, header.id, count),
+                            summary: summary.summary,
+                        });
+                        await hub.appendSharedEvent(digest);
+                        state[header.id] = { count, lastPromptAt, digestAt: now };
+                        saveState(statePath, state);
+                        attempts.delete(header.id);
+                        ctx.logger.info(`agent-society-session-digest wrote digest for ${header.id} (round ${count}, persisted path)`);
+                    }
+                    catch (error) {
+                        attempts.set(header.id, (attempts.get(header.id) ?? 0) + 1);
+                        ctx.logger.warn(`agent-society-session-digest failed for ${header.id}: ${error instanceof Error ? error.message : String(error)}`);
+                    }
+                    finally {
+                        inFlight.delete(header.id);
+                    }
+                }
             }
             catch (error) {
-                const priorAttempts = attempts.get(session.id) ?? 0;
-                attempts.set(session.id, priorAttempts + 1);
-                ctx.logger.warn(`agent-society-session-digest failed for ${session.id}: ${error instanceof Error ? error.message : String(error)}`);
-            }
-            finally {
-                inFlight.delete(session.id);
+                ctx.logger.warn(`agent-society-session-digest persistence scan failed: ${error instanceof Error ? error.message : String(error)}`);
             }
         }
     }
-    async function summarizeFor(session, count) {
-        const title = sessionTitleOf(session);
+    async function handleRound(sessionId, events, options) {
+        const now = Date.now();
+        const count = events.length;
+        const prior = state[sessionId];
+        if (prior !== undefined && count <= prior.count)
+            return;
+        const lastEventTime = lastEventTimeMs(events);
+        if (lastEventTime !== undefined && now - lastEventTime < idleSeconds * 1_000) {
+            return;
+        }
+        if (inFlight.has(sessionId))
+            return;
+        if (attempts.get(sessionId) ?? 0 >= MAX_ATTEMPTS)
+            return;
+        inFlight.add(sessionId);
+        try {
+            const summary = await summarizeFor({ id: sessionId, events }, count, { live: options.live });
+            const digest = buildSessionDigest({
+                principalId,
+                sessionId,
+                actorId,
+                nodeId,
+                title: summary.title,
+                workspace: workspaceRoot,
+                objective: summary.objective,
+                status: 'done',
+                resultText: summary.resultText,
+                toolCount: summary.toolCount,
+                messageCount: summary.messageCount,
+                createdAt: now,
+            }, {
+                eventId: digestEventIdForRound(principalId, sessionId, count),
+                summary: summary.summary,
+            });
+            await hub.appendSharedEvent(digest);
+            state[sessionId] = { count, digestAt: now };
+            saveState(statePath, state);
+            attempts.delete(sessionId);
+            ctx.logger.info(`agent-society-session-digest wrote digest for ${sessionId} (round ${count})`);
+        }
+        catch (error) {
+            attempts.set(sessionId, (attempts.get(sessionId) ?? 0) + 1);
+            ctx.logger.warn(`agent-society-session-digest failed for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        finally {
+            inFlight.delete(sessionId);
+        }
+    }
+    async function summarizeFor(session, count, options) {
+        const title = options.title ?? sessionTitleOf(session);
         const fields = { ...extractFields(session), title };
         if (!summarize) {
             return { ...fields, summary: deterministicSummary(fields) };
         }
         try {
             const live = ctx.get('sessions');
-            const liveSession = live?.get(session.id);
+            const liveSession = options.live ? live?.get(session.id) : undefined;
             if (liveSession !== undefined && assembly !== undefined) {
                 const text = await summarizeLiveSession({
                     ctx,
@@ -255,8 +332,10 @@ function loadState(path) {
                 if (value !== null &&
                     typeof value === 'object' &&
                     typeof value.count === 'number') {
+                    const lastPromptAt = value.lastPromptAt;
                     result[key] = {
                         count: value.count,
+                        ...(lastPromptAt === undefined ? {} : { lastPromptAt }),
                         digestAt: value.digestAt ?? 0,
                     };
                 }

@@ -68,6 +68,11 @@ export declare function buildLocalRow(options: {
 }): DirectoryRow;
 /** Read session titles from the dsh projection cache when present. */
 export declare function loadProjectionTitles(dshHome: string): Map<string, string>;
+/** Projection-cache activity: title and lastPromptAt (ms epoch) per session. */
+export declare function loadProjectionActivity(dshHome: string): Map<string, {
+    title?: string;
+    lastPromptAt?: number;
+}>;
 export declare const DIRECTORY_INDEX_SECTION = "agent-society:directory-index";
 export declare const CONSENSUS_SECTION = "agent-society:consensus";
 export declare const PROMPT_BUDGET_CHARS = 4000;

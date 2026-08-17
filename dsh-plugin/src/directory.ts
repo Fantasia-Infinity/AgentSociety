@@ -201,6 +201,48 @@ export function loadProjectionTitles(dshHome: string): Map<string, string> {
   return titles
 }
 
+/** Projection-cache activity: title and lastPromptAt (ms epoch) per session. */
+export function loadProjectionActivity(
+  dshHome: string,
+): Map<string, { title?: string; lastPromptAt?: number }> {
+  const activity = new Map<string, { title?: string; lastPromptAt?: number }>()
+  try {
+    const cache = JSON.parse(
+      readFileSync(join(dshHome, 'storages', 'session_projcache.json'), 'utf8'),
+    ) as {
+      tables?: {
+        sessions?: Record<
+          string,
+          {
+            rows?: {
+              title?: { val?: unknown }
+              sessionListMetadata?: { val?: { lastPromptAt?: unknown } }
+            }
+          }
+        >
+      }
+    }
+    const sessions = cache.tables?.sessions
+    if (!sessions) return activity
+    for (const [sessionId, record] of Object.entries(sessions)) {
+      const rows = record?.rows
+      const title = rows?.title?.val
+      const lastPromptAt = rows?.sessionListMetadata?.val?.lastPromptAt
+      const entry: { title?: string; lastPromptAt?: number } = {}
+      if (typeof title === 'string' && title.length > 0) entry.title = title
+      if (typeof lastPromptAt === 'number' && Number.isFinite(lastPromptAt)) {
+        entry.lastPromptAt = lastPromptAt
+      }
+      if (entry.title !== undefined || entry.lastPromptAt !== undefined) {
+        activity.set(sessionId, entry)
+      }
+    }
+  } catch {
+    // No projection cache is a normal cold start.
+  }
+  return activity
+}
+
 // ── Prompt injection (bounded) ────────────────────────────────────────────
 
 export const DIRECTORY_INDEX_SECTION = 'agent-society:directory-index'

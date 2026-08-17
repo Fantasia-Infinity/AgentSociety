@@ -121,6 +121,34 @@ export function loadProjectionTitles(dshHome) {
     }
     return titles;
 }
+/** Projection-cache activity: title and lastPromptAt (ms epoch) per session. */
+export function loadProjectionActivity(dshHome) {
+    const activity = new Map();
+    try {
+        const cache = JSON.parse(readFileSync(join(dshHome, 'storages', 'session_projcache.json'), 'utf8'));
+        const sessions = cache.tables?.sessions;
+        if (!sessions)
+            return activity;
+        for (const [sessionId, record] of Object.entries(sessions)) {
+            const rows = record?.rows;
+            const title = rows?.title?.val;
+            const lastPromptAt = rows?.sessionListMetadata?.val?.lastPromptAt;
+            const entry = {};
+            if (typeof title === 'string' && title.length > 0)
+                entry.title = title;
+            if (typeof lastPromptAt === 'number' && Number.isFinite(lastPromptAt)) {
+                entry.lastPromptAt = lastPromptAt;
+            }
+            if (entry.title !== undefined || entry.lastPromptAt !== undefined) {
+                activity.set(sessionId, entry);
+            }
+        }
+    }
+    catch {
+        // No projection cache is a normal cold start.
+    }
+    return activity;
+}
 // ── Prompt injection (bounded) ────────────────────────────────────────────
 export const DIRECTORY_INDEX_SECTION = 'agent-society:directory-index';
 export const CONSENSUS_SECTION = 'agent-society:consensus';
