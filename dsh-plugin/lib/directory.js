@@ -166,7 +166,12 @@ export function consensusPromptLines(mirror) {
 export function directoryPromptLines(mirror) {
     const rows = Object.values(mirror.rows);
     const rank = (row) => (row.status === 'working' ? 0 : 1);
-    rows.sort((a, b) => rank(a) - rank(b) || b.last_active_at - a.last_active_at);
+    // KV-cache stability: rank first, then session_id (stable byte order).
+    // last_active_at changes on every mirror pull and would reorder rows
+    // between assemblies, churning the prompt prefix for no semantic gain.
+    // Status/title changes still update the text, but idle churn must not.
+    rows.sort((a, b) => rank(a) - rank(b) ||
+        (a.session_id < b.session_id ? -1 : a.session_id > b.session_id ? 1 : 0));
     return rows.slice(0, MAX_DIRECTORY_LINES).map((row) => {
         const label = row.title && row.title.trim()
             ? row.title.trim()
