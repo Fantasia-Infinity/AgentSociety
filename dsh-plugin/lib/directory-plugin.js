@@ -82,7 +82,7 @@ export function apply(ctx, config) {
         });
         if (full)
             state.mirror.rows = {};
-        let maxSeq = state.mirror.seq;
+        let maxSeq = full ? 0 : state.mirror.seq;
         for (const event of rows) {
             const seq = Number(event.seq);
             const sessionId = event.session_id;
@@ -119,7 +119,7 @@ export function apply(ctx, config) {
         });
         if (events.length === 0)
             return;
-        let maxSeq = state.mirror.consensus.seq;
+        let maxSeq = full ? 0 : state.mirror.consensus.seq;
         // Full pulls rebuild the entries from the hub's live set, dropping
         // expired/deleted entries that incremental pulls never observe.
         const entries = full ? [] : [...state.mirror.consensus.entries];
