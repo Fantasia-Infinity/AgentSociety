@@ -119,6 +119,9 @@ const TASK_PROMPT = (
   toolPolicy: ToolPolicy,
 ): string => [
   'You are executing a durable task delegated through the AgentSociety Hub.',
+  'This is a NEW task. Earlier conversation in this session is prior work:',
+  'use it only where it is relevant, and do not let unrelated prior',
+  'conclusions affect this task.',
   `Task ID: ${task.task_id}`,
   `Run ID: ${runId}`,
   `Objective: ${task.objective}`,

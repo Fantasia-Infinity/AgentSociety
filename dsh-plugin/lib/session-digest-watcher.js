@@ -15,8 +15,11 @@
  * - in-flight guard prevents re-entry; bounded retries (3) then give up;
  * - idempotent event_id (principal|consensus|digest|session|round count),
  *   so even a cross-process duplicate cannot duplicate the Hub entry;
- * - `agent-society-*` task sessions are skipped: the worker task path
- *   already writes their digests.
+ * - Worker sessions are treated like any other session: the unified
+ *   session model means a continuous worker conversation is summarized
+ *   per idle round exactly like a UI session (the worker task path adds
+ *   its own structured task digests via queueDigest, at a different
+ *   granularity, without duplicating the LLM summarization).
  */
 import Schema from '@deepseek-ai/schemastery';
 import { createHash } from 'node:crypto';
@@ -44,7 +47,6 @@ export const Config = Schema.object({
     summarize: Schema.boolean().required(false),
     contextEnabled: Schema.boolean().required(false),
 });
-const TASK_SESSION_PREFIX = 'agent-society-';
 const MAX_ATTEMPTS = 3;
 export function apply(ctx, config) {
     const hubUrl = config.hubUrl ?? process.env.AGENT_SOCIETY_HUB_URL?.trim();
@@ -100,8 +102,6 @@ export function apply(ctx, config) {
             for (const session of sessions.list()) {
                 if (!session || typeof session.id !== 'string')
                     continue;
-                if (session.id.startsWith(TASK_SESSION_PREFIX))
-                    continue;
                 liveIds.add(session.id);
                 await handleRound(session.id, session.events ?? [], { live: true });
             }
@@ -120,8 +120,6 @@ export function apply(ctx, config) {
                 const activity = loadProjectionActivity(process.env.DSH_HOME?.trim() || resolve(homedir(), '.dsh'));
                 for (const header of headers) {
                     if (!header || typeof header.id !== 'string')
-                        continue;
-                    if (header.id.startsWith(TASK_SESSION_PREFIX))
                         continue;
                     if (liveIds.has(header.id))
                         continue;

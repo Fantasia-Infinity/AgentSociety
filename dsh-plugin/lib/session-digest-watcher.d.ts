@@ -15,8 +15,11 @@
  * - in-flight guard prevents re-entry; bounded retries (3) then give up;
  * - idempotent event_id (principal|consensus|digest|session|round count),
  *   so even a cross-process duplicate cannot duplicate the Hub entry;
- * - `agent-society-*` task sessions are skipped: the worker task path
- *   already writes their digests.
+ * - Worker sessions are treated like any other session: the unified
+ *   session model means a continuous worker conversation is summarized
+ *   per idle round exactly like a UI session (the worker task path adds
+ *   its own structured task digests via queueDigest, at a different
+ *   granularity, without duplicating the LLM summarization).
  */
 import type { Context } from '@deepseek-ai/cordis';
 import Schema from '@deepseek-ai/schemastery';

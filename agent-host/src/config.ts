@@ -265,7 +265,7 @@ export function loadConfig(
   }
   const selfUpdateEnabled = process.env.AGENT_SELF_UPDATE?.trim() !== "0";
   const workerSessionMode = (process.env.AGENT_WORKER_SESSION_MODE ??
-    "per_task") as WorkerSessionMode;
+    "continuous") as WorkerSessionMode;
   if (!(["per_task", "continuous"] as const).includes(workerSessionMode)) {
     throw new Error(
       "AGENT_WORKER_SESSION_MODE must be per_task or continuous",
