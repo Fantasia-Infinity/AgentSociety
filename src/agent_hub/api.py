@@ -248,6 +248,9 @@ class AgentHubApi:
                 limit = int((query.get("limit") or ["100"])[0])
             except ValueError as exc:
                 raise ValueError("after_seq and limit must be integers") from exc
+            order = (query.get("order") or ["asc"])[0]
+            if order not in {"asc", "desc"}:
+                raise ValueError("order must be asc or desc")
             return HTTPStatus.OK, {
                 "events": self.store.list_shared_events(
                     tenant_id=tenant_id or "default",
@@ -257,6 +260,7 @@ class AgentHubApi:
                     kind=(query.get("kind") or [None])[0],
                     session_id=(query.get("session_id") or [None])[0],
                     limit=limit,
+                    order=order,
                 )
             }
         if path == f"{self.prefix}/contexts/snapshot":

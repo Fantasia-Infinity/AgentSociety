@@ -195,7 +195,12 @@ class WebHandlersMixin:
             scope = (query.get("scope") or ["consensus"])[0]
             if scope not in {"consensus", "qa", "directory", "all"}:
                 scope = "consensus"
-            params = "limit=200"
+            # Shared memory reads newest-first by default; `order=asc`
+            # restores the append-log reading order.
+            order = (query.get("order") or ["desc"])[0]
+            if order not in {"asc", "desc"}:
+                order = "desc"
+            params = f"limit=200&order={order}"
             if scope != "all":
                 params += f"&scope={quote(scope)}"
             _, events = self.server.api.get(
@@ -206,6 +211,7 @@ class WebHandlersMixin:
                 contexts_page(
                     events["events"],
                     scope_filter=scope,
+                    order=order,
                     admin=is_admin,
                 ),
             )

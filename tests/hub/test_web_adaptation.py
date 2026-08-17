@@ -408,6 +408,18 @@ class WebAdaptationTests(unittest.TestCase):
         self.assertIn("Tool policy", detail_html)
         self.assertIn("/repo", detail_html)
 
+    def test_contexts_order_param(self) -> None:
+        self._login()
+        self._seed_data()
+        asc_html = self._get("/web/contexts?scope=consensus&order=asc")
+        desc_html = self._get("/web/contexts?scope=consensus&order=desc")
+        # Both render the toggle; order just flips row order server-side.
+        self.assertIn("Newest first", desc_html)
+        self.assertIn("Oldest first", asc_html)
+        # desc is the page default.
+        default_html = self._get("/web/contexts")
+        self.assertIn("Newest first", default_html)
+
     def test_navigation_has_new_entries(self) -> None:
         self._login()
         html = self._get("/web")

@@ -97,6 +97,7 @@ class SharedStore:
         kind: str | None = None,
         session_id: str | None = None,
         limit: int = 100,
+        order: str = "asc",
     ) -> list[dict[str, Any]]:
         after_seq = max(after_seq, 0)
         limit = min(max(limit, 1), 500)
@@ -126,7 +127,7 @@ class SharedStore:
                 f"""
                 SELECT * FROM hub_shared_events
                 WHERE {" AND ".join(where)}
-                ORDER BY seq LIMIT ?
+                ORDER BY seq{" DESC" if order == "desc" and after_seq <= 0 else ""} LIMIT ?
                 """,
                 tuple(params),
             ).fetchall()

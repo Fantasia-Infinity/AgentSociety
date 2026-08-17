@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from urllib.parse import quote
 from html import escape
 import json
 import time
@@ -803,6 +804,7 @@ def contexts_page(
     events: list[dict[str, Any]],
     *,
     scope_filter: str | None,
+    order: str = "desc",
     admin: bool = False,
 ) -> str:
     def summary_of(event: dict[str, Any]) -> str:
@@ -845,12 +847,19 @@ def contexts_page(
             "Workers append digests with <code>AGENT_SOCIETY_CONTEXT=1</code>; "
             "question answers appear here automatically.</td></tr>"
         )
+    order_links = []
+    for name, label in (("desc", "Newest first"), ("asc", "Oldest first")):
+        href = f"/web/contexts?scope={quote(scope_filter or 'consensus')}&order={name}"
+        cls = ' class="active" aria-current="true"' if name == order else ""
+        order_links.append(f'<a href="{href}"{cls}>{label}</a>')
     body = (
         "<h1>Consensus context</h1>"
         '<p class="muted">The principal shared memory: session digests, '
         "facts, decisions, and question answers. Entries expire after their "
         "TTL; the log is append-only.</p>"
         f'<div class="panel" style="display:flex;gap:1rem;flex-wrap:wrap">{ "".join(links) }</div>'
+        f'<div class="panel" style="display:flex;gap:1rem;align-items:center">'
+        f'<span class="muted">Sort:</span>{"".join(order_links)}</div>'
         '<div class="table-wrap"><table><tr><th>Seq</th><th>Kind</th>'
         "<th>Session</th><th>Summary</th><th>Time</th><th></th></tr>"
         f"{rows}</table></div>"
