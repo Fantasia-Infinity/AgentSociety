@@ -410,9 +410,22 @@ async function runDshTui(
   }
   if (runtime === "pi") return false;
   const forced = runtime === "dsh";
+  // Prefer the combo-managed install when present (sources/dsh-tui sits next
+  // to sources/deepseek-harness, so the sibling DSH_CHECKOUT inference below
+  // resolves correctly); fall back to the standalone sibling checkout.
+  const managedTui = resolve(
+    homedir(),
+    ".local",
+    "share",
+    "dsh-agent-society-combo",
+    "sources",
+    "dsh-tui",
+  );
   const tuiRoot =
     process.env.AGENT_DSH_TUI_ROOT?.trim() ||
-    resolve(repositoryRoot, "..", "dsh-TUI");
+    (existsSync(resolve(managedTui, "scripts", "run.ts"))
+      ? managedTui
+      : resolve(repositoryRoot, "..", "dsh-TUI"));
   const runScript = resolve(tuiRoot, "scripts", "run.ts");
   const checkout =
     process.env.DSH_CHECKOUT?.trim() ||
