@@ -152,6 +152,27 @@ export declare class HubClient {
     }): Promise<Array<Record<string, unknown>>>;
     /** Drill into one session directory row (depth 0..3). */
     getDirectoryRow(sessionId: string, depth?: number): Promise<Record<string, unknown> | undefined>;
+    /** Ask another actor a question (blocking is the caller's job). */
+    createQuestion(item: {
+        target_actor_id: string;
+        message: string;
+        require?: string;
+        asker_task_id?: string;
+        asker_session_id?: string;
+    }): Promise<Record<string, unknown>>;
+    /** Claim pending questions addressed to this actor. */
+    claimQuestions(item: {
+        actor_id: string;
+        node_id: string;
+        limit?: number;
+    }): Promise<Array<Record<string, unknown>>>;
+    /** Submit the answer for one claimed question. */
+    answerQuestion(questionId: string, item: {
+        lease_token: string;
+        answer_text: string;
+    }): Promise<Record<string, unknown>>;
+    /** Read one question (polling for the asker side). */
+    getQuestion(questionId: string): Promise<Record<string, unknown>>;
     /**
      * Subscribe to the worker push channel (`/v1/hub/events`) and invoke
      * `onEvent` for every SSE event. Resolves when the stream ends normally

@@ -87,3 +87,35 @@ test('listSharedEvents builds an after_seq query', async () => {
   assert.ok(capturedUrl.includes('kind=digest'))
   assert.ok(capturedUrl.includes('limit=50'))
 })
+
+test('HubClient question methods shape requests', async () => {
+  const { HubClient } = await import('../lib/hub-client.js')
+  let captured
+  const client = new HubClient('http://hub', 'token', async (url, init) => {
+    captured = { url, init }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        question: { question_id: 'q1', lease_token: 'lt', answer_text: 'a', status: 'answered' },
+        questions: [],
+      }),
+    }
+  })
+  await client.createQuestion({
+    target_actor_id: 'actor-b',
+    message: 'hi',
+    require: 'status',
+  })
+  assert.ok(captured.url.includes('/v1/hub/questions'))
+  assert.equal(JSON.parse(captured.init.body).target_actor_id, 'actor-b')
+
+  await client.claimQuestions({ actor_id: 'actor-a', node_id: 'node-a' })
+  assert.ok(captured.url.includes('/v1/hub/questions/claim'))
+
+  await client.answerQuestion('q1', { lease_token: 'lt', answer_text: 'ok' })
+  assert.ok(captured.url.includes('/v1/hub/questions/q1/answer'))
+
+  await client.getQuestion('q1')
+  assert.ok(captured.url.endsWith('/v1/hub/questions/q1'))
+})

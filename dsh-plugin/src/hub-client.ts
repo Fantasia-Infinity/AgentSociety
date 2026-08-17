@@ -286,6 +286,55 @@ export class HubClient {
     return response.row;
   }
 
+  /** Ask another actor a question (blocking is the caller's job). */
+  async createQuestion(item: {
+    target_actor_id: string;
+    message: string;
+    require?: string;
+    asker_task_id?: string;
+    asker_session_id?: string;
+  }): Promise<Record<string, unknown>> {
+    const response = await this.request<{ question: Record<string, unknown> }>(
+      "/v1/hub/questions",
+      { method: "POST", body: item },
+    );
+    return response.question;
+  }
+
+  /** Claim pending questions addressed to this actor. */
+  async claimQuestions(item: {
+    actor_id: string;
+    node_id: string;
+    limit?: number;
+  }): Promise<Array<Record<string, unknown>>> {
+    const response = await this.request<{ questions: Array<Record<string, unknown>> }>(
+      "/v1/hub/questions/claim",
+      { method: "POST", body: item },
+    );
+    return response.questions;
+  }
+
+  /** Submit the answer for one claimed question. */
+  async answerQuestion(
+    questionId: string,
+    item: { lease_token: string; answer_text: string },
+  ): Promise<Record<string, unknown>> {
+    const response = await this.request<{ question: Record<string, unknown> }>(
+      `/v1/hub/questions/${encodeURIComponent(questionId)}/answer`,
+      { method: "POST", body: item },
+    );
+    return response.question;
+  }
+
+  /** Read one question (polling for the asker side). */
+  async getQuestion(questionId: string): Promise<Record<string, unknown>> {
+    const response = await this.request<{ question: Record<string, unknown> }>(
+      `/v1/hub/questions/${encodeURIComponent(questionId)}`,
+      { method: "GET", body: undefined },
+    );
+    return response.question;
+  }
+
   /**
    * Subscribe to the worker push channel (`/v1/hub/events`) and invoke
    * `onEvent` for every SSE event. Resolves when the stream ends normally

@@ -114,6 +114,26 @@ export class HubClient {
         const response = await this.request(`/v1/hub/directory/${encodeURIComponent(sessionId)}?depth=${Math.min(Math.max(depth, 0), 3)}`, { method: "GET", body: undefined });
         return response.row;
     }
+    /** Ask another actor a question (blocking is the caller's job). */
+    async createQuestion(item) {
+        const response = await this.request("/v1/hub/questions", { method: "POST", body: item });
+        return response.question;
+    }
+    /** Claim pending questions addressed to this actor. */
+    async claimQuestions(item) {
+        const response = await this.request("/v1/hub/questions/claim", { method: "POST", body: item });
+        return response.questions;
+    }
+    /** Submit the answer for one claimed question. */
+    async answerQuestion(questionId, item) {
+        const response = await this.request(`/v1/hub/questions/${encodeURIComponent(questionId)}/answer`, { method: "POST", body: item });
+        return response.question;
+    }
+    /** Read one question (polling for the asker side). */
+    async getQuestion(questionId) {
+        const response = await this.request(`/v1/hub/questions/${encodeURIComponent(questionId)}`, { method: "GET", body: undefined });
+        return response.question;
+    }
     /**
      * Subscribe to the worker push channel (`/v1/hub/events`) and invoke
      * `onEvent` for every SSE event. Resolves when the stream ends normally

@@ -603,6 +603,12 @@ def main() -> None:
                     logger.info("purged_expired_shared_events count=%s", removed)
             except Exception:
                 logger.exception("purge_expired_shared_events_failed")
+            try:
+                removed = store.expire_questions()
+                if removed:
+                    logger.info("expired_questions count=%s", removed)
+            except Exception:
+                logger.exception("expire_questions_failed")
 
     threading.Thread(
         target=purge_loop, name="hub-token-purge", daemon=True

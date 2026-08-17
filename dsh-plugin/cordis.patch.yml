@@ -25,6 +25,8 @@
         maxTokens: !!js Number(process.env.AGENT_SOCIETY_MAX_TOKENS ?? 8192)
         # Consensus digests into the Hub shared memory (default off).
         contextEnabled: !!js process.env.AGENT_SOCIETY_CONTEXT === '1'
+        # Answer Hub questions addressed to this actor when idle (default on).
+        questionsEnabled: !!js process.env.AGENT_SOCIETY_QUESTIONS !== '0'
 
     # Dispatch surface: expose Hub coordination tools as mcp__agent-society__*.
     # This guard re-appends Hub tools after preset-level system-prompt

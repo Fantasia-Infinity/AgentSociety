@@ -66,6 +66,8 @@ export interface Config {
   contextEnabled?: boolean
   /** Push session directory rows / invocations (default on). */
   directoryEnabled?: boolean
+  /** Answer Hub questions addressed to this actor (default on). */
+  questionsEnabled?: boolean
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -87,6 +89,7 @@ export const Config: Schema<Config> = Schema.object({
   maxTokens: Schema.number().min(1).required(false),
   contextEnabled: Schema.boolean().required(false),
   directoryEnabled: Schema.boolean().required(false),
+  questionsEnabled: Schema.boolean().required(false),
 })
 
 interface ActiveAgent {
@@ -216,6 +219,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     repositoryRoot,
     contextEnabled: config.contextEnabled ?? process.env.AGENT_SOCIETY_CONTEXT === '1',
     directoryEnabled: config.directoryEnabled ?? process.env.AGENT_SOCIETY_DIRECTORY !== '0',
+    questionsEnabled: config.questionsEnabled ?? process.env.AGENT_SOCIETY_QUESTIONS !== '0',
     provider: config.provider ?? 'deepseek-official',
     model: config.model ?? process.env.DSH_MODEL ?? 'deepseek-v4-flash',
     maxTokens: config.maxTokens,
@@ -281,6 +285,7 @@ class WorkerLoop {
       repositoryRoot: string
       contextEnabled: boolean
       directoryEnabled: boolean
+      questionsEnabled: boolean
       provider: string
       model: string
       maxTokens: number | undefined
@@ -391,6 +396,12 @@ class WorkerLoop {
   }): void {
     this.sseActive = true
     this.sseBackoffMs = 1_000
+    if (event.name === 'question/new') {
+      // Answer questions when idle; never interrupt a running task.
+      if (this.running) return
+      void this.answerQuestions()
+      return
+    }
     const running = this.running
     if (!running) return
     if (event.name === 'control/new') {
@@ -429,10 +440,99 @@ class WorkerLoop {
         return
       }
       await this.claimControls(running)
+      if (!this.running) await this.answerQuestions()
     } catch (error) {
       this.ctx.logger.warn(
         `agent-society-worker maintenance failed: ${message(error)}`,
       )
+    }
+  }
+
+  /**
+   * Answer Hub questions addressed to this actor. Only runs while the worker
+   * is idle (a running task is never interrupted); each question gets a
+   * fresh, tool-free session answered by the configured model, and the
+   * answer is written back to the Hub (and into the shared memory).
+   */
+  private async answerQuestions(): Promise<void> {
+    if (!this.options.questionsEnabled || this.disposed || this.running) return
+    let questions: Array<Record<string, unknown>>
+    try {
+      questions = await this.hub.claimQuestions({
+        actor_id: this.options.actorId,
+        node_id: this.options.nodeId,
+        limit: 3,
+      })
+    } catch (error) {
+      this.ctx.logger.warn(
+        `agent-society-worker question claim failed: ${message(error)}`,
+      )
+      return
+    }
+    for (const question of questions) {
+      if (this.running || this.disposed) return
+      const questionId = String(question.question_id)
+      const leaseToken = String(question.lease_token)
+      const text = String(question.message ?? '')
+      const answeredBy = question.target_actor_id
+      try {
+        const answer = await this.generateAnswer(text)
+        await this.hub.answerQuestion(questionId, {
+          lease_token: leaseToken,
+          answer_text: answer,
+        })
+        this.ctx.logger.info(
+          `agent-society-worker answered ${questionId}${answeredBy ? ` for ${answeredBy}` : ''}`,
+        )
+      } catch (error) {
+        // Leave the question leased; it becomes reclaimable after the
+        // 120s question lease expires.
+        this.ctx.logger.warn(
+          `agent-society-worker could not answer ${questionId}: ${message(error)}`,
+        )
+      }
+    }
+  }
+
+  /** One bounded, tool-free answering turn. */
+  private async generateAnswer(question: string): Promise<string> {
+    const sessionId = `agent-society-question-${randomUUID().replaceAll('-', '')}`
+    const handle = await this.ctx.agents.create({
+      sessionId: SessionId(sessionId),
+      agentOptions: {
+        provider: this.options.provider,
+        model: this.options.model,
+        ...(this.options.maxTokens === undefined
+          ? {}
+          : { maxTokens: Math.min(this.options.maxTokens, 2048) }),
+      },
+      meta: { cwd: this.options.workspaceRoot },
+      setup: agentSetup('no_tools'),
+    })
+    try {
+      const agent = handle.agent
+      agent.followup(
+        createUserMessage({
+          content: [{
+            type: 'text',
+            text:
+              'Answer the question below concisely and factually, using only ' +
+              'your own knowledge. Reply with exactly one text block, ' +
+              `format: ANSWER: <text>\n\nQuestion: ${question}`,
+          }],
+          source: { kind: 'user' },
+        }),
+      )
+      await agent.whenIdle()
+      const text = lastAssistantText(agent.session.events)
+      const marker = 'ANSWER:'
+      const markerIndex = text.indexOf(marker)
+      const answer = markerIndex >= 0
+        ? text.slice(markerIndex + marker.length).trim()
+        : text
+      return answer.slice(0, 8_000)
+    } finally {
+      await handle.dispose()
     }
   }
 

@@ -32,6 +32,8 @@ export interface Config {
     contextEnabled?: boolean;
     /** Push session directory rows / invocations (default on). */
     directoryEnabled?: boolean;
+    /** Answer Hub questions addressed to this actor (default on). */
+    questionsEnabled?: boolean;
 }
 export declare const Config: Schema<Config>;
 export declare function apply(ctx: Context, config: Config): Promise<void>;

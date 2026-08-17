@@ -76,6 +76,14 @@ class AgentHubApi:
             return
         self.on_event(str(node_id), event_name, data)
 
+    def _notify_node(
+        self, node_id: str | None, event_name: str, data: dict[str, Any]
+    ) -> None:
+        """Fan out one event to a specific node (questions, controls)."""
+        if self.on_event is None or not node_id:
+            return
+        self.on_event(node_id, event_name, data)
+
     def _notify_shared(
         self, tenant_id: str, event_name: str, data: dict[str, Any]
     ) -> None:
@@ -276,6 +284,27 @@ class AgentHubApi:
                     limit=limit,
                 )
             }
+        if path == f"{self.prefix}/questions":
+            query = parse_qs(query_string)
+            try:
+                limit = int((query.get("limit") or ["100"])[0])
+            except ValueError as exc:
+                raise ValueError("limit must be an integer") from exc
+            return HTTPStatus.OK, {
+                "questions": self.store.list_questions(
+                    tenant_id=tenant_id or "default",
+                    principal_id=principal_scope,
+                    status=(query.get("status") or [None])[0],
+                    limit=limit,
+                )
+            }
+        parts = self._parts(path)
+        if len(parts) == 2 and parts[0] == "questions":
+            question = self.store.get_question(
+                unquote(parts[1]), tenant_id=tenant_id or "default"
+            )
+            self._assert_principal_owner(context, question)
+            return HTTPStatus.OK, {"question": question}
         parts = self._parts(path)
         if len(parts) == 2 and parts[0] == "directory":
             session_id = unquote(parts[1])
@@ -728,6 +757,83 @@ class AgentHubApi:
                 },
             )
             return HTTPStatus.CREATED, {"row": row}
+        if path == f"{self.prefix}/questions":
+            scoped = dict(payload)
+            if context is not None and not context.is_admin:
+                scope_principal = self._principal_scope(context)
+                if scope_principal is not None:
+                    scoped["principal_id"] = scope_principal
+                if context.actor_id is not None:
+                    scoped["asker_actor_id"] = context.actor_id
+                if context.node_id is not None:
+                    scoped["asker_node_id"] = context.node_id
+            question = self.store.create_question(
+                tenant_id=tenant_id or "default",
+                principal_id=required_text(scoped, "principal_id", maximum=200),
+                asker_actor_id=required_text(
+                    scoped, "asker_actor_id", maximum=200
+                ),
+                asker_task_id=optional_text(scoped, "asker_task_id", maximum=200),
+                asker_session_id=optional_text(
+                    scoped, "asker_session_id", maximum=200
+                ),
+                target_actor_id=required_text(
+                    scoped, "target_actor_id", maximum=200
+                ),
+                message=required_text(scoped, "message", maximum=50_000),
+                require=optional_text(scoped, "require", maximum=10_000),
+            )
+            target_node = self.store.actor_online_node(
+                str(question["target_actor_id"]), tenant_id or "default"
+            )
+            self._notify_node(
+                target_node,
+                "question/new",
+                {
+                    "question_id": str(question["question_id"]),
+                    "target_actor_id": str(question["target_actor_id"]),
+                    "asker_actor_id": str(question["asker_actor_id"]),
+                },
+            )
+            return HTTPStatus.CREATED, {"question": question}
+        parts = self._parts(path)
+        if len(parts) == 2 and parts[0] == "questions" and parts[1] == "claim":
+            actor_id = required_text(payload, "actor_id", maximum=200)
+            node_id = required_text(payload, "node_id", maximum=200)
+            if context is not None and not context.is_admin:
+                if context.actor_id != actor_id or context.node_id != node_id:
+                    raise PermissionError(
+                        "node token cannot claim questions for another node"
+                    )
+            questions = self.store.claim_questions(
+                actor_id=actor_id,
+                node_id=node_id,
+                limit=int(payload.get("limit", 5)),
+                tenant_id=tenant_id or "default",
+            )
+            return HTTPStatus.OK, {"questions": questions}
+        parts = self._parts(path)
+        if len(parts) == 3 and parts[0] == "questions" and parts[2] == "answer":
+            question_id = unquote(parts[1])
+            question = self.store.answer_question(
+                question_id,
+                lease_token=required_text(payload, "lease_token", maximum=200),
+                answer_text=required_text(payload, "answer_text", maximum=50_000),
+                tenant_id=tenant_id or "default",
+            )
+            asker_node = self.store.actor_online_node(
+                str(question["asker_actor_id"]), tenant_id or "default"
+            )
+            self._notify_node(
+                asker_node,
+                "question/answered",
+                {
+                    "question_id": question_id,
+                    "answer": str(question.get("answer_text") or ""),
+                    "answer_text": str(question.get("answer_text") or ""),
+                },
+            )
+            return HTTPStatus.OK, {"question": question}
 
         parts = self._parts(path)
         if len(parts) == 3 and parts[0] == "tenants" and parts[2] == "tokens":

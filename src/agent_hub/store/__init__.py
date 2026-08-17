@@ -7,6 +7,7 @@ from .runs import RunStore
 from .shared import SharedStore
 from .stats import StatsStore
 from .tasks import TaskStore
+from .questions import QuestionStore
 from .tenants import TenantStore
 from .tokens import TokenStore
 from .users import UserStore
@@ -16,6 +17,7 @@ class AgentHubStore(
     StoreBase,
     IdentityStore,
     TaskStore,
+    QuestionStore,
     RunStore,
     ArtifactStore,
     TenantStore,

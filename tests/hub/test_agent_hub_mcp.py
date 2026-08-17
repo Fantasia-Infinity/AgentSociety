@@ -64,6 +64,7 @@ class McpServiceTests(unittest.TestCase):
                     "hub_directory_list",
                     "hub_directory_get",
                     "hub_directory_search",
+                    "hub_ask",
                 },
             )
 
