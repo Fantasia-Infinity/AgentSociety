@@ -32,13 +32,13 @@ test('pickTargetSession falls back to any recent idle session', () => {
   assert.equal(pickTargetSession(rows, {}), 'task-new')
 })
 
-test('pickTargetSession excludes working sessions and the current session', () => {
+test('pickTargetSession excludes working sessions and excluded ids', () => {
   const rows = [
     ROW('working', { status: 'working', last_active_at: 999 }),
     ROW('mine', { last_active_at: 800 }),
     ROW('other', { last_active_at: 700 }),
   ]
-  assert.equal(pickTargetSession(rows, { currentSessionId: 'mine' }), 'other')
+  assert.equal(pickTargetSession(rows, { excludeSessionIds: ['mine'] }), 'other')
 })
 
 test('pickTargetSession filters by actor and returns undefined when empty', () => {

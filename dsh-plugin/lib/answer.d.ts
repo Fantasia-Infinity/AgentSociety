@@ -24,7 +24,7 @@ export interface AnswerOptions {
 }
 /** Pick the best target session for default in-session answering. */
 export declare function pickTargetSession(rows: readonly Record<string, unknown>[], options: {
-    currentSessionId?: string;
+    excludeSessionIds?: readonly string[];
     actorId?: string;
 }): string | undefined;
 /**

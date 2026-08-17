@@ -21,12 +21,13 @@ export function extractAnswer(text) {
 }
 /** Pick the best target session for default in-session answering. */
 export function pickTargetSession(rows, options) {
+    const excluded = new Set(options.excludeSessionIds ?? []);
     const candidates = rows
         .filter((row) => {
         const sessionId = row["session_id"];
         return (typeof sessionId === "string" &&
             sessionId.length > 0 &&
-            sessionId !== options.currentSessionId &&
+            !excluded.has(sessionId) &&
             row["status"] !== "working" &&
             (options.actorId === undefined || row["actor_id"] === options.actorId));
     })
@@ -148,7 +149,7 @@ export async function answerQuestion(ctx, question, options) {
         ? question.target_session_id
         : undefined;
     const targetSessionId = explicit ??
-        (await resolveDefaultTarget(options));
+        (await resolveDefaultTarget(ctx, options));
     if (targetSessionId !== undefined) {
         try {
             return await answerQuestionInSession(ctx, text, {
@@ -163,16 +164,28 @@ export async function answerQuestion(ctx, question, options) {
     return answerQuestionWithSession(ctx, text, options);
 }
 /** Default mode: resume the target actor's most recent idle session. */
-async function resolveDefaultTarget(options) {
+async function resolveDefaultTarget(ctx, options) {
     try {
         const rows = await options.hub.listDirectory({
             actor_id: options.actorId,
             limit: 100,
         });
+        // Never resume a session this process is already running (resuming a
+        // live session would hang the answer); the directory has no working
+        // status, so exclude the live set explicitly.
+        let live = [];
+        try {
+            const sessions = ctx.get('sessions');
+            live = sessions?.list()?.map((session) => session.id) ?? [];
+        }
+        catch {
+            live = [];
+        }
+        const excludes = [...live];
+        if (options.currentSessionId !== undefined)
+            excludes.push(options.currentSessionId);
         return pickTargetSession(rows, {
-            ...(options.currentSessionId === undefined
-                ? {}
-                : { currentSessionId: options.currentSessionId }),
+            excludeSessionIds: excludes,
             ...(options.actorId === undefined ? {} : { actorId: options.actorId }),
         });
     }
