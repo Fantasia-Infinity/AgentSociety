@@ -50,6 +50,7 @@ class SharedStore:
             expires_at = (
                 now + item.ttl_hours * 3600 if item.ttl_hours is not None else None
             )
+            event_id = item.event_id or f"shared_{self._random_id()}"
             self._connection.execute(
                 """
                 INSERT INTO hub_shared_events(
@@ -58,7 +59,7 @@ class SharedStore:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    item.event_id or f"shared_{self._random_id()}",
+                    event_id,
                     tenant_id,
                     item.principal_id,
                     item.scope,
@@ -73,13 +74,18 @@ class SharedStore:
                 ),
             )
             self._condition.notify_all()
-            return self._shared_event_by_seq(
-                int(
-                    self._connection.execute(
-                        "SELECT last_insert_rowid() AS seq"
-                    ).fetchone()["seq"]
-                )
-            )
+            # Backend-neutral seq read: last_insert_rowid() is SQLite-only and
+            # PostgreSQL deployments would fail every append.
+            row = self._connection.execute(
+                """
+                SELECT seq FROM hub_shared_events
+                WHERE event_id=? AND tenant_id=?
+                """,
+                (event_id, tenant_id),
+            ).fetchone()
+            if row is None:
+                raise LookupError("shared event not found after insert")
+            return self._shared_event_by_seq(int(row["seq"]))
 
     def list_shared_events(
         self,
