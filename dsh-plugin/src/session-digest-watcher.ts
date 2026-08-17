@@ -99,9 +99,11 @@ export function apply(ctx: Context, config: Config): void {
   const contextEnabled =
     config.contextEnabled ?? process.env.AGENT_SOCIETY_CONTEXT !== '0'
   if (!hubUrl || !hubToken || !contextEnabled) {
+    ctx.logger.info(
+      `agent-society-session-digest idle (hub=${Boolean(hubUrl)} token=${Boolean(hubToken)} context=${contextEnabled})`,
+    )
     return
   }
-
   const owner = stableSlug(userInfo().username)
   const host = stableSlug(hostname())
   const principalId = config.principalId ?? `human-${owner}`
@@ -115,6 +117,14 @@ export function apply(ctx: Context, config: Config): void {
   const idleSeconds = config.idleSeconds ?? 60
   const summarize =
     config.summarize ?? process.env.AGENT_SOCIETY_CONTEXT_SUMMARIZE !== '0'
+
+  ctx.logger.warn(
+    `agent-society-session-digest active (hub=${hubUrl}, summarize=${summarize}, poll=${pollSeconds}s, idle=${idleSeconds}s)`,
+  )
+  // DIAGNOSTIC PROBE — remove after verification
+  try {
+    writeFileSync('/tmp/watcher-probe.txt', `alive ${Date.now()}\n`, { flag: 'a' })
+  } catch { /* ignore */ }
 
   const hub = new HubClient(hubUrl, hubToken)
   const statePath = resolve(
@@ -140,6 +150,12 @@ export function apply(ctx: Context, config: Config): void {
     { prepend: true },
   )
 
+  const probe = (message: string): void => {
+    try {
+      writeFileSync('/tmp/watcher-probe.txt', `${message} ${Date.now()}\n`, { flag: 'a' })
+    } catch { /* ignore */ }
+  }
+
   const timer = ctx.setInterval(() => {
     void tick()
   }, pollSeconds * 1_000)
@@ -156,6 +172,10 @@ export function apply(ctx: Context, config: Config): void {
       | undefined
     const now = Date.now()
     const liveIds = new Set<string>()
+    probe(`tick sessions=${Boolean(sessions)} persistence=${Boolean(persistence)}`)
+    ctx.logger.debug(
+      `agent-society-session-digest tick (sessions=${Boolean(sessions)}, persistence=${Boolean(persistence)})`,
+    )
 
     // Path 1: live sessions in THIS process (best KV-cache behaviour:
     // session-derived prefix + trailing instruction).
@@ -184,13 +204,17 @@ export function apply(ctx: Context, config: Config): void {
           if (liveIds.has(header.id)) continue
           const info = activity.get(header.id)
           const lastPromptAt = info?.lastPromptAt
-          if (lastPromptAt === undefined) continue
+          if (lastPromptAt === undefined) {
+            ctx.logger.debug(`agent-society-session-digest ${header.id}: no lastPromptAt in projection cache`)
+            continue
+          }
           const prior = state[header.id]
           if (prior !== undefined && prior.lastPromptAt !== undefined && lastPromptAt <= prior.lastPromptAt) continue
           // A round is over only after an idle gap since the last prompt.
           if (now - lastPromptAt < idleSeconds * 1_000) continue
           if (inFlight.has(header.id)) continue
           if (attempts.get(header.id) ?? 0 >= MAX_ATTEMPTS) continue
+          probe(`hit ${header.id} lastPromptAt=${lastPromptAt}`)
           inFlight.add(header.id)
           try {
             const inspection = await persistence.inspect(header.id)
@@ -221,6 +245,7 @@ export function apply(ctx: Context, config: Config): void {
               },
             )
             await hub.appendSharedEvent(digest)
+            probe(`appended ${header.id} round=${count}`)
             state[header.id] = { count, lastPromptAt, digestAt: now }
             saveState(statePath, state)
             attempts.delete(header.id)

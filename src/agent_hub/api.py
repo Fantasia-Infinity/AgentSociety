@@ -693,19 +693,13 @@ class AgentHubApi:
             scope_principal = self._principal_scope(context)
             if scope_principal is not None:
                 scoped["principal_id"] = scope_principal
-                requested_actor = str(scoped.get("actor_id", "")).strip()
+                # The node token's identity is authoritative: overwrite the
+                # requested actor/node (same semantics as the directory
+                # upsert) instead of rejecting, so any bundle row using its
+                # own default identity still works through a node token.
                 if context.actor_id is not None:
-                    if requested_actor and requested_actor != context.actor_id:
-                        raise PermissionError(
-                            "node token can only append as its own actor"
-                        )
                     scoped["actor_id"] = context.actor_id
-                requested_node = str(scoped.get("node_id", "")).strip()
                 if context.node_id is not None:
-                    if requested_node and requested_node != context.node_id:
-                        raise PermissionError(
-                            "node token can only append for its own node"
-                        )
                     scoped["node_id"] = context.node_id
             item = SharedEventAppend.from_dict(scoped)
             event = self.store.append_shared_event(
