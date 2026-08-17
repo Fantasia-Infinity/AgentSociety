@@ -184,6 +184,15 @@ export function consensusPromptLines(mirror, currentSessionId) {
     }
     return lines;
 }
+/** Static workflow guide, registered as a system section so the model
+ * always knows how to reach shared memory, even on turns where the
+ * change-detected snapshot is not re-injected. */
+export const WORKFLOW_GUIDE = '## AgentSociety 共享记忆\n' +
+    '共识与目录快照仅在内容变化时注入（最近一次注入见会话历史）；' +
+    '需要当前或完整内容时用 hub_context_read 读取；' +
+    '涉及某个会话时 hub_directory_get 下钻（depth 2 看其 digest）判断相关性后，' +
+    'hub_ask 携带 target_session_id 在该会话上下文中发问（回答写回该会话）；' +
+    '得出可复用结论时 hub_context_append 写回。';
 /** Ranked directory index lines: working > recently active > recent rows. */
 export function directoryPromptLines(mirror, currentSessionId) {
     const rows = Object.values(mirror.rows).filter((row) => row.session_id !== currentSessionId);
@@ -214,21 +223,13 @@ export function buildSharedContextSections(mirror, currentSessionId) {
         if (consensus.length > 0) {
             sections.push({
                 name: CONSENSUS_SECTION,
-                text: '## 共享共识上下文（AgentSociety）\n' +
-                    consensus.join('\n') +
-                    '\n（摘要仅一行：需要完整结论/详情时用 hub_context_read 读该条；' +
-                    '涉及某个会话的工作时用 hub_directory_get 下钻（depth 2 看其 digest），' +
-                    '或 hub_ask 携带 target_session_id 直接在该会话上下文中发问——回答会写回该会话）',
+                text: '## 共享共识上下文（AgentSociety）\n' + consensus.join('\n'),
             });
         }
         if (directory.length > 0) {
             sections.push({
                 name: DIRECTORY_INDEX_SECTION,
-                text: '## 会话/Agent 目录（AgentSociety）\n' +
-                    directory.join('\n') +
-                    '\n（流程：hub_directory_search 找到相关会话 → hub_directory_get 下钻' +
-                    '（depth 2 看 digest 判断是否值得）→ hub_ask 带 target_session_id 向该会话发问' +
-                    '（在其上下文中回答并写回）；得出可复用结论时 hub_context_append 写回）',
+                text: '## 会话/Agent 目录（AgentSociety）\n' + directory.join('\n'),
             });
         }
         return sections;

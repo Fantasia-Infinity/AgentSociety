@@ -198,6 +198,60 @@ test('buildSharedContextSections excludes the current session row', () => {
   assert.ok(!dir.text.includes('mine |'))
 })
 
+test('prompt-guard injects once and skips unchanged snapshots', async () => {
+  const { apply } = await import('../lib/prompt-guard.js')
+  const { saveMirror } = await import('../lib/directory.js')
+  const { mkdtempSync, rmSync, mkdirSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-pg2-'))
+  const mirrorFile = join(dir, 'agent-society-directory.json')
+  const orig = process.env.DSH_HOME
+  const sections = []
+  let handler
+  const ctx = {
+    on: (_evt, fn) => { handler = fn },
+    get: (name) => name === 'systemPrompt'
+      ? { section: (input) => sections.push(input) }
+      : undefined,
+    logger: { warn: () => {} },
+  }
+  try {
+    mkdirSync(dir, { recursive: true })
+    process.env.DSH_HOME = dir
+    saveMirror(mirrorFile, {
+      seq: 1, updated_at: 1, rows: {},
+      consensus: { seq: 1, entries: [
+        { seq: 1, kind: 'digest', session_id: 'other', summary: 's1' },
+      ] },
+    })
+    apply(ctx)
+    // Static workflow section registered once.
+    assert.ok(sections.some(s => s.name === 'agent-society:workflow'))
+    const assembly = { sections: [], contexts: [], tools: [], variables: {} }
+    const _context = { agent: { session: { id: 'mine' } } }
+    const next = async () => assembly
+    const first = await handler(assembly, _context, next)
+    assert.equal(first.contexts.length, 1, 'first assembly injects')
+    // Same snapshot again -> no injection.
+    const second = await handler(assembly, _context, next)
+    assert.equal(second.contexts.length, 0, 'unchanged snapshot is skipped')
+    // Mirror changes -> injects again.
+    saveMirror(mirrorFile, {
+      seq: 2, updated_at: 2, rows: {},
+      consensus: { seq: 2, entries: [
+        { seq: 2, kind: 'digest', session_id: 'other', summary: 's2' },
+      ] },
+    })
+    const third = await handler(assembly, _context, next)
+    assert.equal(third.contexts.length, 1, 'changed snapshot injects')
+    assert.ok(third.contexts[0].text.includes('s2'))
+  } finally {
+    if (orig === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = orig
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('prompt-guard appends shared context as a runtime context, not a section', async () => {
   const { apply } = await import('../lib/prompt-guard.js')
   const { saveMirror } = await import('../lib/directory.js')
@@ -218,6 +272,7 @@ test('prompt-guard appends shared context as a runtime context, not a section', 
     let handler
     const ctx = {
       on: (_evt, fn) => { handler = fn },
+      get: () => undefined,
       logger: { warn: () => {} },
     }
     apply(ctx)

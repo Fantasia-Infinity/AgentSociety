@@ -85,6 +85,10 @@ export declare const PROMPT_BUDGET_CHARS = 4000;
  * does not already have in the transcript.
  */
 export declare function consensusPromptLines(mirror: DirectoryMirror, currentSessionId?: string): string[];
+/** Static workflow guide, registered as a system section so the model
+ * always knows how to reach shared memory, even on turns where the
+ * change-detected snapshot is not re-injected. */
+export declare const WORKFLOW_GUIDE: string;
 /** Ranked directory index lines: working > recently active > recent rows. */
 export declare function directoryPromptLines(mirror: DirectoryMirror, currentSessionId?: string): string[];
 /**

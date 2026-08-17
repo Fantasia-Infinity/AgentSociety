@@ -18,18 +18,31 @@
  */
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { buildSharedContextSections, loadMirror, mirrorPath, } from './directory.js';
+import { buildSharedContextSections, loadMirror, mirrorPath, WORKFLOW_GUIDE, } from './directory.js';
 export const name = 'agent-society-directory-index';
 export const inject = [];
 export function apply(ctx) {
     const dshHome = resolve(process.env.DSH_HOME?.trim() || join(homedir(), '.dsh'));
     const path = mirrorPath(dshHome);
+    // The workflow guide is static and lives in a system section: the model
+    // always knows how to reach shared memory, even on turns where the
+    // change-detected data snapshot is not re-injected.
+    const systemPrompt = ctx.get('systemPrompt');
+    if (systemPrompt !== undefined) {
+        systemPrompt.section({
+            name: 'agent-society:workflow',
+            order: 199,
+            text: WORKFLOW_GUIDE,
+        });
+    }
+    // Change detection: the snapshot is injected only when its bytes changed
+    // since the last injection for this session (or on first sight). Idle
+    // turns keep the request lean instead of appending an identical runtime
+    // context on every step.
+    const lastInjected = new Map();
     ctx.on('system-prompt/assemble', async (assembly, _context, next) => {
         const assembled = await next();
         try {
-            // The current session id keeps this session's own digests and row
-            // out of the injected text: the digest watcher writes on every
-            // ~60s idle gap, which would churn the prompt prefix each round.
             const current = _context.agent?.session?.id;
             const currentSessionId = typeof current === 'string' ? current : undefined;
             const sections = buildSharedContextSections(loadMirror(path), currentSessionId);
@@ -39,8 +52,6 @@ export function apply(ctx) {
             // section: the request prefix (system sections + history + the
             // current user message) stays byte-identical forever, so cache
             // hits are preserved no matter how often the shared memory changes.
-            // The snapshot itself lives at the tail, so its churn only ever
-            // costs the small snapshot in cache terms.
             const contextText = sections
                 .map((section) => section.text)
                 .join('\n\n')
@@ -49,6 +60,10 @@ export function apply(ctx) {
                 // them without changing the visible content meaningfully.
                 .replace(/\{\{/g, '{ {')
                 .replace(/\}\}/g, '} }');
+            const key = currentSessionId ?? '__global__';
+            if (lastInjected.get(key) === contextText)
+                return assembled;
+            lastInjected.set(key, contextText);
             const existing = new Set(assembled.contexts.map((context) => context.name));
             if (existing.has('agent-society:shared-context'))
                 return assembled;
