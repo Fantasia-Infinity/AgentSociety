@@ -67,6 +67,26 @@ export class HubClient {
         });
     }
     /**
+     * Append one entry to the principal's shared memory (scope: consensus /
+     * directory / qa). Idempotent when `event_id` is supplied: the Hub returns
+     * the existing seq for a duplicate.
+     */
+    async appendSharedEvent(item) {
+        const body = { ...item };
+        const response = await this.request("/v1/hub/contexts/append", { method: "POST", body });
+        return response.event;
+    }
+    /** Incremental pull of the shared memory log (after_seq = resume point). */
+    async listSharedEvents(item = {}) {
+        const query = new URLSearchParams();
+        for (const [key, value] of Object.entries(item)) {
+            if (value !== undefined)
+                query.set(key, String(value));
+        }
+        const response = await this.request(`/v1/hub/contexts${query.size > 0 ? `?${query.toString()}` : ""}`, { method: "GET", body: undefined });
+        return response.events;
+    }
+    /**
      * Subscribe to the worker push channel (`/v1/hub/events`) and invoke
      * `onEvent` for every SSE event. Resolves when the stream ends normally
      * (server closed the connection) and rejects on transport errors; the

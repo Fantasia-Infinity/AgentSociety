@@ -16,6 +16,7 @@ from .domain import (
     PrincipalRegistration,
     RunStatus,
     RunSubmission,
+    SharedEventAppend,
     TenantRegistration,
     TaskSubmission,
     TaskUpdate,
@@ -48,6 +49,7 @@ class AgentHubApi:
         *,
         allow_registration: bool = True,
         on_event: Callable[[str, str, dict[str, Any]], None] | None = None,
+        on_shared_event: Callable[[str, str, dict[str, Any]], None] | None = None,
     ) -> None:
         self.store = store
         self.object_store = object_store
@@ -57,6 +59,10 @@ class AgentHubApi:
         # event happens (new control, cancellation). None keeps the API
         # usable from tests and stdio MCP without a server.
         self.on_event = on_event
+        # Tenant-wide push sink (shared memory / directory updates): called
+        # with (tenant_id, event_name, data) and fanned out to every SSE
+        # subscriber of that tenant.
+        self.on_shared_event = on_shared_event
 
     def _notify(
         self, task: dict[str, Any], event_name: str, data: dict[str, Any]
@@ -68,6 +74,13 @@ class AgentHubApi:
         if not node_id:
             return
         self.on_event(str(node_id), event_name, data)
+
+    def _notify_shared(
+        self, tenant_id: str, event_name: str, data: dict[str, Any]
+    ) -> None:
+        """Fan out one tenant-wide event (shared memory / directory)."""
+        if self.on_shared_event is not None:
+            self.on_shared_event(tenant_id, event_name, data)
 
     @classmethod
     def is_public_auth_post(cls, path: str) -> bool:
@@ -216,6 +229,31 @@ class AgentHubApi:
                 "artifacts": self.store.list_artifacts(
                     limit=limit,
                     tenant_id=tenant_id,
+                    principal_id=principal_scope,
+                )
+            }
+        if path == f"{self.prefix}/contexts":
+            query = parse_qs(query_string)
+            try:
+                after_seq = int((query.get("after_seq") or ["0"])[0])
+                limit = int((query.get("limit") or ["100"])[0])
+            except ValueError as exc:
+                raise ValueError("after_seq and limit must be integers") from exc
+            return HTTPStatus.OK, {
+                "events": self.store.list_shared_events(
+                    tenant_id=tenant_id or "default",
+                    principal_id=principal_scope,
+                    after_seq=after_seq,
+                    scope=(query.get("scope") or [None])[0],
+                    kind=(query.get("kind") or [None])[0],
+                    session_id=(query.get("session_id") or [None])[0],
+                    limit=limit,
+                )
+            }
+        if path == f"{self.prefix}/contexts/snapshot":
+            return HTTPStatus.OK, {
+                "snapshot": self.store.shared_snapshot(
+                    tenant_id=tenant_id or "default",
                     principal_id=principal_scope,
                 )
             }
@@ -570,6 +608,44 @@ class AgentHubApi:
                 ArtifactSubmission.from_dict(artifact_payload), tenant_id=tenant_id
             )
             return HTTPStatus.CREATED, {"artifact": artifact}
+        if path == f"{self.prefix}/contexts/append":
+            scoped = dict(payload)
+            scoped.setdefault("scope", "consensus")
+            scope_principal = self._principal_scope(context)
+            if scope_principal is not None:
+                scoped["principal_id"] = scope_principal
+                requested_actor = str(scoped.get("actor_id", "")).strip()
+                if context.actor_id is not None:
+                    if requested_actor and requested_actor != context.actor_id:
+                        raise PermissionError(
+                            "node token can only append as its own actor"
+                        )
+                    scoped["actor_id"] = context.actor_id
+                requested_node = str(scoped.get("node_id", "")).strip()
+                if context.node_id is not None:
+                    if requested_node and requested_node != context.node_id:
+                        raise PermissionError(
+                            "node token can only append for its own node"
+                        )
+                    scoped["node_id"] = context.node_id
+            item = SharedEventAppend.from_dict(scoped)
+            event = self.store.append_shared_event(
+                item, tenant_id=tenant_id or "default"
+            )
+            self._notify_shared(
+                tenant_id or "default",
+                "shared/event",
+                {
+                    "seq": int(event["seq"]),
+                    "scope": str(event["scope"]),
+                    "kind": str(event["kind"]),
+                    "session_id": event["session_id"],
+                    "actor_id": event["actor_id"],
+                    "node_id": event["node_id"],
+                    "principal_id": str(event["principal_id"]),
+                },
+            )
+            return HTTPStatus.CREATED, {"event": event}
 
         parts = self._parts(path)
         if len(parts) == 3 and parts[0] == "tenants" and parts[2] == "tokens":

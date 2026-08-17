@@ -108,6 +108,33 @@ export declare class HubClient {
         partial_result?: Record<string, unknown>;
     }): Promise<void>;
     /**
+     * Append one entry to the principal's shared memory (scope: consensus /
+     * directory / qa). Idempotent when `event_id` is supplied: the Hub returns
+     * the existing seq for a duplicate.
+     */
+    appendSharedEvent(item: {
+        scope?: string;
+        kind: string;
+        payload: Record<string, unknown>;
+        principal_id?: string;
+        session_id?: string;
+        actor_id?: string;
+        node_id?: string;
+        event_id?: string;
+        ttl_hours?: number;
+    }): Promise<{
+        seq: number;
+        event_id: string;
+    }>;
+    /** Incremental pull of the shared memory log (after_seq = resume point). */
+    listSharedEvents(item?: {
+        after_seq?: number;
+        scope?: string;
+        kind?: string;
+        session_id?: string;
+        limit?: number;
+    }): Promise<Array<Record<string, unknown>>>;
+    /**
      * Subscribe to the worker push channel (`/v1/hub/events`) and invoke
      * `onEvent` for every SSE event. Resolves when the stream ends normally
      * (server closed the connection) and rejects on transport errors; the

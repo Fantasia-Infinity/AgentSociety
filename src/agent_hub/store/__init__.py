@@ -4,6 +4,7 @@ from .artifacts import ArtifactStore
 from .base import StoreBase
 from .identities import IdentityStore
 from .runs import RunStore
+from .shared import SharedStore
 from .stats import StatsStore
 from .tasks import TaskStore
 from .tenants import TenantStore
@@ -20,6 +21,7 @@ class AgentHubStore(
     TenantStore,
     TokenStore,
     UserStore,
+    SharedStore,
     StatsStore,
 ):
     """Durable local-first coordination state shared by Agent Hosts.

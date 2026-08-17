@@ -27,6 +27,7 @@ import {
   type HubClaim,
   type HubTask,
 } from './hub-client.js'
+import { buildSessionDigest, type ConsensusDigest } from './digest.js'
 import {
   isSelfUpdateTask,
   runPluginSelfUpdate,
@@ -55,6 +56,8 @@ export interface Config {
   provider?: string
   model?: string
   maxTokens?: number
+  /** Append consensus digests to the Hub shared memory (AGENT_SOCIETY_CONTEXT). */
+  contextEnabled?: boolean
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -74,6 +77,7 @@ export const Config: Schema<Config> = Schema.object({
   provider: Schema.string().required(false),
   model: Schema.string().required(false),
   maxTokens: Schema.number().min(1).required(false),
+  contextEnabled: Schema.boolean().required(false),
 })
 
 interface ActiveAgent {
@@ -201,6 +205,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     toolPolicy,
     selfUpdateEnabled,
     repositoryRoot,
+    contextEnabled: config.contextEnabled ?? process.env.AGENT_SOCIETY_CONTEXT === '1',
     provider: config.provider ?? 'deepseek-official',
     model: config.model ?? process.env.DSH_MODEL ?? 'deepseek-v4-flash',
     maxTokens: config.maxTokens,
@@ -245,6 +250,8 @@ class WorkerLoop {
   private sseAbort: AbortController | undefined
   private sseBackoffMs = 1_000
   private lastPartialSnapshot: string | undefined
+  /** Consensus digests awaiting upload (fire-and-forget with bounded retries). */
+  private readonly pendingDigests: Array<{ digest: ConsensusDigest; attempts: number }> = []
 
   constructor(
     private readonly ctx: Context,
@@ -262,6 +269,7 @@ class WorkerLoop {
       toolPolicy: ToolPolicy
       selfUpdateEnabled: boolean
       repositoryRoot: string
+      contextEnabled: boolean
       provider: string
       model: string
       maxTokens: number | undefined
@@ -391,6 +399,7 @@ class WorkerLoop {
     if (this.disposed) return
     try {
       await this.hub.heartbeat(this.options.nodeId)
+      await this.flushDigests()
       const running = this.running
       if (!running) return
       await this.hub.updateTask(running.taskId, {
@@ -664,6 +673,17 @@ class WorkerLoop {
       this.ctx.logger.info(
         `agent-society-worker completed ${task.task_id} in ${active.sessionId}`,
       )
+      if (this.options.contextEnabled) {
+        this.queueDigest({
+          task,
+          runId: run.run_id,
+          session: agent.session,
+          title: finalTitle,
+          cwd,
+          toolPolicy,
+          status: 'completed',
+        })
+      }
     } catch (error) {
       if (running.cancelled) {
         await this.markRunCancelled(running)
@@ -684,6 +704,17 @@ class WorkerLoop {
             ? {}
             : { transcriptArtifactId: transcript.artifact_id }),
         })
+        if (this.options.contextEnabled) {
+          this.queueDigest({
+            task,
+            runId: run.run_id,
+            session: agent.session,
+            title: running.title,
+            cwd,
+            toolPolicy,
+            status: 'failed',
+          })
+        }
       }
     } finally {
       this.running = undefined
@@ -787,6 +818,72 @@ class WorkerLoop {
       )
       return undefined
     }
+  }
+
+  /**
+   * Enqueue a deterministic consensus digest for this task run. Uploads are
+   * fire-and-forget: failure never blocks task completion, and the idempotent
+   * event_id makes a later retry a no-op on the Hub.
+   */
+  private queueDigest(options: {
+    task: HubTask
+    runId: string
+    session: Session
+    title: string | undefined
+    cwd: string
+    toolPolicy: ToolPolicy
+    status: 'completed' | 'failed'
+  }): void {
+    const events = options.session.events
+    const toolCount = events.filter((event) => event?.type === 'tool/call').length
+    const messageCount = events.filter(
+      (event) => event?.type === 'user/message' || event?.type === 'assistant/message',
+    ).length
+    let resultText = ''
+    try {
+      resultText = lastAssistantText(events)
+    } catch {
+      // A session without any assistant message still gets a digest.
+    }
+    const digest = buildSessionDigest({
+      principalId: this.options.principalId,
+      sessionId: options.session.id,
+      actorId: this.options.actorId,
+      nodeId: this.options.nodeId,
+      taskId: options.task.task_id,
+      runId: options.runId,
+      title: options.title,
+      workspace: options.cwd,
+      objective: options.task.objective,
+      status: options.status,
+      resultText,
+      toolCount,
+      messageCount,
+      createdAt: Date.now(),
+    })
+    this.pendingDigests.push({ digest, attempts: 0 })
+    void this.flushDigests()
+  }
+
+  /** Upload queued digests; bounded retries, failures are logged only. */
+  private async flushDigests(): Promise<void> {
+    if (this.pendingDigests.length === 0) return
+    const remaining: Array<{ digest: ConsensusDigest; attempts: number }> = []
+    for (const pending of this.pendingDigests) {
+      try {
+        await this.hub.appendSharedEvent(pending.digest)
+      } catch (error) {
+        if (pending.attempts < 3) {
+          remaining.push({ digest: pending.digest, attempts: pending.attempts + 1 })
+        } else {
+          this.ctx.logger.warn(
+            `agent-society-worker digest upload dropped for ${pending.digest.session_id}: ${message(error)}`,
+          )
+        }
+      }
+    }
+    this.pendingDigests.length = 0
+    this.pendingDigests.push(...remaining)
   }
 
   private async executeSelfUpdate(claim: HubClaim): Promise<void> {

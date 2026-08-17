@@ -190,6 +190,49 @@ export class HubClient {
   }
 
   /**
+   * Append one entry to the principal's shared memory (scope: consensus /
+   * directory / qa). Idempotent when `event_id` is supplied: the Hub returns
+   * the existing seq for a duplicate.
+   */
+  async appendSharedEvent(item: {
+    scope?: string;
+    kind: string;
+    payload: Record<string, unknown>;
+    principal_id?: string;
+    session_id?: string;
+    actor_id?: string;
+    node_id?: string;
+    event_id?: string;
+    ttl_hours?: number;
+  }): Promise<{ seq: number; event_id: string }> {
+    const body: Record<string, unknown> = { ...item };
+    const response = await this.request<{ event: { seq: number; event_id: string } }>(
+      "/v1/hub/contexts/append",
+      { method: "POST", body },
+    );
+    return response.event;
+  }
+
+  /** Incremental pull of the shared memory log (after_seq = resume point). */
+  async listSharedEvents(item: {
+    after_seq?: number;
+    scope?: string;
+    kind?: string;
+    session_id?: string;
+    limit?: number;
+  } = {}): Promise<Array<Record<string, unknown>>> {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(item)) {
+      if (value !== undefined) query.set(key, String(value));
+    }
+    const response = await this.request<{ events: Array<Record<string, unknown>> }>(
+      `/v1/hub/contexts${query.size > 0 ? `?${query.toString()}` : ""}`,
+      { method: "GET", body: undefined },
+    );
+    return response.events;
+  }
+
+  /**
    * Subscribe to the worker push channel (`/v1/hub/events`) and invoke
    * `onEvent` for every SSE event. Resolves when the stream ends normally
    * (server closed the connection) and rejects on transport errors; the

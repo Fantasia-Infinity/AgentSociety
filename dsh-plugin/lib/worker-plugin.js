@@ -16,6 +16,7 @@ import { randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { HubClient, } from './hub-client.js';
+import { buildSessionDigest } from './digest.js';
 import { isSelfUpdateTask, runPluginSelfUpdate, SELF_UPDATE_EXIT_CODE, } from './self-update.js';
 export const name = 'agent-society-worker';
 export const inject = ['timer', 'agents', 'sessions', 'sessionPersistence'];
@@ -36,6 +37,7 @@ export const Config = Schema.object({
     provider: Schema.string().required(false),
     model: Schema.string().required(false),
     maxTokens: Schema.number().min(1).required(false),
+    contextEnabled: Schema.boolean().required(false),
 });
 const TASK_PROMPT = (task, runId, cwd, toolPolicy) => [
     'You are executing a durable task delegated through the AgentSociety Hub.',
@@ -117,6 +119,7 @@ export async function apply(ctx, config) {
         toolPolicy,
         selfUpdateEnabled,
         repositoryRoot,
+        contextEnabled: config.contextEnabled ?? process.env.AGENT_SOCIETY_CONTEXT === '1',
         provider: config.provider ?? 'deepseek-official',
         model: config.model ?? process.env.DSH_MODEL ?? 'deepseek-v4-flash',
         maxTokens: config.maxTokens,
@@ -157,6 +160,8 @@ class WorkerLoop {
     sseAbort;
     sseBackoffMs = 1_000;
     lastPartialSnapshot;
+    /** Consensus digests awaiting upload (fire-and-forget with bounded retries). */
+    pendingDigests = [];
     constructor(ctx, hub, options) {
         this.ctx = ctx;
         this.hub = hub;
@@ -279,6 +284,7 @@ class WorkerLoop {
             return;
         try {
             await this.hub.heartbeat(this.options.nodeId);
+            await this.flushDigests();
             const running = this.running;
             if (!running)
                 return;
@@ -525,6 +531,17 @@ class WorkerLoop {
                 },
             });
             this.ctx.logger.info(`agent-society-worker completed ${task.task_id} in ${active.sessionId}`);
+            if (this.options.contextEnabled) {
+                this.queueDigest({
+                    task,
+                    runId: run.run_id,
+                    session: agent.session,
+                    title: finalTitle,
+                    cwd,
+                    toolPolicy,
+                    status: 'completed',
+                });
+            }
         }
         catch (error) {
             if (running.cancelled) {
@@ -541,6 +558,17 @@ class WorkerLoop {
                         ? {}
                         : { transcriptArtifactId: transcript.artifact_id }),
                 });
+                if (this.options.contextEnabled) {
+                    this.queueDigest({
+                        task,
+                        runId: run.run_id,
+                        session: agent.session,
+                        title: running.title,
+                        cwd,
+                        toolPolicy,
+                        status: 'failed',
+                    });
+                }
             }
         }
         finally {
@@ -636,6 +664,62 @@ class WorkerLoop {
             this.ctx.logger.warn(`agent-society-worker transcript artifact failed: ${message(error)}`);
             return undefined;
         }
+    }
+    /**
+     * Enqueue a deterministic consensus digest for this task run. Uploads are
+     * fire-and-forget: failure never blocks task completion, and the idempotent
+     * event_id makes a later retry a no-op on the Hub.
+     */
+    queueDigest(options) {
+        const events = options.session.events;
+        const toolCount = events.filter((event) => event?.type === 'tool/call').length;
+        const messageCount = events.filter((event) => event?.type === 'user/message' || event?.type === 'assistant/message').length;
+        let resultText = '';
+        try {
+            resultText = lastAssistantText(events);
+        }
+        catch {
+            // A session without any assistant message still gets a digest.
+        }
+        const digest = buildSessionDigest({
+            principalId: this.options.principalId,
+            sessionId: options.session.id,
+            actorId: this.options.actorId,
+            nodeId: this.options.nodeId,
+            taskId: options.task.task_id,
+            runId: options.runId,
+            title: options.title,
+            workspace: options.cwd,
+            objective: options.task.objective,
+            status: options.status,
+            resultText,
+            toolCount,
+            messageCount,
+            createdAt: Date.now(),
+        });
+        this.pendingDigests.push({ digest, attempts: 0 });
+        void this.flushDigests();
+    }
+    /** Upload queued digests; bounded retries, failures are logged only. */
+    async flushDigests() {
+        if (this.pendingDigests.length === 0)
+            return;
+        const remaining = [];
+        for (const pending of this.pendingDigests) {
+            try {
+                await this.hub.appendSharedEvent(pending.digest);
+            }
+            catch (error) {
+                if (pending.attempts < 3) {
+                    remaining.push({ digest: pending.digest, attempts: pending.attempts + 1 });
+                }
+                else {
+                    this.ctx.logger.warn(`agent-society-worker digest upload dropped for ${pending.digest.session_id}: ${message(error)}`);
+                }
+            }
+        }
+        this.pendingDigests.length = 0;
+        this.pendingDigests.push(...remaining);
     }
     async executeSelfUpdate(claim) {
         const { task, run } = claim;

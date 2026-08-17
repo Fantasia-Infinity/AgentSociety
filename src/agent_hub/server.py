@@ -77,6 +77,29 @@ class HubHttpServer(ThreadingHTTPServer):
         self._subscribers: list[dict[str, Any]] = []
         self._subscribers_lock = threading.Lock()
         self.api.on_event = self.publish
+        self.api.on_shared_event = self.publish_tenant
+
+    def publish_tenant(
+        self, tenant_id: str, event_name: str, data: dict[str, Any]
+    ) -> None:
+        """Fan one tenant-wide event (shared memory / directory) out to every
+        subscriber of that tenant."""
+        with self._subscribers_lock:
+            for subscriber in self._subscribers:
+                if subscriber["tenant_id"] != tenant_id:
+                    continue
+                stream_queue = subscriber["queue"]
+                try:
+                    stream_queue.put_nowait((event_name, data))
+                except queue.Full:
+                    try:
+                        stream_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        stream_queue.put_nowait((event_name, data))
+                    except queue.Full:
+                        pass
 
     def publish(self, node_id: str, event_name: str, data: dict[str, Any]) -> None:
         """Fan one worker-relevant event out to the matching node's SSE stream."""
@@ -574,6 +597,12 @@ def main() -> None:
                     logger.info("purged_expired_auth_tokens count=%s", removed)
             except Exception:
                 logger.exception("purge_expired_auth_tokens_failed")
+            try:
+                removed = store.purge_expired_shared_events()
+                if removed:
+                    logger.info("purged_expired_shared_events count=%s", removed)
+            except Exception:
+                logger.exception("purge_expired_shared_events_failed")
 
     threading.Thread(
         target=purge_loop, name="hub-token-purge", daemon=True

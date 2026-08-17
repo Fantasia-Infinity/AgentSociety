@@ -59,6 +59,8 @@ class McpServiceTests(unittest.TestCase):
                     "hub_get_task_events",
                     "hub_create_task",
                     "hub_cancel_task",
+                    "hub_context_append",
+                    "hub_context_read",
                 },
             )
 

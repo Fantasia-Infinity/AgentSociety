@@ -206,6 +206,31 @@ class StoreBase:
                     created_at REAL NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS hub_shared_events (
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id TEXT UNIQUE NOT NULL,
+                    tenant_id TEXT NOT NULL DEFAULT 'default',
+                    principal_id TEXT NOT NULL,
+                    scope TEXT NOT NULL DEFAULT 'consensus',
+                    kind TEXT NOT NULL,
+                    session_id TEXT,
+                    actor_id TEXT,
+                    node_id TEXT,
+                    payload_json TEXT NOT NULL,
+                    ttl_hours INTEGER,
+                    expires_at REAL,
+                    created_at REAL NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_hub_shared_events_tenant_seq
+                ON hub_shared_events(tenant_id, seq);
+
+                CREATE INDEX IF NOT EXISTS idx_hub_shared_events_principal_scope
+                ON hub_shared_events(tenant_id, principal_id, scope, seq);
+
+                CREATE INDEX IF NOT EXISTS idx_hub_shared_events_session
+                ON hub_shared_events(tenant_id, session_id, seq);
+
                 CREATE TABLE IF NOT EXISTS hub_artifacts (
                     artifact_id TEXT PRIMARY KEY,
                     task_id TEXT REFERENCES hub_tasks(task_id),

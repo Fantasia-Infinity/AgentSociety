@@ -28,6 +28,8 @@ export interface Config {
     provider?: string;
     model?: string;
     maxTokens?: number;
+    /** Append consensus digests to the Hub shared memory (AGENT_SOCIETY_CONTEXT). */
+    contextEnabled?: boolean;
 }
 export declare const Config: Schema<Config>;
 export declare function apply(ctx: Context, config: Config): Promise<void>;

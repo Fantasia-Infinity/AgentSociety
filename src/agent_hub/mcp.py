@@ -101,6 +101,43 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "hub_context_append",
+        "description": (
+            "Append one entry to the shared consensus context of your "
+            "principal (facts, decisions, session digests). Entries are "
+            "idempotent via event_id and expire after ttl_hours."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string"},
+                "payload": {"type": "object"},
+                "session_id": {"type": "string"},
+                "event_id": {"type": "string"},
+                "ttl_hours": {"type": "integer"},
+            },
+            "required": ["kind", "payload"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "hub_context_read",
+        "description": (
+            "Read the shared consensus context of your principal. Pass "
+            "after_seq to pull only newer entries (incremental sync)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "after_seq": {"type": "integer"},
+                "kind": {"type": "string"},
+                "session_id": {"type": "string"},
+                "limit": {"type": "integer"},
+            },
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -231,6 +268,27 @@ class McpService:
                 return self._tool_result(
                     {"task": self._cancel_task(arguments, context)}
                 )
+            if name == "hub_context_append":
+                tenant_id = self._tenant(context, arguments)
+                self._ensure_identity(tenant_id)
+                payload = dict(arguments)
+                payload.setdefault("scope", "consensus")
+                payload.setdefault(
+                    "principal_id", self._gateway_principal_id(tenant_id)
+                )
+                payload.setdefault("actor_id", self._gateway_actor_id(tenant_id))
+                _, result = self.api.post(
+                    "/v1/hub/contexts/append", payload, context
+                )
+                return self._tool_result({"event": result["event"]})
+            if name == "hub_context_read":
+                query = "&".join(
+                    f"{key}={quote(str(value))}"
+                    for key, value in arguments.items()
+                    if value is not None
+                )
+                _, result = self.api.get("/v1/hub/contexts", query, context)
+                return self._tool_result({"events": result["events"]})
             return self._tool_error(-32601, f"Unknown tool: {name}")
         except (ApiError, ValueError) as exc:
             return self._tool_error(-32602, str(exc))

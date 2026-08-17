@@ -23,6 +23,8 @@
         provider: !!js process.env.AGENT_SOCIETY_PROVIDER ?? 'deepseek-official'
         model: !!js process.env.DSH_MODEL ?? process.env.AGENT_SOCIETY_MODEL ?? 'deepseek-v4-flash'
         maxTokens: !!js Number(process.env.AGENT_SOCIETY_MAX_TOKENS ?? 8192)
+        # Consensus digests into the Hub shared memory (default off).
+        contextEnabled: !!js process.env.AGENT_SOCIETY_CONTEXT === '1'
 
     # Dispatch surface: expose Hub coordination tools as mcp__agent-society__*.
     # This guard re-appends Hub tools after preset-level system-prompt
