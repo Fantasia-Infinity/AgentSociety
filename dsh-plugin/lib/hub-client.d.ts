@@ -104,6 +104,20 @@ export declare class HubClient {
         status: Exclude<HubTaskStatus, "submitted">;
         message?: string;
         result?: Record<string, unknown>;
+        /** Progressive observer state (phase, tool counts, ...). */
+        partial_result?: Record<string, unknown>;
+    }): Promise<void>;
+    /**
+     * Subscribe to the worker push channel (`/v1/hub/events`) and invoke
+     * `onEvent` for every SSE event. Resolves when the stream ends normally
+     * (server closed the connection) and rejects on transport errors; the
+     * caller owns reconnection with backoff.
+     */
+    subscribeEvents(nodeId: string, onEvent: (event: {
+        name: string;
+        data: Record<string, unknown>;
+    }) => void, options?: {
+        signal?: AbortSignal;
     }): Promise<void>;
     addArtifact(item: {
         name: string;

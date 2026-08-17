@@ -129,11 +129,16 @@ export async function apply(ctx, config) {
     const maintenance = ctx.setInterval(() => {
         void worker.maintain();
     }, 2_000);
+    const progress = ctx.setInterval(() => {
+        void worker.reportProgress();
+    }, 15_000);
     void worker.tick();
     void worker.maintain();
+    void worker.startSse();
     ctx.effect(() => () => {
         timer();
         maintenance();
+        progress();
         void worker.dispose();
     });
 }
@@ -146,6 +151,12 @@ class WorkerLoop {
     disposed = false;
     running;
     selfUpdating;
+    /** True while the SSE push channel is connected (controls/cancel are
+     *  event-driven then; the polling fallback below covers disconnects). */
+    sseActive = false;
+    sseAbort;
+    sseBackoffMs = 1_000;
+    lastPartialSnapshot;
     constructor(ctx, hub, options) {
         this.ctx = ctx;
         this.hub = hub;
@@ -169,6 +180,8 @@ class WorkerLoop {
                 'dsh',
                 'code',
                 'hub-task',
+                'push',
+                'ask',
                 ...(this.options.toolPolicy === 'full' ? ['workspace-write'] : []),
             ],
             metadata: {
@@ -194,10 +207,13 @@ class WorkerLoop {
             return;
         this.busy = true;
         try {
+            // Long-poll claim: the Hub holds the request until a matching task is
+            // available (capped at 30s server-side), so dispatch latency is not
+            // bound by the poll interval.
             const claim = await this.hub.claimTask({
                 actor_id: this.options.actorId,
                 node_id: this.options.nodeId,
-                wait_seconds: 0,
+                wait_seconds: Math.min(Math.max(this.options.pollSeconds, 1), 30),
                 lease_seconds: this.options.leaseSeconds,
             });
             if (claim)
@@ -208,6 +224,54 @@ class WorkerLoop {
         }
         finally {
             this.busy = false;
+        }
+    }
+    /**
+     * Keep the SSE push channel connected with backoff. While it is up,
+     * controls and cancellation arrive as events (sub-second latency);
+     * `maintain()` then only heartbeats and renews the task lease.
+     */
+    async startSse() {
+        while (!this.disposed) {
+            const abort = new AbortController();
+            this.sseAbort = abort;
+            try {
+                await this.hub.subscribeEvents(this.options.nodeId, (event) => this.onSseEvent(event), { signal: abort.signal });
+                // Stream ended (server closed or aborted). Drop to the polling
+                // fallback and try again shortly.
+                this.sseActive = false;
+                if (this.disposed)
+                    return;
+                await sleep(this.sseBackoffMs);
+            }
+            catch (error) {
+                if (this.disposed || abort.signal.aborted)
+                    return;
+                this.sseActive = false;
+                this.ctx.logger.warn(`agent-society-worker SSE disconnected (${message(error)}); polling fallback active`);
+                await sleep(this.sseBackoffMs);
+                this.sseBackoffMs = Math.min(this.sseBackoffMs * 2, 30_000);
+            }
+        }
+    }
+    onSseEvent(event) {
+        this.sseActive = true;
+        this.sseBackoffMs = 1_000;
+        const running = this.running;
+        if (!running)
+            return;
+        if (event.name === 'control/new') {
+            if (event.data.task_id !== running.taskId)
+                return;
+            void this.claimControls(running);
+            return;
+        }
+        if (event.name === 'task/cancelled') {
+            if (event.data.task_id !== running.taskId)
+                return;
+            running.cancelled = true;
+            running.agent.cancel({ kind: 'hook', reason: 'hub-task-cancelled' });
+            void this.markRunCancelled(running);
         }
     }
     async maintain() {
@@ -224,6 +288,9 @@ class WorkerLoop {
                 status: 'working',
                 message: 'DeepSeek Harness session active',
             });
+            if (this.sseActive)
+                return;
+            // Polling fallback while the push channel is down.
             const task = await this.hub.getTask(running.taskId);
             if (task.status === 'cancelled') {
                 running.cancelled = true;
@@ -231,6 +298,14 @@ class WorkerLoop {
                 await this.markRunCancelled(running);
                 return;
             }
+            await this.claimControls(running);
+        }
+        catch (error) {
+            this.ctx.logger.warn(`agent-society-worker maintenance failed: ${message(error)}`);
+        }
+    }
+    async claimControls(running) {
+        try {
             const controls = await this.hub.claimTaskControls(running.taskId, {
                 run_id: running.runId,
                 lease_token: running.leaseToken,
@@ -254,7 +329,57 @@ class WorkerLoop {
             }
         }
         catch (error) {
-            this.ctx.logger.warn(`agent-society-worker maintenance failed: ${message(error)}`);
+            this.ctx.logger.warn(`agent-society-worker control claim failed: ${message(error)}`);
+        }
+    }
+    /**
+     * Publish a bounded progressive snapshot (phase, tool counts) as
+     * `partial_result` on the Hub. Observers (`agent observe`, the web
+     * dashboard) can then follow live progress without waiting for the
+     * terminal result. Reports only when the snapshot actually changed.
+     */
+    async reportProgress() {
+        const running = this.running;
+        if (!running || this.disposed)
+            return;
+        try {
+            const events = running.agent.session.events;
+            const toolCalls = events.filter((event) => event?.type === 'tool/call');
+            const lastToolEvent = toolCalls[toolCalls.length - 1];
+            let lastTool;
+            if (lastToolEvent) {
+                const raw = lastToolEvent.data.arguments;
+                try {
+                    const parsed = JSON.parse(raw);
+                    if (parsed !== null &&
+                        typeof parsed === 'object' &&
+                        typeof parsed.name === 'string') {
+                        lastTool = parsed.name;
+                    }
+                }
+                catch {
+                    // Raw arguments are not JSON; keep lastTool undefined.
+                }
+            }
+            const snapshot = JSON.stringify({
+                phase: 'working',
+                toolCount: toolCalls.length,
+                messageCount: events.filter((event) => event?.type === 'user/message' || event?.type === 'assistant/message').length,
+                lastTool,
+            });
+            if (snapshot === this.lastPartialSnapshot)
+                return;
+            this.lastPartialSnapshot = snapshot;
+            await this.hub.updateTask(running.taskId, {
+                run_id: running.runId,
+                lease_token: running.leaseToken,
+                status: 'working',
+                message: 'DeepSeek Harness session active',
+                partial_result: JSON.parse(snapshot),
+            });
+        }
+        catch (error) {
+            this.ctx.logger.warn(`agent-society-worker progress report failed: ${message(error)}`);
         }
     }
     async execute(claim) {
@@ -637,6 +762,7 @@ class WorkerLoop {
     }
     async dispose() {
         this.disposed = true;
+        this.sseAbort?.abort();
         for (const active of this.active.values()) {
             await active.handle.dispose();
         }
@@ -751,6 +877,9 @@ function writeState(path, state) {
 function stableSlug(value) {
     const slug = value.toLowerCase().replace(/[^a-z0-9._-]+/gu, '-');
     return slug.replace(/^-+|-+$/gu, '') || 'node';
+}
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
 }
 function message(error) {
     return error instanceof Error ? error.message : String(error);

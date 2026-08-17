@@ -406,6 +406,20 @@ class TaskStore:
                 tenant_id=task_row["tenant_id"],
                 now=now,
             )
+            if item.partial_result is not None:
+                # Progressive observer state (activity line, tool counts, ...).
+                # It never replaces the terminal result: the event log is
+                # append-only and `task.result` stays the final answer.
+                self._event(
+                    task_id,
+                    "task.partial_result",
+                    run_id=item.run_id,
+                    actor_id=str(row["executor_actor_id"]),
+                    node_id=str(row["executor_node_id"]),
+                    payload={"partial_result": item.partial_result},
+                    tenant_id=task_row["tenant_id"],
+                    now=now,
+                )
             self._condition.notify_all()
             return self._task(task_id)
 

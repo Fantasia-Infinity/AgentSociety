@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from http import HTTPStatus
 from typing import Any
 import base64
@@ -46,10 +47,27 @@ class AgentHubApi:
         object_store: ObjectStore | None = None,
         *,
         allow_registration: bool = True,
+        on_event: Callable[[str, str, dict[str, Any]], None] | None = None,
     ) -> None:
         self.store = store
         self.object_store = object_store
         self.allow_registration = allow_registration
+        # Optional push sink installed by the HTTP server: called with
+        # (executor_node_id, event_name, data) whenever a worker-relevant
+        # event happens (new control, cancellation). None keeps the API
+        # usable from tests and stdio MCP without a server.
+        self.on_event = on_event
+
+    def _notify(
+        self, task: dict[str, Any], event_name: str, data: dict[str, Any]
+    ) -> None:
+        """Fan out one worker-relevant event to the task's executor node."""
+        if self.on_event is None:
+            return
+        node_id = task.get("executor_node_id")
+        if not node_id:
+            return
+        self.on_event(str(node_id), event_name, data)
 
     @classmethod
     def is_public_auth_post(cls, path: str) -> bool:
@@ -587,6 +605,14 @@ class AgentHubApi:
                 reason=optional_text(payload, "reason", maximum=10_000),
                 tenant_id=tenant_id,
             )
+            self._notify(
+                task,
+                "task/cancelled",
+                {
+                    "task_id": str(task["task_id"]),
+                    "reason": task.get("error"),
+                },
+            )
             return HTTPStatus.OK, {"task": task}
         if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "controls":
             task = self.store.get_task(parts[1], tenant_id=tenant_id)
@@ -597,6 +623,15 @@ class AgentHubApi:
                 kind=required_text(payload, "kind", maximum=40),
                 message=required_text(payload, "message", maximum=50_000),
                 tenant_id=tenant_id,
+            )
+            self._notify(
+                task,
+                "control/new",
+                {
+                    "task_id": str(task["task_id"]),
+                    "control_id": str(control["control_id"]),
+                    "kind": str(control["kind"]),
+                },
             )
             return HTTPStatus.CREATED, {"control": control}
         if (

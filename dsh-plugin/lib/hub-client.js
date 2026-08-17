@@ -51,10 +51,75 @@ export class HubClient {
         await this.request(`/v1/hub/tasks/${encodeURIComponent(taskId)}/controls/${encodeURIComponent(controlId)}/ack`, { method: "POST", body: item });
     }
     async updateTask(taskId, item) {
+        const body = {
+            run_id: item.run_id,
+            lease_token: item.lease_token,
+            status: item.status,
+            message: item.message,
+            result: item.result ?? {},
+        };
+        if (item.partial_result !== undefined) {
+            body.partial_result = item.partial_result;
+        }
         await this.request(`/v1/hub/tasks/${encodeURIComponent(taskId)}/updates`, {
             method: "POST",
-            body: item,
+            body,
         });
+    }
+    /**
+     * Subscribe to the worker push channel (`/v1/hub/events`) and invoke
+     * `onEvent` for every SSE event. Resolves when the stream ends normally
+     * (server closed the connection) and rejects on transport errors; the
+     * caller owns reconnection with backoff.
+     */
+    async subscribeEvents(nodeId, onEvent, options = {}) {
+        const url = `${this.baseUrl.replace(/\/$/u, "")}/v1/hub/events?node_id=${encodeURIComponent(nodeId)}`;
+        const init = {
+            headers: { Authorization: `Bearer ${this.token}` },
+        };
+        if (options.signal !== undefined)
+            init.signal = options.signal;
+        const response = await this.fetchImpl(url, init);
+        if (!response.ok) {
+            throw new HubError(`Hub events subscription failed (${response.status})`, response.status);
+        }
+        if (response.body === null)
+            return;
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done)
+                return;
+            buffer += decoder.decode(value, { stream: true });
+            let boundary;
+            while ((boundary = buffer.indexOf("\n\n")) >= 0) {
+                const block = buffer.slice(0, boundary);
+                buffer = buffer.slice(boundary + 2);
+                let name = "message";
+                let data = {};
+                for (const line of block.split("\n")) {
+                    if (line.startsWith("event: ")) {
+                        name = line.slice(7).trim();
+                    }
+                    else if (line.startsWith("data: ")) {
+                        try {
+                            const parsed = JSON.parse(line.slice(6));
+                            if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+                                data = parsed;
+                            }
+                        }
+                        catch {
+                            // Non-JSON data lines are ignored.
+                        }
+                    }
+                }
+                if (name !== "message" || Object.keys(data).length > 0) {
+                    onEvent({ name, data });
+                }
+            }
+        }
     }
     async addArtifact(item) {
         const response = await this.request("/v1/hub/artifacts", { method: "POST", body: item });

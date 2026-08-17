@@ -181,6 +181,7 @@ class TaskUpdate:
     status: TaskStatus
     message: str | None
     result: dict[str, Any]
+    partial_result: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "TaskUpdate":
@@ -197,6 +198,9 @@ class TaskUpdate:
             status=status,
             message=optional_text(payload, "message", maximum=10_000),
             result=object_value(payload, "result"),
+            partial_result=object_value(payload, "partial_result")
+            if payload.get("partial_result") is not None
+            else None,
         )
 
 
