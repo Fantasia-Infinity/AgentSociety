@@ -496,6 +496,12 @@ async function runDshTui(
     [process.execPath, "--import", pathToFileURL(tsxLoader).href, runScript],
     env,
     {
+      // npm --prefix runs the launcher with cwd=agent-host; the TUI derives
+      // its default workspace from its cwd, so restore the user's terminal
+      // directory (INIT_CWD) or the session falls back to showing zero
+      // resumable sessions.
+      cwd: process.env.INIT_CWD?.trim() || process.cwd(),
+      //
       onError: (error) => {
         const detail = `Could not start dsh TUI: ${error.message}`;
         if (forced) throw new Error(detail);

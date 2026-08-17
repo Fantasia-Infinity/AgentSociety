@@ -2,6 +2,13 @@ import { spawn, type ChildProcess } from 'node:child_process'
 
 export interface DshChildOptions {
   /**
+   * Working directory for the child. Defaults to the parent's cwd, which is
+   * the agent-host package dir under `npm --prefix`; interactive surfaces
+   * pass INIT_CWD so the TUI's default workspace is the user's terminal
+   * directory, not the installation.
+   */
+  cwd?: string
+  /**
    * Handle a spawn error. Return `false` to report the child as not started
    * (caller usually returns false from the launcher). Any other return value
    * keeps the launcher alive as if the process started but failed.
@@ -34,6 +41,7 @@ export function runDshChild(
     const child: ChildProcess = spawn(command[0]!, command.slice(1), {
       stdio: 'inherit',
       env,
+      ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
     })
 
     let settled = false
