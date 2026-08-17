@@ -109,7 +109,11 @@ export function apply(ctx, config) {
         // Path 2: persisted sessions not live here (the web may recreate agent
         // fibers per turn, so between turns the store can be empty). Uses the
         // projection cache's lastPromptAt as the activity watermark and
-        // standalone summarization (no session context copy).
+        // standalone summarization (no session context copy). When the cache has
+        // no lastPromptAt (the TUI never writes that field — only the web
+        // surface does), fall back to the persisted event tail so a running
+        // worker can backfill digests for interactive sessions that were closed
+        // before their idle gap was observed in-process.
         if (persistence && typeof persistence.list === 'function') {
             try {
                 const headers = await persistence.list();
@@ -122,12 +126,18 @@ export function apply(ctx, config) {
                     if (liveIds.has(header.id))
                         continue;
                     const info = activity.get(header.id);
-                    const lastPromptAt = info?.lastPromptAt;
-                    if (lastPromptAt === undefined) {
-                        ctx.logger.debug(`agent-society-session-digest ${header.id}: no lastPromptAt in projection cache`);
-                        continue;
-                    }
                     const prior = state[header.id];
+                    let lastPromptAt = info?.lastPromptAt;
+                    // Read the persisted tail once; it also feeds the summary below.
+                    let events;
+                    if (lastPromptAt === undefined) {
+                        const inspection = await persistence.inspect(header.id);
+                        events = inspection.events;
+                        const lastTime = lastEventTimeMs(events);
+                        if (lastTime === undefined)
+                            continue;
+                        lastPromptAt = lastTime;
+                    }
                     if (prior !== undefined && prior.lastPromptAt !== undefined && lastPromptAt <= prior.lastPromptAt)
                         continue;
                     // A round is over only after an idle gap since the last prompt.
@@ -139,12 +149,19 @@ export function apply(ctx, config) {
                         continue;
                     inFlight.add(header.id);
                     try {
-                        const inspection = await persistence.inspect(header.id);
-                        const count = extractFields({
-                            id: header.id,
-                            events: inspection.events,
-                        }).messageCount;
-                        const summary = await summarizeFor({ id: header.id, events: inspection.events }, count, { live: false, ...(info === undefined ? {} : { title: info.title }) });
+                        if (events === undefined) {
+                            const inspection = await persistence.inspect(header.id);
+                            events = inspection.events;
+                        }
+                        const count = messageCountOf(events);
+                        // A session with no real conversation messages has nothing to
+                        // summarize; skip instead of writing an empty consensus digest.
+                        if (count === 0) {
+                            state[header.id] = { count: 0, lastPromptAt, digestAt: now };
+                            saveState(statePath, state);
+                            continue;
+                        }
+                        const summary = await summarizeFor({ id: header.id, events }, count, { live: false, ...(info === undefined ? {} : { title: info.title }) });
                         const digest = buildSessionDigest({
                             principalId,
                             sessionId: header.id,
