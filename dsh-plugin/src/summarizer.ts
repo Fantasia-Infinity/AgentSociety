@@ -56,9 +56,10 @@ export type AssemblySnapshot = import('@deepseek-ai/dsh-system-prompt').PromptAs
 
 interface LlmLike {
   prepareCall(
-    config: { provider: string; model: string; maxTokens?: number },
+    config: { provider: string; model: string; maxTokens?: number; reasoningEffort?: unknown },
     signal?: AbortSignal,
   ): Promise<{
+    readonly config: Record<string, unknown>
     stream(options: GenerateOptions): AsyncIterable<StreamChunk>
   }>
 }
@@ -90,14 +91,17 @@ export async function summarizeLiveSession(options: {
     { provider, model, maxTokens },
     undefined,
   )
+  // The request's call-config fields must match the materialized prepared
+  // config exactly (adapter defaults included), or the dispatch rejects
+  // with "prepared LLM call config changed before adapter dispatch".
   const stream = prepared.stream({
+    ...prepared.config,
     provider,
     model,
     messages: [...history, instruction],
     system: renderPrompt(assembly),
     tools: assembly.tools as ToolSchema[],
-    maxTokens,
-  })
+  } as unknown as GenerateOptions)
   return collectText(stream)
 }
 
@@ -127,15 +131,15 @@ export async function summarizeStandalone(options: {
     `Messages: ${fields.messageCount}; Tools: ${fields.toolCount}`
   ).replace(/\s+/gu, ' ')
   const prepared = await llm.prepareCall(
-    { provider, model, maxTokens },
+    { provider, model, maxTokens, reasoningEffort: 'off' as never },
     undefined,
   )
   const stream = prepared.stream({
+    ...prepared.config,
     provider,
     model,
     messages: [createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'user' } })],
-    maxTokens,
-  })
+  } as unknown as GenerateOptions)
   return collectText(stream)
 }
 
@@ -146,9 +150,14 @@ async function collectText(stream: AsyncIterable<StreamChunk>): Promise<string> 
     if (Date.now() > deadline) throw new Error('summary timed out')
     if (chunk.type === 'text-delta') {
       text += chunk.text
-      if (text.length > MAX_SUMMARY_CHARS * 2) {
-        throw new Error('summary output exceeded bound')
-      }
+    } else if (
+      chunk.type === 'block-end' &&
+      chunk.block !== null &&
+      typeof chunk.block === 'object' &&
+      (chunk.block as { type?: string }).type === 'text'
+    ) {
+      const blockText = (chunk.block as { text?: string }).text
+      if (typeof blockText === 'string') text += blockText
     }
   }
   const trimmed = text.trim()

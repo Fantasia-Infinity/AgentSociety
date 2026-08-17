@@ -49,13 +49,16 @@ export async function summarizeLiveSession(options) {
         source: { kind: 'user' },
     });
     const prepared = await llm.prepareCall({ provider, model, maxTokens }, undefined);
+    // The request's call-config fields must match the materialized prepared
+    // config exactly (adapter defaults included), or the dispatch rejects
+    // with "prepared LLM call config changed before adapter dispatch".
     const stream = prepared.stream({
+        ...prepared.config,
         provider,
         model,
         messages: [...history, instruction],
         system: renderPrompt(assembly),
         tools: assembly.tools,
-        maxTokens,
     });
     return collectText(stream);
 }
@@ -76,12 +79,12 @@ export async function summarizeStandalone(options) {
         `Objective: ${fields.objective.slice(0, 500) || '-'}\n` +
         `Result: ${fields.resultText.slice(0, 1_500) || '-'}\n` +
         `Messages: ${fields.messageCount}; Tools: ${fields.toolCount}`).replace(/\s+/gu, ' ');
-    const prepared = await llm.prepareCall({ provider, model, maxTokens }, undefined);
+    const prepared = await llm.prepareCall({ provider, model, maxTokens, reasoningEffort: 'off' }, undefined);
     const stream = prepared.stream({
+        ...prepared.config,
         provider,
         model,
         messages: [createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'user' } })],
-        maxTokens,
     });
     return collectText(stream);
 }
@@ -93,9 +96,14 @@ async function collectText(stream) {
             throw new Error('summary timed out');
         if (chunk.type === 'text-delta') {
             text += chunk.text;
-            if (text.length > MAX_SUMMARY_CHARS * 2) {
-                throw new Error('summary output exceeded bound');
-            }
+        }
+        else if (chunk.type === 'block-end' &&
+            chunk.block !== null &&
+            typeof chunk.block === 'object' &&
+            chunk.block.type === 'text') {
+            const blockText = chunk.block.text;
+            if (typeof blockText === 'string')
+                text += blockText;
         }
     }
     const trimmed = text.trim();
