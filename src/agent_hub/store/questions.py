@@ -27,6 +27,7 @@ class QuestionStore:
         asker_task_id: str | None,
         asker_session_id: str | None,
         target_actor_id: str,
+        target_session_id: str | None = None,
         message: str,
         require: str | None,
     ) -> dict[str, Any]:
@@ -50,9 +51,10 @@ class QuestionStore:
                 """
                 INSERT INTO hub_questions(
                     question_id, tenant_id, principal_id, asker_actor_id,
-                    asker_task_id, asker_session_id, target_actor_id, message,
+                    asker_task_id, asker_session_id, target_actor_id,
+                    target_session_id, message,
                     require, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     question_id,
@@ -62,6 +64,7 @@ class QuestionStore:
                     asker_task_id,
                     asker_session_id,
                     target_actor_id,
+                    target_session_id,
                     message[:50_000],
                     require[:10_000] if require else None,
                     status,
@@ -414,6 +417,7 @@ class QuestionStore:
             "asker_task_id": row["asker_task_id"],
             "asker_session_id": row["asker_session_id"],
             "target_actor_id": str(row["target_actor_id"]),
+            "target_session_id": row["target_session_id"],
             "message": str(row["message"]),
             "require": row["require"],
             "status": str(row["status"]),

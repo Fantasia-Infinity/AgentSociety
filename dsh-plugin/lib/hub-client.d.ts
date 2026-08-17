@@ -155,6 +155,8 @@ export declare class HubClient {
     /** Ask another actor a question (blocking is the caller's job). */
     createQuestion(item: {
         target_actor_id: string;
+        /** Answer inside this session's context when the target supports it. */
+        target_session_id?: string;
         message: string;
         require?: string;
         asker_task_id?: string;

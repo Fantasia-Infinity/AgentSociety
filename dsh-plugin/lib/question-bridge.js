@@ -16,7 +16,7 @@ import Schema from '@deepseek-ai/schemastery';
 import { hostname, userInfo } from 'node:os';
 import { resolve } from 'node:path';
 import { HubClient } from './hub-client.js';
-import { answerQuestionWithSession } from './answer.js';
+import { answerQuestion } from './answer.js';
 export const name = 'agent-society-question-bridge';
 export const inject = ['timer'];
 export const Config = Schema.object({
@@ -98,12 +98,14 @@ export function apply(ctx, config) {
                 const questionId = String(question.question_id);
                 const leaseToken = String(question.lease_token);
                 try {
-                    const answer = await answerQuestionWithSession(ctx, String(question.message ?? ""), {
+                    const answer = await answerQuestion(ctx, question, {
                         provider,
                         model,
                         ...(maxTokens === undefined ? {} : { maxTokens }),
                         cwd: workspaceRoot,
                         setup: undefined,
+                        hub,
+                        actorId,
                     });
                     await hub.answerQuestion(questionId, {
                         lease_token: leaseToken,

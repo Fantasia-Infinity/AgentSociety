@@ -214,6 +214,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "target_actor_id": {"type": "string"},
+                "target_session_id": {"type": "string"},
                 "message": {"type": "string"},
                 "require": {"type": "string"},
                 "asker_session_id": {"type": "string"},

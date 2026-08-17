@@ -774,6 +774,9 @@ class AgentHubApi:
                 target_actor_id=required_text(
                     scoped, "target_actor_id", maximum=200
                 ),
+                target_session_id=optional_text(
+                    scoped, "target_session_id", maximum=200
+                ),
                 message=required_text(scoped, "message", maximum=50_000),
                 require=optional_text(scoped, "require", maximum=10_000),
             )

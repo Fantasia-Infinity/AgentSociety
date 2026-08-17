@@ -240,6 +240,7 @@ class StoreBase:
                     asker_task_id TEXT,
                     asker_session_id TEXT,
                     target_actor_id TEXT NOT NULL,
+                    target_session_id TEXT,
                     message TEXT NOT NULL,
                     require TEXT,
                     status TEXT NOT NULL DEFAULT 'pending',
@@ -395,6 +396,22 @@ class StoreBase:
                             f"ALTER TABLE {table} ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default'"
                         )
                 self._connection.execute("PRAGMA user_version=3")
+            if self._postgres:
+                self._connection.execute(
+                    "ALTER TABLE hub_questions ADD COLUMN IF NOT EXISTS target_session_id TEXT"
+                )
+            else:
+                columns = {
+                    str(row[1])
+                    for row in self._connection.execute(
+                        "PRAGMA table_info(hub_questions)"
+                    )
+                }
+                if "target_session_id" not in columns:
+                    self._connection.execute(
+                        "ALTER TABLE hub_questions ADD COLUMN target_session_id TEXT"
+                    )
+                self._connection.execute("PRAGMA user_version=4")
             self._connection.execute(
                 """
                 INSERT INTO hub_tenants(tenant_id, display_name, metadata_json, created_at, updated_at)

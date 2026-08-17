@@ -28,7 +28,7 @@ import {
   type HubTask,
 } from './hub-client.js'
 import { buildSessionDigest, type ConsensusDigest } from './digest.js'
-import { answerQuestionWithSession } from './answer.js'
+import { answerQuestion } from './answer.js'
 import {
   loadMirror,
   mergeInvocation,
@@ -477,7 +477,7 @@ class WorkerLoop {
       const text = String(question.message ?? '')
       const answeredBy = question.target_actor_id
       try {
-        const answer = await this.generateAnswer(text)
+        const answer = await this.generateAnswer(question)
         await this.hub.answerQuestion(questionId, {
           lease_token: leaseToken,
           answer_text: answer,
@@ -495,9 +495,11 @@ class WorkerLoop {
     }
   }
 
-  /** One bounded, tool-free answering turn. */
-  private async generateAnswer(question: string): Promise<string> {
-    return answerQuestionWithSession(this.ctx, question, {
+  /** One bounded, tool-free answering turn (default: resume target session). */
+  private async generateAnswer(
+    question: { message?: unknown; target_session_id?: unknown },
+  ): Promise<string> {
+    return answerQuestion(this.ctx, question, {
       provider: this.options.provider,
       model: this.options.model,
       ...(this.options.maxTokens === undefined
@@ -505,6 +507,8 @@ class WorkerLoop {
         : { maxTokens: this.options.maxTokens }),
       cwd: this.options.workspaceRoot,
       setup: agentSetup('no_tools'),
+      hub: this.hub,
+      actorId: this.options.actorId,
     })
   }
 
