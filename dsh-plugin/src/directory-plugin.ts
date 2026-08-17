@@ -87,7 +87,14 @@ export function apply(ctx: Context, config: Config): void {
     lastLocalPush: 0,
     /** session_id -> JSON fingerprint of the last pushed local row. */
     pushedRows: {} as Record<string, string>,
+    /** Tick counter driving the periodic full mirror rebuild. */
+    syncTicks: 0,
   }
+  // Rebuild the mirror from the hub's deduplicated directory every N syncs
+  // (10s * 30 = 5min). Incremental pulls never observe deletions, so rows
+  // whose sessions were pruned (cleanup, TTL) would stay in the mirror and
+  // keep showing up in prompt injection and directory views forever.
+  const FULL_PULL_EVERY = 30
 
   const timer = ctx.setInterval(() => {
     void sync()
@@ -107,10 +114,16 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   async function pullDirectory(): Promise<void> {
+    const full = state.syncTicks % FULL_PULL_EVERY === 0
+    state.syncTicks += 1
     const rows = await hub.listDirectory({
-      after_seq: state.mirror.seq,
-      limit: 200,
+      // Full pulls start from seq 0: list_directory deduplicates to the
+      // latest row per session, so rebuilding from the hub's full set drops
+      // mirror rows whose sessions no longer exist on the hub.
+      after_seq: full ? 0 : state.mirror.seq,
+      limit: full ? 500 : 200,
     })
+    if (full) state.mirror.rows = {}
     let maxSeq = state.mirror.seq
     for (const event of rows) {
       const seq = Number(event.seq)
@@ -132,7 +145,7 @@ export function apply(ctx: Context, config: Config): void {
       if (seq > maxSeq) maxSeq = seq
     }
     state.mirror = { ...state.mirror, seq: maxSeq, updated_at: Date.now() }
-    await pullConsensus()
+    await pullConsensus(full)
     saveMirror(path, state.mirror)
     ctx.logger.debug(
       `agent-society-directory pulled ${rows.length} row(s) (seq ${state.mirror.seq})`,
@@ -140,15 +153,17 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   /** Incremental pull of consensus entries into the mirror cache. */
-  async function pullConsensus(): Promise<void> {
+  async function pullConsensus(full: boolean): Promise<void> {
     const events = await hub.listSharedEvents({
-      after_seq: state.mirror.consensus.seq,
+      after_seq: full ? 0 : state.mirror.consensus.seq,
       scope: 'consensus',
-      limit: 200,
+      limit: full ? 500 : 200,
     })
     if (events.length === 0) return
     let maxSeq = state.mirror.consensus.seq
-    const entries = [...state.mirror.consensus.entries]
+    // Full pulls rebuild the entries from the hub's live set, dropping
+    // expired/deleted entries that incremental pulls never observe.
+    const entries = full ? [] : [...state.mirror.consensus.entries]
     for (const event of events) {
       const seq = Number(event.seq)
       if (!Number.isFinite(seq) || seq <= maxSeq) continue
