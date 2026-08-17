@@ -263,13 +263,22 @@ export function consensusPromptLines(
   mirror: DirectoryMirror,
   currentSessionId?: string,
 ): string[] {
-  return mirror.consensus.entries
-    .filter((entry) => entry.session_id !== currentSessionId)
-    .slice(0, MAX_CONSENSUS_LINES)
-    .map((entry) => {
-      const where = entry.session_id ? ` ${entry.session_id}` : ''
-      return `- [${entry.kind}]${where}: ${entry.summary}`
-    })
+  const lines: string[] = []
+  const seen = new Set<string>()
+  for (const entry of mirror.consensus.entries) {
+    if (entry.session_id === currentSessionId) continue
+    // The digest watcher writes one entry per ~60s idle gap, so an active
+    // remote session can produce several entries with identical text. Keep
+    // the newest copy of each (session, summary) pair so the bounded 8-line
+    // budget is spent on distinct facts, not repeated "OK" digests.
+    const key = `${entry.session_id ?? ''}|${entry.summary}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    const where = entry.session_id ? ` ${entry.session_id}` : ''
+    lines.push(`- [${entry.kind}]${where}: ${entry.summary}`)
+    if (lines.length >= MAX_CONSENSUS_LINES) break
+  }
+  return lines
 }
 
 /** Ranked directory index lines: working > recently active > recent rows. */

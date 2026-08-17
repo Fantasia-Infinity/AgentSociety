@@ -136,6 +136,26 @@ test('extractAnswer pulls the marked answer or falls back to full text', async (
   assert.ok(long.length <= 8000)
 })
 
+test('consensusPromptLines dedups identical (session, summary) pairs', () => {
+  const mirror = {
+    seq: 1,
+    updated_at: 1,
+    rows: {},
+    consensus: {
+      seq: 9,
+      entries: [
+        { seq: 9, kind: 'digest', session_id: 'dup-s', summary: 'same-digest' },
+        { seq: 8, kind: 'digest', session_id: 'dup-s', summary: 'same-digest' },
+        { seq: 7, kind: 'digest', session_id: 'other', summary: 'unique-1' },
+        { seq: 6, kind: 'digest', session_id: 'dup-s', summary: 'same-digest' },
+      ],
+    },
+  }
+  const lines = consensusPromptLines(mirror)
+  assert.equal(lines.filter(l => l.includes('same-digest')).length, 1)
+  assert.equal(lines.length, 2)
+})
+
 test('consensusPromptLines excludes the current session digests', () => {
   const mirror = {
     seq: 1,
