@@ -48,12 +48,28 @@ export function apply(ctx: Context): void {
         const currentSessionId = typeof current === 'string' ? current : undefined
         const sections = buildSharedContextSections(loadMirror(path), currentSessionId)
         if (sections.length === 0) return assembled
-        const existing = new Set(assembled.sections.map((section) => section.name))
-        const additions = sections.filter((section) => !existing.has(section.name))
-        if (additions.length === 0) return assembled
+        // Append as a RUNTIME CONTEXT (suffix position), never as a system
+        // section: the request prefix (system sections + history + the
+        // current user message) stays byte-identical forever, so cache
+        // hits are preserved no matter how often the shared memory changes.
+        // The snapshot itself lives at the tail, so its churn only ever
+        // costs the small snapshot in cache terms.
+        const contextText = sections
+          .map((section) => section.text)
+          .join('\n\n')
+          // renderContextSections interpolates {{variables}}; shared-memory
+          // text may contain brace pairs from code snippets, so neutralize
+          // them without changing the visible content meaningfully.
+          .replace(/\{\{/g, '{ {')
+          .replace(/\}\}/g, '} }')
+        const existing = new Set(assembled.contexts.map((context) => context.name))
+        if (existing.has('agent-society:shared-context')) return assembled
         return {
           ...assembled,
-          sections: [...assembled.sections, ...additions],
+          contexts: [
+            ...assembled.contexts,
+            { name: 'agent-society:shared-context', text: contextText },
+          ],
         }
       } catch (error) {
         ctx.logger.warn(

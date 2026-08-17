@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { join } from 'node:path'
 
 import { buildSessionDigest, digestEventId } from '../lib/digest.js'
 import { HubClient } from '../lib/hub-client.js'
@@ -175,4 +176,44 @@ test('buildSharedContextSections excludes the current session row', () => {
   assert.ok(dir)
   assert.ok(dir.text.includes('other'))
   assert.ok(!dir.text.includes('mine |'))
+})
+
+test('prompt-guard appends shared context as a runtime context, not a section', async () => {
+  const { apply } = await import('../lib/prompt-guard.js')
+  const { saveMirror } = await import('../lib/directory.js')
+  const { mkdtempSync, writeFileSync, rmSync, mkdirSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-pg-'))
+  const mirrorFile = join(dir, 'agent-society-directory.json')
+  const origMirrorPath = process.env.DSH_HOME
+  try {
+    mkdirSync(dir, { recursive: true })
+    process.env.DSH_HOME = dir
+    saveMirror(mirrorFile, {
+      seq: 1, updated_at: 1, rows: {},
+      consensus: { seq: 1, entries: [
+        { seq: 1, kind: 'digest', session_id: 'other', summary: 'summary with {{braces}} inside' },
+      ] },
+    })
+    let handler
+    const ctx = {
+      on: (_evt, fn) => { handler = fn },
+      logger: { warn: () => {} },
+    }
+    apply(ctx)
+    const assembly = { sections: [], contexts: [], tools: [], variables: {} }
+    const _context = { agent: { session: { id: 'mine' } } }
+    const next = async () => assembly
+    const out = await handler(assembly, _context, next)
+    assert.ok(out.contexts.length === 1, 'one runtime context appended')
+    assert.equal(out.contexts[0].name, 'agent-society:shared-context')
+    assert.ok(out.contexts[0].text.includes('共享共识上下文'))
+    // {{ braces neutralized so renderContextSections interpolation cannot throw
+    assert.ok(!out.contexts[0].text.includes('{{braces}}'))
+    assert.equal(out.sections.length, 0, 'no system sections touched')
+  } finally {
+    if (origMirrorPath === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = origMirrorPath
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
