@@ -11,7 +11,10 @@
  * the next idle round; tasks addressed to this actor are never executed in
  * worker sessions (those belong to the worker plugin).
  *
- * Enabled for the web surface via AGENT_SOCIETY_UI_TASKS=1.
+ * Enabled only where the launcher opts in (AGENT_SOCIETY_UI_TASKS=1, set
+ * manually; the agent-host default is 0 so tasks go to the per-device
+ * continuous worker session). Future per-session task routing can extend
+ * this bridge instead of adding a new executor.
  */
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import Schema from '@deepseek-ai/schemastery';
@@ -90,29 +93,10 @@ export function apply(ctx, config) {
         }
         return undefined;
     }
-    /** Debug state dump for diagnosis; removed after verification. */
-    function debugDump(tag) {
-        try {
-            const agents = ctx.get('agents');
-            const list = agents && typeof agents.list === 'function' ? agents.list() : null;
-            const rows = Array.isArray(list)
-                ? list.map((agent) => ({
-                    id: String(agent?.session?.id ?? agent?.id ?? '?'),
-                    status: agent?.status,
-                }))
-                : null;
-            const { writeFileSync } = require('node:fs');
-            writeFileSync('/tmp/task-bridge-debug.json', `${JSON.stringify({ ts: Date.now(), tag, agentsVisible: agents !== undefined, rows }, null, 2)}\n`);
-        }
-        catch {
-            // Diagnostics must never break the bridge.
-        }
-    }
     async function poll() {
         if (state.busy)
             return;
         if (activeClaim === null && idleSessionAgent() === undefined) {
-            debugDump('skip-idle');
             return; // the human is talking; wait for the next idle round
         }
         state.busy = true;
@@ -129,16 +113,13 @@ export function apply(ctx, config) {
                 return;
             const { task, run, lease_token: leaseToken } = activeClaim;
             const agent = idleSessionAgent();
-            if (agent === undefined) {
-                debugDump('claimed-but-busy');
+            if (agent === undefined)
                 return; // conversation became active; try next poll
-            }
             await execute(agent, task, run, leaseToken);
             activeClaim = null;
         }
         catch (error) {
             ctx.logger.warn(`agent-society-task-bridge failed: ${error instanceof Error ? error.message : String(error)}`);
-            debugDump(`error:${error instanceof Error ? error.message : String(error)}`);
             if (activeClaim !== null) {
                 const { task, run, lease_token: leaseToken } = activeClaim;
                 try {

@@ -48,9 +48,10 @@ export function buildDshCommonEnv(
     AGENT_SOCIETY_NODE_ID: config.nodeId,
     AGENT_SOCIETY_PRINCIPAL_ID: config.principalId,
     AGENT_SOCIETY_DISPLAY_NAME: config.actorDisplayName,
-    // Interactive surfaces (TUI/Web) may accept Hub tasks into their own
-    // conversation; the task-bridge row in the bundle is gated on this flag.
-    AGENT_SOCIETY_UI_TASKS: "1",
+    // Tasks go to the per-device continuous worker session by default; the
+    // interactive task-bridge row in the bundle stays disabled. Set to "1"
+    // to let this UI session accept Hub tasks (per-session routing comes later).
+    AGENT_SOCIETY_UI_TASKS: "0",
   };
   if (hub && config.hubUrl) {
     if (options.hubConnection) {

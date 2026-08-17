@@ -11,7 +11,10 @@
  * the next idle round; tasks addressed to this actor are never executed in
  * worker sessions (those belong to the worker plugin).
  *
- * Enabled for the web surface via AGENT_SOCIETY_UI_TASKS=1.
+ * Enabled only where the launcher opts in (AGENT_SOCIETY_UI_TASKS=1, set
+ * manually; the agent-host default is 0 so tasks go to the per-device
+ * continuous worker session). Future per-session task routing can extend
+ * this bridge instead of adding a new executor.
  */
 import type { Context } from '@deepseek-ai/cordis';
 import Schema from '@deepseek-ai/schemastery';
