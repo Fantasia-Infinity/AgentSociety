@@ -86,6 +86,34 @@ export class HubClient {
         const response = await this.request(`/v1/hub/contexts${query.size > 0 ? `?${query.toString()}` : ""}`, { method: "GET", body: undefined });
         return response.events;
     }
+    /** Push one session directory row (identity enforced from the token). */
+    async upsertDirectoryRow(item) {
+        const response = await this.request(`/v1/hub/directory/${encodeURIComponent(item.session_id)}`, {
+            method: "POST",
+            body: {
+                ...item.row,
+                principal_id: item.principal_id,
+                actor_id: item.actor_id,
+                node_id: item.node_id,
+            },
+        });
+        return response.row;
+    }
+    /** Incremental pull of the directory (latest row per session). */
+    async listDirectory(item = {}) {
+        const query = new URLSearchParams();
+        for (const [key, value] of Object.entries(item)) {
+            if (value !== undefined)
+                query.set(key, String(value));
+        }
+        const response = await this.request(`/v1/hub/directory${query.size > 0 ? `?${query.toString()}` : ""}`, { method: "GET", body: undefined });
+        return response.rows;
+    }
+    /** Drill into one session directory row (depth 0..3). */
+    async getDirectoryRow(sessionId, depth = 0) {
+        const response = await this.request(`/v1/hub/directory/${encodeURIComponent(sessionId)}?depth=${Math.min(Math.max(depth, 0), 3)}`, { method: "GET", body: undefined });
+        return response.row;
+    }
     /**
      * Subscribe to the worker push channel (`/v1/hub/events`) and invoke
      * `onEvent` for every SSE event. Resolves when the stream ends normally

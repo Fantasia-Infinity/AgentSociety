@@ -17,6 +17,7 @@ import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { HubClient, } from './hub-client.js';
 import { buildSessionDigest } from './digest.js';
+import { loadMirror, mergeInvocation, mirrorPath, saveMirror, } from './directory.js';
 import { isSelfUpdateTask, runPluginSelfUpdate, SELF_UPDATE_EXIT_CODE, } from './self-update.js';
 export const name = 'agent-society-worker';
 export const inject = ['timer', 'agents', 'sessions', 'sessionPersistence'];
@@ -38,6 +39,7 @@ export const Config = Schema.object({
     model: Schema.string().required(false),
     maxTokens: Schema.number().min(1).required(false),
     contextEnabled: Schema.boolean().required(false),
+    directoryEnabled: Schema.boolean().required(false),
 });
 const TASK_PROMPT = (task, runId, cwd, toolPolicy) => [
     'You are executing a durable task delegated through the AgentSociety Hub.',
@@ -120,6 +122,7 @@ export async function apply(ctx, config) {
         selfUpdateEnabled,
         repositoryRoot,
         contextEnabled: config.contextEnabled ?? process.env.AGENT_SOCIETY_CONTEXT === '1',
+        directoryEnabled: config.directoryEnabled ?? process.env.AGENT_SOCIETY_DIRECTORY !== '0',
         provider: config.provider ?? 'deepseek-official',
         model: config.model ?? process.env.DSH_MODEL ?? 'deepseek-v4-flash',
         maxTokens: config.maxTokens,
@@ -542,6 +545,15 @@ class WorkerLoop {
                     status: 'completed',
                 });
             }
+            this.queueDirectoryRow({
+                task,
+                runId: run.run_id,
+                session: agent.session,
+                title: finalTitle,
+                cwd,
+                toolPolicy,
+                status: 'completed',
+            });
         }
         catch (error) {
             if (running.cancelled) {
@@ -569,6 +581,15 @@ class WorkerLoop {
                         status: 'failed',
                     });
                 }
+                this.queueDirectoryRow({
+                    task,
+                    runId: run.run_id,
+                    session: agent.session,
+                    title: running.title,
+                    cwd,
+                    toolPolicy,
+                    status: 'failed',
+                });
             }
         }
         finally {
@@ -720,6 +741,45 @@ class WorkerLoop {
         }
         this.pendingDigests.length = 0;
         this.pendingDigests.push(...remaining);
+    }
+    /**
+     * Merge the finished run into the local directory mirror and push the row
+     * to the Hub (fire-and-forget; failures are logged only).
+     */
+    queueDirectoryRow(options) {
+        if (!this.options.directoryEnabled)
+            return;
+        const invocation = {
+            task_id: options.task.task_id,
+            run_id: options.runId,
+            objective: options.task.objective.slice(0, 500),
+            status: options.status,
+            at: Date.now(),
+        };
+        const path = mirrorPath(dirname(this.options.statePath));
+        const mirror = loadMirror(path);
+        const merged = mergeInvocation({
+            row: mirror.rows[options.session.id],
+            sessionId: options.session.id,
+            workspace: options.cwd,
+            title: options.title,
+            sessionMode: this.options.sessionMode,
+            toolPolicy: options.toolPolicy,
+            invocation,
+        });
+        mirror.rows[options.session.id] = merged;
+        saveMirror(path, mirror);
+        void this.hub
+            .upsertDirectoryRow({
+            session_id: options.session.id,
+            row: merged,
+            principal_id: this.options.principalId,
+            actor_id: this.options.actorId,
+            node_id: this.options.nodeId,
+        })
+            .catch((error) => {
+            this.ctx.logger.warn(`agent-society-worker directory upsert failed: ${message(error)}`);
+        });
     }
     async executeSelfUpdate(claim) {
         const { task, run } = claim;

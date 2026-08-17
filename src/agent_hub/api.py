@@ -27,6 +27,7 @@ from .domain import (
 from .errors import ApiError, map_error
 from .store import AgentHubStore
 from .object_store import ObjectStore
+from urllib.parse import unquote
 
 
 class AgentHubApi:
@@ -257,6 +258,55 @@ class AgentHubApi:
                     principal_id=principal_scope,
                 )
             }
+        if path == f"{self.prefix}/directory":
+            query = parse_qs(query_string)
+            try:
+                after_seq = int((query.get("after_seq") or ["0"])[0])
+                limit = int((query.get("limit") or ["100"])[0])
+            except ValueError as exc:
+                raise ValueError("after_seq and limit must be integers") from exc
+            return HTTPStatus.OK, {
+                "rows": self.store.list_directory(
+                    tenant_id=tenant_id or "default",
+                    principal_id=principal_scope,
+                    after_seq=after_seq,
+                    query=(query.get("query") or [None])[0],
+                    status=(query.get("status") or [None])[0],
+                    actor_id=(query.get("actor_id") or [None])[0],
+                    limit=limit,
+                )
+            }
+        parts = self._parts(path)
+        if len(parts) == 2 and parts[0] == "directory":
+            session_id = unquote(parts[1])
+            row = self.store.get_directory_row(
+                tenant_id=tenant_id or "default",
+                principal_id=principal_scope,
+                session_id=session_id,
+            )
+            if row is None:
+                return None
+            query = parse_qs(query_string)
+            try:
+                depth = int((query.get("depth") or ["0"])[0])
+            except ValueError as exc:
+                raise ValueError("depth must be an integer") from exc
+            depth = min(max(depth, 0), 3)
+            if depth >= 2:
+                consensus = self.store.list_shared_events(
+                    tenant_id=tenant_id or "default",
+                    principal_id=principal_scope,
+                    scope="consensus",
+                    session_id=session_id,
+                    limit=20,
+                )
+                row["consensus"] = consensus[-3:]
+            if depth >= 3:
+                row["artifacts"] = self.store.artifacts_for_session(
+                    tenant_id=tenant_id or "default",
+                    session_id=session_id,
+                )
+            return HTTPStatus.OK, {"row": row}
 
         parts = self._parts(path)
         if len(parts) == 2 and parts[0] == "tenants":
@@ -646,6 +696,38 @@ class AgentHubApi:
                 },
             )
             return HTTPStatus.CREATED, {"event": event}
+        parts = self._parts(path)
+        if len(parts) == 2 and parts[0] == "directory":
+            session_id = unquote(parts[1])
+            row_payload = dict(payload)
+            scoped = dict(payload)
+            scoped.setdefault("session_id", session_id)
+            if context is not None and not context.is_admin:
+                scope_principal = self._principal_scope(context)
+                if context.actor_id is not None:
+                    scoped["actor_id"] = context.actor_id
+                if context.node_id is not None:
+                    scoped["node_id"] = context.node_id
+                if scope_principal is not None:
+                    scoped["principal_id"] = scope_principal
+            row = self.store.upsert_directory_row(
+                tenant_id=tenant_id or "default",
+                principal_id=required_text(scoped, "principal_id", maximum=200),
+                session_id=session_id,
+                actor_id=required_text(scoped, "actor_id", maximum=200),
+                node_id=required_text(scoped, "node_id", maximum=200),
+                row=row_payload,
+            )
+            self._notify_shared(
+                tenant_id or "default",
+                "directory/updated",
+                {
+                    "session_id": session_id,
+                    "seq": int(row["seq"]),
+                    "status": row_payload.get("status"),
+                },
+            )
+            return HTTPStatus.CREATED, {"row": row}
 
         parts = self._parts(path)
         if len(parts) == 3 and parts[0] == "tenants" and parts[2] == "tokens":

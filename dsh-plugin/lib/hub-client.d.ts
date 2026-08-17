@@ -134,6 +134,24 @@ export declare class HubClient {
         session_id?: string;
         limit?: number;
     }): Promise<Array<Record<string, unknown>>>;
+    /** Push one session directory row (identity enforced from the token). */
+    upsertDirectoryRow(item: {
+        session_id: string;
+        row: object;
+        principal_id?: string;
+        actor_id?: string;
+        node_id?: string;
+    }): Promise<Record<string, unknown>>;
+    /** Incremental pull of the directory (latest row per session). */
+    listDirectory(item?: {
+        after_seq?: number;
+        query?: string;
+        status?: string;
+        actor_id?: string;
+        limit?: number;
+    }): Promise<Array<Record<string, unknown>>>;
+    /** Drill into one session directory row (depth 0..3). */
+    getDirectoryRow(sessionId: string, depth?: number): Promise<Record<string, unknown> | undefined>;
     /**
      * Subscribe to the worker push channel (`/v1/hub/events`) and invoke
      * `onEvent` for every SSE event. Resolves when the stream ends normally

@@ -29,6 +29,12 @@ import {
 } from './hub-client.js'
 import { buildSessionDigest, type ConsensusDigest } from './digest.js'
 import {
+  loadMirror,
+  mergeInvocation,
+  mirrorPath,
+  saveMirror,
+} from './directory.js'
+import {
   isSelfUpdateTask,
   runPluginSelfUpdate,
   SELF_UPDATE_EXIT_CODE,
@@ -58,6 +64,8 @@ export interface Config {
   maxTokens?: number
   /** Append consensus digests to the Hub shared memory (AGENT_SOCIETY_CONTEXT). */
   contextEnabled?: boolean
+  /** Push session directory rows / invocations (default on). */
+  directoryEnabled?: boolean
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -78,6 +86,7 @@ export const Config: Schema<Config> = Schema.object({
   model: Schema.string().required(false),
   maxTokens: Schema.number().min(1).required(false),
   contextEnabled: Schema.boolean().required(false),
+  directoryEnabled: Schema.boolean().required(false),
 })
 
 interface ActiveAgent {
@@ -206,6 +215,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     selfUpdateEnabled,
     repositoryRoot,
     contextEnabled: config.contextEnabled ?? process.env.AGENT_SOCIETY_CONTEXT === '1',
+    directoryEnabled: config.directoryEnabled ?? process.env.AGENT_SOCIETY_DIRECTORY !== '0',
     provider: config.provider ?? 'deepseek-official',
     model: config.model ?? process.env.DSH_MODEL ?? 'deepseek-v4-flash',
     maxTokens: config.maxTokens,
@@ -270,6 +280,7 @@ class WorkerLoop {
       selfUpdateEnabled: boolean
       repositoryRoot: string
       contextEnabled: boolean
+      directoryEnabled: boolean
       provider: string
       model: string
       maxTokens: number | undefined
@@ -684,6 +695,15 @@ class WorkerLoop {
           status: 'completed',
         })
       }
+      this.queueDirectoryRow({
+        task,
+        runId: run.run_id,
+        session: agent.session,
+        title: finalTitle,
+        cwd,
+        toolPolicy,
+        status: 'completed',
+      })
     } catch (error) {
       if (running.cancelled) {
         await this.markRunCancelled(running)
@@ -715,6 +735,15 @@ class WorkerLoop {
             status: 'failed',
           })
         }
+        this.queueDirectoryRow({
+          task,
+          runId: run.run_id,
+          session: agent.session,
+          title: running.title,
+          cwd,
+          toolPolicy,
+          status: 'failed',
+        })
       }
     } finally {
       this.running = undefined
@@ -884,6 +913,55 @@ class WorkerLoop {
     }
     this.pendingDigests.length = 0
     this.pendingDigests.push(...remaining)
+  }
+
+  /**
+   * Merge the finished run into the local directory mirror and push the row
+   * to the Hub (fire-and-forget; failures are logged only).
+   */
+  private queueDirectoryRow(options: {
+    task: HubTask
+    runId: string
+    session: Session
+    title: string | undefined
+    cwd: string
+    toolPolicy: ToolPolicy
+    status: 'completed' | 'failed'
+  }): void {
+    if (!this.options.directoryEnabled) return
+    const invocation = {
+      task_id: options.task.task_id,
+      run_id: options.runId,
+      objective: options.task.objective.slice(0, 500),
+      status: options.status,
+      at: Date.now(),
+    }
+    const path = mirrorPath(dirname(this.options.statePath))
+    const mirror = loadMirror(path)
+    const merged = mergeInvocation({
+      row: mirror.rows[options.session.id],
+      sessionId: options.session.id,
+      workspace: options.cwd,
+      title: options.title,
+      sessionMode: this.options.sessionMode,
+      toolPolicy: options.toolPolicy,
+      invocation,
+    })
+    mirror.rows[options.session.id] = merged
+    saveMirror(path, mirror)
+    void this.hub
+      .upsertDirectoryRow({
+        session_id: options.session.id,
+        row: merged,
+        principal_id: this.options.principalId,
+        actor_id: this.options.actorId,
+        node_id: this.options.nodeId,
+      })
+      .catch((error: unknown) => {
+        this.ctx.logger.warn(
+          `agent-society-worker directory upsert failed: ${message(error)}`,
+        )
+      })
   }
 
   private async executeSelfUpdate(claim: HubClaim): Promise<void> {

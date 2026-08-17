@@ -164,6 +164,174 @@ class SharedStore:
             )
             return int(cursor.rowcount or 0)
 
+    # ── Directory rows (scope='directory') ────────────────────────────────
+
+    DIRECTORY_TTL_HOURS = 720  # 30 days idle before the row expires
+
+    def upsert_directory_row(
+        self,
+        *,
+        tenant_id: str,
+        principal_id: str,
+        session_id: str,
+        actor_id: str,
+        node_id: str,
+        row: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Push one session directory row.
+
+        The row is appended as a shared event with a fresh event_id (the
+        latest event per session wins at read time), so incremental sync via
+        seq works while the directory stays deduplicated.
+        """
+        node = self._node(node_id)
+        if node["tenant_id"] != tenant_id:
+            raise PermissionError("node does not belong to tenant")
+        return self.append_shared_event(
+            SharedEventAppend(
+                scope="directory",
+                kind="directory_upsert",
+                payload=row,
+                principal_id=principal_id,
+                session_id=session_id,
+                actor_id=actor_id,
+                node_id=node_id,
+                ttl_hours=self.DIRECTORY_TTL_HOURS,
+                event_id=f"dir_{self._random_id()}",
+            ),
+            tenant_id=tenant_id,
+        )
+
+    def list_directory(
+        self,
+        *,
+        tenant_id: str,
+        principal_id: str | None = None,
+        after_seq: int = 0,
+        query: str | None = None,
+        status: str | None = None,
+        actor_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """List the latest directory row per session (deduplicated by seq)."""
+        after_seq = max(after_seq, 0)
+        limit = min(max(limit, 1), 500)
+        now = time.time()
+        where = [
+            "scope='directory'",
+            "tenant_id=?",
+            "(expires_at IS NULL OR expires_at>?)",
+        ]
+        params: list[Any] = [tenant_id, now]
+        if principal_id is not None:
+            where.append("principal_id=?")
+            params.append(principal_id)
+        if query:
+            where.append("payload_json LIKE ? ESCAPE '\\'")
+            params.append(f"%{_like_pattern(query)}%")
+        if status:
+            where.append("payload_json LIKE ? ESCAPE '\\'")
+            params.append(f'%\"status\":\"{_like_pattern(status)}\"%')
+        if actor_id is not None:
+            where.append("actor_id=?")
+            params.append(actor_id)
+        params.append(after_seq)
+        params.append(limit)
+        rows = self._connection.execute(
+            f"""
+            SELECT d.* FROM hub_shared_events d
+            JOIN (
+                SELECT session_id, MAX(seq) AS max_seq FROM hub_shared_events
+                WHERE {" AND ".join(where)} AND session_id IS NOT NULL
+                GROUP BY session_id
+            ) latest ON latest.session_id=d.session_id AND latest.max_seq=d.seq
+            WHERE d.scope='directory' AND d.seq>?
+            ORDER BY d.seq DESC LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        return [self._shared_event_dict(row) for row in rows]
+
+    def get_directory_row(
+        self,
+        *,
+        tenant_id: str,
+        principal_id: str | None,
+        session_id: str,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            params: list[Any] = [tenant_id, session_id, time.time()]
+            where = [
+                "tenant_id=?",
+                "session_id=?",
+                "scope='directory'",
+                "(expires_at IS NULL OR expires_at>?)",
+            ]
+            if principal_id is not None:
+                where.append("principal_id=?")
+                params.append(principal_id)
+            row = self._connection.execute(
+                f"""
+                SELECT * FROM hub_shared_events
+                WHERE {" AND ".join(where)}
+                ORDER BY seq DESC LIMIT 1
+                """,
+                tuple(params),
+            ).fetchone()
+            return self._shared_event_dict(row) if row is not None else None
+
+    def artifacts_for_session(
+        self,
+        *,
+        tenant_id: str,
+        session_id: str,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Artifacts whose runs recorded this session (dsh_session_id)."""
+        limit = min(max(limit, 1), 100)
+        pattern = f'%"dsh_session_id":"{session_id}"%'
+        with self._lock:
+            runs = self._connection.execute(
+                """
+                SELECT run_id, task_id FROM hub_runs
+                WHERE tenant_id=? AND result_json LIKE ? ESCAPE '\\'
+                ORDER BY started_at DESC LIMIT 50
+                """,
+                (tenant_id, pattern),
+            ).fetchall()
+            run_ids = [str(run["run_id"]) for run in runs]
+            task_ids = [str(run["task_id"]) for run in runs if run["task_id"]]
+            if not run_ids and not task_ids:
+                return []
+            clauses: list[str] = []
+            params: list[Any] = [tenant_id]
+            if run_ids:
+                clauses.append(f"run_id IN ({','.join('?' for _ in run_ids)})")
+                params.extend(run_ids)
+            if task_ids:
+                clauses.append(f"task_id IN ({','.join('?' for _ in task_ids)})")
+                params.extend(task_ids)
+            params.append(limit)
+            rows = self._connection.execute(
+                f"""
+                SELECT * FROM hub_artifacts
+                WHERE tenant_id=? AND ({" OR ".join(clauses)})
+                ORDER BY created_at DESC LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+            return [
+                {
+                    "artifact_id": str(row["artifact_id"]),
+                    "run_id": row["run_id"],
+                    "task_id": row["task_id"],
+                    "name": str(row["name"]),
+                    "media_type": str(row["media_type"]),
+                    "uri": str(row["uri"]),
+                }
+                for row in rows
+            ]
+
     def _shared_event_by_seq(self, seq: int) -> dict[str, Any]:
         row = self._connection.execute(
             "SELECT * FROM hub_shared_events WHERE seq=?", (seq,)
@@ -194,3 +362,12 @@ class SharedStore:
         import uuid
 
         return uuid.uuid4().hex
+
+
+def _like_pattern(value: str) -> str:
+    """Escape LIKE wildcards so user input matches literally."""
+    return (
+        value.replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )

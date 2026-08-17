@@ -61,6 +61,9 @@ class McpServiceTests(unittest.TestCase):
                     "hub_cancel_task",
                     "hub_context_append",
                     "hub_context_read",
+                    "hub_directory_list",
+                    "hub_directory_get",
+                    "hub_directory_search",
                 },
             )
 

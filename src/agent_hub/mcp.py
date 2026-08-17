@@ -138,6 +138,55 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "hub_directory_list",
+        "description": (
+            "List the session/agent directory of your principal: one row per "
+            "session (id, actor, node, title, workspace, status, last active)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "status": {"type": "string"},
+                "actor_id": {"type": "string"},
+                "limit": {"type": "integer"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "hub_directory_get",
+        "description": (
+            "Drill into one session directory row. depth 0 = identity, "
+            "1 = invocation records, 2 = consensus digest, 3 = artifact refs."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "depth": {"type": "integer"},
+            },
+            "required": ["session_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "hub_directory_search",
+        "description": (
+            "Search the session/agent directory by title, workspace, or "
+            "objective text."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer"},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -289,6 +338,34 @@ class McpService:
                 )
                 _, result = self.api.get("/v1/hub/contexts", query, context)
                 return self._tool_result({"events": result["events"]})
+            if name == "hub_directory_list":
+                query = "&".join(
+                    f"{key}={quote(str(value))}"
+                    for key, value in arguments.items()
+                    if value is not None
+                )
+                _, result = self.api.get("/v1/hub/directory", query, context)
+                return self._tool_result({"rows": result["rows"]})
+            if name == "hub_directory_get":
+                session_id = self._required(arguments, "session_id")
+                depth = arguments.get("depth", 1)
+                depth = depth if isinstance(depth, int) else 1
+                _, result = self.api.get(
+                    f"/v1/hub/directory/{quote(session_id, safe='')}",
+                    f"depth={min(max(depth, 0), 3)}",
+                    context,
+                )
+                return self._tool_result({"row": result["row"]})
+            if name == "hub_directory_search":
+                query_value = self._required(arguments, "query")
+                limit = arguments.get("limit", 20)
+                limit = limit if isinstance(limit, int) else 20
+                _, result = self.api.get(
+                    "/v1/hub/directory",
+                    f"query={quote(query_value)}&limit={limit}",
+                    context,
+                )
+                return self._tool_result({"rows": result["rows"]})
             return self._tool_error(-32601, f"Unknown tool: {name}")
         except (ApiError, ValueError) as exc:
             return self._tool_error(-32602, str(exc))

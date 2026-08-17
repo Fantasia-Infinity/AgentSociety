@@ -23,6 +23,10 @@
       "types": "./lib/web-tool-guard.d.ts",
       "default": "./lib/web-tool-guard.js"
     },
+    "./directory": {
+      "types": "./lib/directory-plugin.d.ts",
+      "default": "./lib/directory-plugin.js"
+    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
