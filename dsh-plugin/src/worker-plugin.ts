@@ -27,6 +27,14 @@ import {
   type HubClaim,
   type HubTask,
 } from './hub-client.js'
+import { buildSessionDigest, type ConsensusDigest } from './digest.js'
+import { answerQuestionWithSession } from './answer.js'
+import {
+  loadMirror,
+  mergeInvocation,
+  mirrorPath,
+  saveMirror,
+} from './directory.js'
 import {
   isSelfUpdateTask,
   runPluginSelfUpdate,
@@ -55,6 +63,12 @@ export interface Config {
   provider?: string
   model?: string
   maxTokens?: number
+  /** Append consensus digests to the Hub shared memory (AGENT_SOCIETY_CONTEXT). */
+  contextEnabled?: boolean
+  /** Push session directory rows / invocations (default on). */
+  directoryEnabled?: boolean
+  /** Answer Hub questions addressed to this actor (default on). */
+  questionsEnabled?: boolean
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -74,6 +88,9 @@ export const Config: Schema<Config> = Schema.object({
   provider: Schema.string().required(false),
   model: Schema.string().required(false),
   maxTokens: Schema.number().min(1).required(false),
+  contextEnabled: Schema.boolean().required(false),
+  directoryEnabled: Schema.boolean().required(false),
+  questionsEnabled: Schema.boolean().required(false),
 })
 
 interface ActiveAgent {
@@ -201,6 +218,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     toolPolicy,
     selfUpdateEnabled,
     repositoryRoot,
+    contextEnabled: config.contextEnabled ?? process.env.AGENT_SOCIETY_CONTEXT === '1',
+    directoryEnabled: config.directoryEnabled ?? process.env.AGENT_SOCIETY_DIRECTORY !== '0',
+    questionsEnabled: config.questionsEnabled ?? process.env.AGENT_SOCIETY_QUESTIONS !== '0',
     provider: config.provider ?? 'deepseek-official',
     model: config.model ?? process.env.DSH_MODEL ?? 'deepseek-v4-flash',
     maxTokens: config.maxTokens,
@@ -217,11 +237,16 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const maintenance = ctx.setInterval(() => {
     void worker.maintain()
   }, 2_000)
+  const progress = ctx.setInterval(() => {
+    void worker.reportProgress()
+  }, 15_000)
   void worker.tick()
   void worker.maintain()
+  void worker.startSse()
   ctx.effect(() => () => {
     timer()
     maintenance()
+    progress()
     void worker.dispose()
   })
 }
@@ -234,6 +259,14 @@ class WorkerLoop {
   private selfUpdating:
     | { taskId: string; runId: string; leaseToken: string }
     | undefined
+  /** True while the SSE push channel is connected (controls/cancel are
+   *  event-driven then; the polling fallback below covers disconnects). */
+  private sseActive = false
+  private sseAbort: AbortController | undefined
+  private sseBackoffMs = 1_000
+  private lastPartialSnapshot: string | undefined
+  /** Consensus digests awaiting upload (fire-and-forget with bounded retries). */
+  private readonly pendingDigests: Array<{ digest: ConsensusDigest; attempts: number }> = []
 
   constructor(
     private readonly ctx: Context,
@@ -251,6 +284,9 @@ class WorkerLoop {
       toolPolicy: ToolPolicy
       selfUpdateEnabled: boolean
       repositoryRoot: string
+      contextEnabled: boolean
+      directoryEnabled: boolean
+      questionsEnabled: boolean
       provider: string
       model: string
       maxTokens: number | undefined
@@ -277,6 +313,8 @@ class WorkerLoop {
         'dsh',
         'code',
         'hub-task',
+        'push',
+        'ask',
         ...(this.options.toolPolicy === 'full' ? ['workspace-write'] : []),
       ],
       metadata: {
@@ -302,10 +340,13 @@ class WorkerLoop {
     if (this.busy || this.disposed) return
     this.busy = true
     try {
+      // Long-poll claim: the Hub holds the request until a matching task is
+      // available (capped at 30s server-side), so dispatch latency is not
+      // bound by the poll interval.
       const claim = await this.hub.claimTask({
         actor_id: this.options.actorId,
         node_id: this.options.nodeId,
-        wait_seconds: 0,
+        wait_seconds: Math.min(Math.max(this.options.pollSeconds, 1), 30),
         lease_seconds: this.options.leaseSeconds,
       })
       if (claim) await this.execute(claim)
@@ -318,10 +359,70 @@ class WorkerLoop {
     }
   }
 
+  /**
+   * Keep the SSE push channel connected with backoff. While it is up,
+   * controls and cancellation arrive as events (sub-second latency);
+   * `maintain()` then only heartbeats and renews the task lease.
+   */
+  async startSse(): Promise<void> {
+    while (!this.disposed) {
+      const abort = new AbortController()
+      this.sseAbort = abort
+      try {
+        await this.hub.subscribeEvents(
+          this.options.nodeId,
+          (event) => this.onSseEvent(event),
+          { signal: abort.signal },
+        )
+        // Stream ended (server closed or aborted). Drop to the polling
+        // fallback and try again shortly.
+        this.sseActive = false
+        if (this.disposed) return
+        await sleep(this.sseBackoffMs)
+      } catch (error) {
+        if (this.disposed || abort.signal.aborted) return
+        this.sseActive = false
+        this.ctx.logger.warn(
+          `agent-society-worker SSE disconnected (${message(error)}); polling fallback active`,
+        )
+        await sleep(this.sseBackoffMs)
+        this.sseBackoffMs = Math.min(this.sseBackoffMs * 2, 30_000)
+      }
+    }
+  }
+
+  private onSseEvent(event: {
+    name: string
+    data: Record<string, unknown>
+  }): void {
+    this.sseActive = true
+    this.sseBackoffMs = 1_000
+    if (event.name === 'question/new') {
+      // Answer questions when idle; never interrupt a running task.
+      if (this.running) return
+      void this.answerQuestions()
+      return
+    }
+    const running = this.running
+    if (!running) return
+    if (event.name === 'control/new') {
+      if (event.data.task_id !== running.taskId) return
+      void this.claimControls(running)
+      return
+    }
+    if (event.name === 'task/cancelled') {
+      if (event.data.task_id !== running.taskId) return
+      running.cancelled = true
+      running.agent.cancel({ kind: 'hook', reason: 'hub-task-cancelled' })
+      void this.markRunCancelled(running)
+    }
+  }
+
   async maintain(): Promise<void> {
     if (this.disposed) return
     try {
       await this.hub.heartbeat(this.options.nodeId)
+      await this.flushDigests()
       const running = this.running
       if (!running) return
       await this.hub.updateTask(running.taskId, {
@@ -330,6 +431,8 @@ class WorkerLoop {
         status: 'working',
         message: 'DeepSeek Harness session active',
       })
+      if (this.sseActive) return
+      // Polling fallback while the push channel is down.
       const task = await this.hub.getTask(running.taskId)
       if (task.status === 'cancelled') {
         running.cancelled = true
@@ -337,6 +440,76 @@ class WorkerLoop {
         await this.markRunCancelled(running)
         return
       }
+      await this.claimControls(running)
+      if (!this.running) await this.answerQuestions()
+    } catch (error) {
+      this.ctx.logger.warn(
+        `agent-society-worker maintenance failed: ${message(error)}`,
+      )
+    }
+  }
+
+  /**
+   * Answer Hub questions addressed to this actor. Only runs while the worker
+   * is idle (a running task is never interrupted); each question gets a
+   * fresh, tool-free session answered by the configured model, and the
+   * answer is written back to the Hub (and into the shared memory).
+   */
+  private async answerQuestions(): Promise<void> {
+    if (!this.options.questionsEnabled || this.disposed || this.running) return
+    let questions: Array<Record<string, unknown>>
+    try {
+      questions = await this.hub.claimQuestions({
+        actor_id: this.options.actorId,
+        node_id: this.options.nodeId,
+        limit: 3,
+      })
+    } catch (error) {
+      this.ctx.logger.warn(
+        `agent-society-worker question claim failed: ${message(error)}`,
+      )
+      return
+    }
+    for (const question of questions) {
+      if (this.running || this.disposed) return
+      const questionId = String(question.question_id)
+      const leaseToken = String(question.lease_token)
+      const text = String(question.message ?? '')
+      const answeredBy = question.target_actor_id
+      try {
+        const answer = await this.generateAnswer(text)
+        await this.hub.answerQuestion(questionId, {
+          lease_token: leaseToken,
+          answer_text: answer,
+        })
+        this.ctx.logger.info(
+          `agent-society-worker answered ${questionId}${answeredBy ? ` for ${answeredBy}` : ''}`,
+        )
+      } catch (error) {
+        // Leave the question leased; it becomes reclaimable after the
+        // 120s question lease expires.
+        this.ctx.logger.warn(
+          `agent-society-worker could not answer ${questionId}: ${message(error)}`,
+        )
+      }
+    }
+  }
+
+  /** One bounded, tool-free answering turn. */
+  private async generateAnswer(question: string): Promise<string> {
+    return answerQuestionWithSession(this.ctx, question, {
+      provider: this.options.provider,
+      model: this.options.model,
+      ...(this.options.maxTokens === undefined
+        ? {}
+        : { maxTokens: this.options.maxTokens }),
+      cwd: this.options.workspaceRoot,
+      setup: agentSetup('no_tools'),
+    })
+  }
+
+  private async claimControls(running: RunningTask): Promise<void> {
+    try {
       const controls = await this.hub.claimTaskControls(running.taskId, {
         run_id: running.runId,
         lease_token: running.leaseToken,
@@ -365,7 +538,58 @@ class WorkerLoop {
       }
     } catch (error) {
       this.ctx.logger.warn(
-        `agent-society-worker maintenance failed: ${message(error)}`,
+        `agent-society-worker control claim failed: ${message(error)}`,
+      )
+    }
+  }
+
+  /**
+   * Publish a bounded progressive snapshot (phase, tool counts) as
+   * `partial_result` on the Hub. Observers (`agent observe`, the web
+   * dashboard) can then follow live progress without waiting for the
+   * terminal result. Reports only when the snapshot actually changed.
+   */
+  async reportProgress(): Promise<void> {
+    const running = this.running
+    if (!running || this.disposed) return
+    try {
+      const events = running.agent.session.events
+      const toolCalls = events.filter((event) => event?.type === 'tool/call')
+      const lastToolEvent = toolCalls[toolCalls.length - 1]
+      let lastTool: string | undefined
+      if (lastToolEvent) {
+        const raw = lastToolEvent.data.arguments
+        try {
+          const parsed: unknown = JSON.parse(raw)
+          if (
+            parsed !== null &&
+            typeof parsed === 'object' &&
+            typeof (parsed as Record<string, unknown>).name === 'string'
+          ) {
+            lastTool = (parsed as Record<string, unknown>).name as string
+          }
+        } catch {
+          // Raw arguments are not JSON; keep lastTool undefined.
+        }
+      }
+      const snapshot = JSON.stringify({
+        phase: 'working',
+        toolCount: toolCalls.length,
+        messageCount: events.filter((event) => event?.type === 'user/message' || event?.type === 'assistant/message').length,
+        lastTool,
+      })
+      if (snapshot === this.lastPartialSnapshot) return
+      this.lastPartialSnapshot = snapshot
+      await this.hub.updateTask(running.taskId, {
+        run_id: running.runId,
+        lease_token: running.leaseToken,
+        status: 'working',
+        message: 'DeepSeek Harness session active',
+        partial_result: JSON.parse(snapshot) as Record<string, unknown>,
+      })
+    } catch (error) {
+      this.ctx.logger.warn(
+        `agent-society-worker progress report failed: ${message(error)}`,
       )
     }
   }
@@ -532,6 +756,26 @@ class WorkerLoop {
       this.ctx.logger.info(
         `agent-society-worker completed ${task.task_id} in ${active.sessionId}`,
       )
+      if (this.options.contextEnabled) {
+        this.queueDigest({
+          task,
+          runId: run.run_id,
+          session: agent.session,
+          title: finalTitle,
+          cwd,
+          toolPolicy,
+          status: 'completed',
+        })
+      }
+      this.queueDirectoryRow({
+        task,
+        runId: run.run_id,
+        session: agent.session,
+        title: finalTitle,
+        cwd,
+        toolPolicy,
+        status: 'completed',
+      })
     } catch (error) {
       if (running.cancelled) {
         await this.markRunCancelled(running)
@@ -551,6 +795,26 @@ class WorkerLoop {
           ...(transcript === undefined
             ? {}
             : { transcriptArtifactId: transcript.artifact_id }),
+        })
+        if (this.options.contextEnabled) {
+          this.queueDigest({
+            task,
+            runId: run.run_id,
+            session: agent.session,
+            title: running.title,
+            cwd,
+            toolPolicy,
+            status: 'failed',
+          })
+        }
+        this.queueDirectoryRow({
+          task,
+          runId: run.run_id,
+          session: agent.session,
+          title: running.title,
+          cwd,
+          toolPolicy,
+          status: 'failed',
         })
       }
     } finally {
@@ -655,6 +919,122 @@ class WorkerLoop {
       )
       return undefined
     }
+  }
+
+  /**
+   * Enqueue a deterministic consensus digest for this task run. Uploads are
+   * fire-and-forget: failure never blocks task completion, and the idempotent
+   * event_id makes a later retry a no-op on the Hub.
+   */
+  private queueDigest(options: {
+    task: HubTask
+    runId: string
+    session: Session
+    title: string | undefined
+    cwd: string
+    toolPolicy: ToolPolicy
+    status: 'completed' | 'failed'
+  }): void {
+    const events = options.session.events
+    const toolCount = events.filter((event) => event?.type === 'tool/call').length
+    const messageCount = events.filter(
+      (event) => event?.type === 'user/message' || event?.type === 'assistant/message',
+    ).length
+    let resultText = ''
+    try {
+      resultText = lastAssistantText(events)
+    } catch {
+      // A session without any assistant message still gets a digest.
+    }
+    const digest = buildSessionDigest({
+      principalId: this.options.principalId,
+      sessionId: options.session.id,
+      actorId: this.options.actorId,
+      nodeId: this.options.nodeId,
+      taskId: options.task.task_id,
+      runId: options.runId,
+      title: options.title,
+      workspace: options.cwd,
+      objective: options.task.objective,
+      status: options.status,
+      resultText,
+      toolCount,
+      messageCount,
+      createdAt: Date.now(),
+    })
+    this.pendingDigests.push({ digest, attempts: 0 })
+    void this.flushDigests()
+  }
+
+  /** Upload queued digests; bounded retries, failures are logged only. */
+  private async flushDigests(): Promise<void> {
+    if (this.pendingDigests.length === 0) return
+    const remaining: Array<{ digest: ConsensusDigest; attempts: number }> = []
+    for (const pending of this.pendingDigests) {
+      try {
+        await this.hub.appendSharedEvent(pending.digest)
+      } catch (error) {
+        if (pending.attempts < 3) {
+          remaining.push({ digest: pending.digest, attempts: pending.attempts + 1 })
+        } else {
+          this.ctx.logger.warn(
+            `agent-society-worker digest upload dropped for ${pending.digest.session_id}: ${message(error)}`,
+          )
+        }
+      }
+    }
+    this.pendingDigests.length = 0
+    this.pendingDigests.push(...remaining)
+  }
+
+  /**
+   * Merge the finished run into the local directory mirror and push the row
+   * to the Hub (fire-and-forget; failures are logged only).
+   */
+  private queueDirectoryRow(options: {
+    task: HubTask
+    runId: string
+    session: Session
+    title: string | undefined
+    cwd: string
+    toolPolicy: ToolPolicy
+    status: 'completed' | 'failed'
+  }): void {
+    if (!this.options.directoryEnabled) return
+    const invocation = {
+      task_id: options.task.task_id,
+      run_id: options.runId,
+      objective: options.task.objective.slice(0, 500),
+      status: options.status,
+      at: Date.now(),
+    }
+    const path = mirrorPath(dirname(this.options.statePath))
+    const mirror = loadMirror(path)
+    const merged = mergeInvocation({
+      row: mirror.rows[options.session.id],
+      sessionId: options.session.id,
+      workspace: options.cwd,
+      title: options.title,
+      sessionMode: this.options.sessionMode,
+      toolPolicy: options.toolPolicy,
+      actorId: this.options.actorId,
+      invocation,
+    })
+    mirror.rows[options.session.id] = merged
+    saveMirror(path, mirror)
+    void this.hub
+      .upsertDirectoryRow({
+        session_id: options.session.id,
+        row: merged,
+        principal_id: this.options.principalId,
+        actor_id: this.options.actorId,
+        node_id: this.options.nodeId,
+      })
+      .catch((error: unknown) => {
+        this.ctx.logger.warn(
+          `agent-society-worker directory upsert failed: ${message(error)}`,
+        )
+      })
   }
 
   private async executeSelfUpdate(claim: HubClaim): Promise<void> {
@@ -800,6 +1180,7 @@ class WorkerLoop {
 
   async dispose(): Promise<void> {
     this.disposed = true
+    this.sseAbort?.abort()
     for (const active of this.active.values()) {
       await active.handle.dispose()
     }
@@ -927,6 +1308,10 @@ function writeState(path: string, state: Record<string, string>): void {
 function stableSlug(value: string): string {
   const slug = value.toLowerCase().replace(/[^a-z0-9._-]+/gu, '-')
   return slug.replace(/^-+|-+$/gu, '') || 'node'
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function message(error: unknown): string {

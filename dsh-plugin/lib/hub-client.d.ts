@@ -104,6 +104,86 @@ export declare class HubClient {
         status: Exclude<HubTaskStatus, "submitted">;
         message?: string;
         result?: Record<string, unknown>;
+        /** Progressive observer state (phase, tool counts, ...). */
+        partial_result?: Record<string, unknown>;
+    }): Promise<void>;
+    /**
+     * Append one entry to the principal's shared memory (scope: consensus /
+     * directory / qa). Idempotent when `event_id` is supplied: the Hub returns
+     * the existing seq for a duplicate.
+     */
+    appendSharedEvent(item: {
+        scope?: string;
+        kind: string;
+        payload: Record<string, unknown>;
+        principal_id?: string;
+        session_id?: string;
+        actor_id?: string;
+        node_id?: string;
+        event_id?: string;
+        ttl_hours?: number;
+    }): Promise<{
+        seq: number;
+        event_id: string;
+    }>;
+    /** Incremental pull of the shared memory log (after_seq = resume point). */
+    listSharedEvents(item?: {
+        after_seq?: number;
+        scope?: string;
+        kind?: string;
+        session_id?: string;
+        limit?: number;
+    }): Promise<Array<Record<string, unknown>>>;
+    /** Push one session directory row (identity enforced from the token). */
+    upsertDirectoryRow(item: {
+        session_id: string;
+        row: object;
+        principal_id?: string;
+        actor_id?: string;
+        node_id?: string;
+    }): Promise<Record<string, unknown>>;
+    /** Incremental pull of the directory (latest row per session). */
+    listDirectory(item?: {
+        after_seq?: number;
+        query?: string;
+        status?: string;
+        actor_id?: string;
+        limit?: number;
+    }): Promise<Array<Record<string, unknown>>>;
+    /** Drill into one session directory row (depth 0..3). */
+    getDirectoryRow(sessionId: string, depth?: number): Promise<Record<string, unknown> | undefined>;
+    /** Ask another actor a question (blocking is the caller's job). */
+    createQuestion(item: {
+        target_actor_id: string;
+        message: string;
+        require?: string;
+        asker_task_id?: string;
+        asker_session_id?: string;
+    }): Promise<Record<string, unknown>>;
+    /** Claim pending questions addressed to this actor. */
+    claimQuestions(item: {
+        actor_id: string;
+        node_id: string;
+        limit?: number;
+    }): Promise<Array<Record<string, unknown>>>;
+    /** Submit the answer for one claimed question. */
+    answerQuestion(questionId: string, item: {
+        lease_token: string;
+        answer_text: string;
+    }): Promise<Record<string, unknown>>;
+    /** Read one question (polling for the asker side). */
+    getQuestion(questionId: string): Promise<Record<string, unknown>>;
+    /**
+     * Subscribe to the worker push channel (`/v1/hub/events`) and invoke
+     * `onEvent` for every SSE event. Resolves when the stream ends normally
+     * (server closed the connection) and rejects on transport errors; the
+     * caller owns reconnection with backoff.
+     */
+    subscribeEvents(nodeId: string, onEvent: (event: {
+        name: string;
+        data: Record<string, unknown>;
+    }) => void, options?: {
+        signal?: AbortSignal;
     }): Promise<void>;
     addArtifact(item: {
         name: string;

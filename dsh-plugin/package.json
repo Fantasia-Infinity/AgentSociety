@@ -23,6 +23,18 @@
       "types": "./lib/web-tool-guard.d.ts",
       "default": "./lib/web-tool-guard.js"
     },
+    "./directory": {
+      "types": "./lib/directory-plugin.d.ts",
+      "default": "./lib/directory-plugin.js"
+    },
+    "./directory-index": {
+      "types": "./lib/prompt-guard.d.ts",
+      "default": "./lib/prompt-guard.js"
+    },
+    "./question-bridge": {
+      "types": "./lib/question-bridge.d.ts",
+      "default": "./lib/question-bridge.js"
+    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
@@ -35,7 +47,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "check": "tsc -p tsconfig.json --noEmit"
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test test/*.test.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

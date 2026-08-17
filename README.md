@@ -241,9 +241,12 @@ npm --prefix dsh-plugin run build
   `./agent worker` 启动 dsh 进程内 worker；Pi 保留为兼容回退。
 - 已可用：跨设备任务派发、连续会话、MCP/Web/REST 入口、账号与节点凭据、
   多租户隔离、Codex/OpenCode 适配器、dsh worker 的 steer/follow-up/cancel、
-  工具策略、transcript artifact 和自更新。
+  工具策略、transcript artifact 和自更新；SSE 推送与长轮询领取、共享共识
+  上下文、会话/Agent 信息目录（递进式查询）、任务中按需问答与委派
+  （详见 [docs/shared-context.md](docs/shared-context.md)）。
 - 开发中：发布与安装体验（[combo repo](https://github.com/Fantasia-Infinity/dsh-agent-society-combo)）、
-  微信通道完善、更多 Agent 适配器、Web 租户自助管理。
+  微信通道完善、更多 Agent 适配器、Web 租户自助管理、浏览器问题卡片
+  （[docs/questions-web-card.md](docs/questions-web-card.md)）。
 
 想深入了解，从 [架构文档](docs/architecture.md) 开始。
 

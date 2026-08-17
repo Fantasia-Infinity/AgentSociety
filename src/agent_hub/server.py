@@ -5,6 +5,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
+import queue
 import secrets
 import threading
 import time
@@ -70,6 +71,77 @@ class HubHttpServer(ThreadingHTTPServer):
         self.disable_bootstrap = disable_bootstrap
         self.oidc_provider = oidc_provider
         self.rate_limiter = rate_limiter
+        # SSE subscribers for /v1/hub/events: one entry per connected worker
+        # node. Entries are {node_id, tenant_id, queue}; publish() fans a
+        # worker-relevant event out to the matching node's stream.
+        self._subscribers: list[dict[str, Any]] = []
+        self._subscribers_lock = threading.Lock()
+        self.api.on_event = self.publish
+        self.api.on_shared_event = self.publish_tenant
+
+    def publish_tenant(
+        self, tenant_id: str, event_name: str, data: dict[str, Any]
+    ) -> None:
+        """Fan one tenant-wide event (shared memory / directory) out to every
+        subscriber of that tenant."""
+        with self._subscribers_lock:
+            for subscriber in self._subscribers:
+                if subscriber["tenant_id"] != tenant_id:
+                    continue
+                stream_queue = subscriber["queue"]
+                try:
+                    stream_queue.put_nowait((event_name, data))
+                except queue.Full:
+                    try:
+                        stream_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        stream_queue.put_nowait((event_name, data))
+                    except queue.Full:
+                        pass
+
+    def publish(self, node_id: str, event_name: str, data: dict[str, Any]) -> None:
+        """Fan one worker-relevant event out to the matching node's SSE stream."""
+        if not node_id:
+            return
+        with self._subscribers_lock:
+            for subscriber in self._subscribers:
+                if subscriber["node_id"] != node_id:
+                    continue
+                queue = subscriber["queue"]
+                try:
+                    queue.put_nowait((event_name, data))
+                except queue.Full:
+                    # Drop the oldest event for this subscriber: a stuck
+                    # worker must not pin memory; the worker's polling
+                    # fallback still recovers the state.
+                    try:
+                        queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        queue.put_nowait((event_name, data))
+                    except queue.Full:
+                        pass
+
+    def subscribe(
+        self, node_id: str, tenant_id: str
+    ) -> "queue.Queue[tuple[str, dict[str, Any]]]":
+        stream_queue: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue(maxsize=100)
+        with self._subscribers_lock:
+            self._subscribers.append(
+                {"node_id": node_id, "tenant_id": tenant_id, "queue": stream_queue}
+            )
+        return stream_queue
+
+    def unsubscribe(self, stream_queue: "queue.Queue[tuple[str, dict[str, Any]]]") -> None:
+        with self._subscribers_lock:
+            self._subscribers = [
+                subscriber
+                for subscriber in self._subscribers
+                if subscriber["queue"] is not stream_queue
+            ]
 
 
 class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
@@ -85,6 +157,9 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
             return
         if parsed.path == "/health":
             self._send_json(HTTPStatus.OK, {"status": "ok"})
+            return
+        if parsed.path == "/v1/hub/events":
+            self._sse_events_stream(parse_qs(parsed.query))
             return
         if parsed.path == "/mcp":
             if self.server.mcp is None:
@@ -341,6 +416,73 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _sse_events_stream(self, query: dict[str, list[str]]) -> None:
+        """Worker push channel: long-lived SSE stream of worker-relevant events.
+
+        The worker subscribes with its node token; the server then pushes
+        `control/new`, `task/cancelled`, and (later phases) shared-context /
+        directory events to the matching node. `after_seq` is accepted for
+        forward compatibility with the resumable shared event stream.
+        """
+        context = self._authorized()
+        if context is None:
+            return
+        node_id = (query.get("node_id") or [""])[0].strip()
+        tenant_id = (query.get("tenant_id") or [""])[0].strip() or "default"
+        if not node_id:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "node_id is required"})
+            return
+        if context.role == "node":
+            if context.node_id != node_id:
+                self._send_json(
+                    HTTPStatus.FORBIDDEN, {"error": "node token cannot subscribe for another node"}
+                )
+                return
+            if context.tenant_id not in (None, tenant_id):
+                self._send_json(
+                    HTTPStatus.FORBIDDEN, {"error": "tenant mismatch"}
+                )
+                return
+        elif not context.is_admin:
+            self._send_json(HTTPStatus.FORBIDDEN, {"error": "node or admin token required"})
+            return
+
+        events = self.server.subscribe(node_id, tenant_id)
+        self.protocol_version = "HTTP/1.1"
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self._send_security_headers()
+        self.end_headers()
+        try:
+            self.wfile.write(b"retry: 30000\n\n")
+            self.wfile.write(
+                (
+                    'event: connected\ndata: {"node_id":'
+                    + json.dumps(node_id)
+                    + "}\n\n"
+                ).encode("utf-8")
+            )
+            self.wfile.flush()
+            keep_alive_until = time.monotonic() + 6 * 60 * 60
+            while time.monotonic() < keep_alive_until:
+                try:
+                    event_name, data = events.get(timeout=15)
+                except queue.Empty:
+                    self.wfile.write(b": keep-alive\n\n")
+                    self.wfile.flush()
+                    continue
+                payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+                self.wfile.write(
+                    f"event: {event_name}\ndata: ".encode("utf-8") + payload + b"\n\n"
+                )
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            logger.info("sse_events_disconnected node=%s", node_id)
+        finally:
+            self.server.unsubscribe(events)
+            self.close_connection = True
+
     def _send_mcp_endpoint(self) -> None:
         # MCP streamable HTTP expects GET /mcp to open a long-lived SSE stream.
         # Closing it right after the endpoint event makes clients reconnect
@@ -455,6 +597,18 @@ def main() -> None:
                     logger.info("purged_expired_auth_tokens count=%s", removed)
             except Exception:
                 logger.exception("purge_expired_auth_tokens_failed")
+            try:
+                removed = store.purge_expired_shared_events()
+                if removed:
+                    logger.info("purged_expired_shared_events count=%s", removed)
+            except Exception:
+                logger.exception("purge_expired_shared_events_failed")
+            try:
+                removed = store.expire_questions()
+                if removed:
+                    logger.info("expired_questions count=%s", removed)
+            except Exception:
+                logger.exception("expire_questions_failed")
 
     threading.Thread(
         target=purge_loop, name="hub-token-purge", daemon=True

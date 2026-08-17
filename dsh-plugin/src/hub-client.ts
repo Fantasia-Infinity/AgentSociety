@@ -169,12 +169,228 @@ export class HubClient {
       status: Exclude<HubTaskStatus, "submitted">;
       message?: string;
       result?: Record<string, unknown>;
+      /** Progressive observer state (phase, tool counts, ...). */
+      partial_result?: Record<string, unknown>;
     },
   ): Promise<void> {
+    const body: Record<string, unknown> = {
+      run_id: item.run_id,
+      lease_token: item.lease_token,
+      status: item.status,
+      message: item.message,
+      result: item.result ?? {},
+    };
+    if (item.partial_result !== undefined) {
+      body.partial_result = item.partial_result;
+    }
     await this.request(`/v1/hub/tasks/${encodeURIComponent(taskId)}/updates`, {
       method: "POST",
-      body: item,
+      body,
     });
+  }
+
+  /**
+   * Append one entry to the principal's shared memory (scope: consensus /
+   * directory / qa). Idempotent when `event_id` is supplied: the Hub returns
+   * the existing seq for a duplicate.
+   */
+  async appendSharedEvent(item: {
+    scope?: string;
+    kind: string;
+    payload: Record<string, unknown>;
+    principal_id?: string;
+    session_id?: string;
+    actor_id?: string;
+    node_id?: string;
+    event_id?: string;
+    ttl_hours?: number;
+  }): Promise<{ seq: number; event_id: string }> {
+    const body: Record<string, unknown> = { ...item };
+    const response = await this.request<{ event: { seq: number; event_id: string } }>(
+      "/v1/hub/contexts/append",
+      { method: "POST", body },
+    );
+    return response.event;
+  }
+
+  /** Incremental pull of the shared memory log (after_seq = resume point). */
+  async listSharedEvents(item: {
+    after_seq?: number;
+    scope?: string;
+    kind?: string;
+    session_id?: string;
+    limit?: number;
+  } = {}): Promise<Array<Record<string, unknown>>> {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(item)) {
+      if (value !== undefined) query.set(key, String(value));
+    }
+    const response = await this.request<{ events: Array<Record<string, unknown>> }>(
+      `/v1/hub/contexts${query.size > 0 ? `?${query.toString()}` : ""}`,
+      { method: "GET", body: undefined },
+    );
+    return response.events;
+  }
+
+  /** Push one session directory row (identity enforced from the token). */
+  async upsertDirectoryRow(item: {
+    session_id: string;
+    row: object;
+    principal_id?: string;
+    actor_id?: string;
+    node_id?: string;
+  }): Promise<Record<string, unknown>> {
+    const response = await this.request<{ row: Record<string, unknown> }>(
+      `/v1/hub/directory/${encodeURIComponent(item.session_id)}`,
+      {
+        method: "POST",
+        body: {
+          ...item.row,
+          principal_id: item.principal_id,
+          actor_id: item.actor_id,
+          node_id: item.node_id,
+        },
+      },
+    );
+    return response.row;
+  }
+
+  /** Incremental pull of the directory (latest row per session). */
+  async listDirectory(item: {
+    after_seq?: number;
+    query?: string;
+    status?: string;
+    actor_id?: string;
+    limit?: number;
+  } = {}): Promise<Array<Record<string, unknown>>> {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(item)) {
+      if (value !== undefined) query.set(key, String(value));
+    }
+    const response = await this.request<{ rows: Array<Record<string, unknown>> }>(
+      `/v1/hub/directory${query.size > 0 ? `?${query.toString()}` : ""}`,
+      { method: "GET", body: undefined },
+    );
+    return response.rows;
+  }
+
+  /** Drill into one session directory row (depth 0..3). */
+  async getDirectoryRow(
+    sessionId: string,
+    depth = 0,
+  ): Promise<Record<string, unknown> | undefined> {
+    const response = await this.request<{ row: Record<string, unknown> }>(
+      `/v1/hub/directory/${encodeURIComponent(sessionId)}?depth=${Math.min(Math.max(depth, 0), 3)}`,
+      { method: "GET", body: undefined },
+    );
+    return response.row;
+  }
+
+  /** Ask another actor a question (blocking is the caller's job). */
+  async createQuestion(item: {
+    target_actor_id: string;
+    message: string;
+    require?: string;
+    asker_task_id?: string;
+    asker_session_id?: string;
+  }): Promise<Record<string, unknown>> {
+    const response = await this.request<{ question: Record<string, unknown> }>(
+      "/v1/hub/questions",
+      { method: "POST", body: item },
+    );
+    return response.question;
+  }
+
+  /** Claim pending questions addressed to this actor. */
+  async claimQuestions(item: {
+    actor_id: string;
+    node_id: string;
+    limit?: number;
+  }): Promise<Array<Record<string, unknown>>> {
+    const response = await this.request<{ questions: Array<Record<string, unknown>> }>(
+      "/v1/hub/questions/claim",
+      { method: "POST", body: item },
+    );
+    return response.questions;
+  }
+
+  /** Submit the answer for one claimed question. */
+  async answerQuestion(
+    questionId: string,
+    item: { lease_token: string; answer_text: string },
+  ): Promise<Record<string, unknown>> {
+    const response = await this.request<{ question: Record<string, unknown> }>(
+      `/v1/hub/questions/${encodeURIComponent(questionId)}/answer`,
+      { method: "POST", body: item },
+    );
+    return response.question;
+  }
+
+  /** Read one question (polling for the asker side). */
+  async getQuestion(questionId: string): Promise<Record<string, unknown>> {
+    const response = await this.request<{ question: Record<string, unknown> }>(
+      `/v1/hub/questions/${encodeURIComponent(questionId)}`,
+      { method: "GET", body: undefined },
+    );
+    return response.question;
+  }
+
+  /**
+   * Subscribe to the worker push channel (`/v1/hub/events`) and invoke
+   * `onEvent` for every SSE event. Resolves when the stream ends normally
+   * (server closed the connection) and rejects on transport errors; the
+   * caller owns reconnection with backoff.
+   */
+  async subscribeEvents(
+    nodeId: string,
+    onEvent: (event: { name: string; data: Record<string, unknown> }) => void,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<void> {
+    const url = `${this.baseUrl.replace(/\/$/u, "")}/v1/hub/events?node_id=${encodeURIComponent(nodeId)}`;
+    const init: RequestInit = {
+      headers: { Authorization: `Bearer ${this.token}` },
+    };
+    if (options.signal !== undefined) init.signal = options.signal;
+    const response = await this.fetchImpl(url, init);
+    if (!response.ok) {
+      throw new HubError(
+        `Hub events subscription failed (${response.status})`,
+        response.status,
+      );
+    }
+    if (response.body === null) return;
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      buffer += decoder.decode(value, { stream: true });
+      let boundary: number;
+      while ((boundary = buffer.indexOf("\n\n")) >= 0) {
+        const block = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        let name = "message";
+        let data: Record<string, unknown> = {};
+        for (const line of block.split("\n")) {
+          if (line.startsWith("event: ")) {
+            name = line.slice(7).trim();
+          } else if (line.startsWith("data: ")) {
+            try {
+              const parsed: unknown = JSON.parse(line.slice(6));
+              if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+                data = parsed as Record<string, unknown>;
+              }
+            } catch {
+              // Non-JSON data lines are ignored.
+            }
+          }
+        }
+        if (name !== "message" || Object.keys(data).length > 0) {
+          onEvent({ name, data });
+        }
+      }
+    }
   }
 
   async addArtifact(item: {

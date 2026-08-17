@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 from urllib.parse import quote
 
@@ -98,6 +99,113 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "reason": {"type": "string"},
             },
             "required": ["task_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "hub_context_append",
+        "description": (
+            "Append one entry to the shared consensus context of your "
+            "principal (facts, decisions, session digests). Entries are "
+            "idempotent via event_id and expire after ttl_hours."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string"},
+                "payload": {"type": "object"},
+                "session_id": {"type": "string"},
+                "event_id": {"type": "string"},
+                "ttl_hours": {"type": "integer"},
+            },
+            "required": ["kind", "payload"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "hub_context_read",
+        "description": (
+            "Read the shared consensus context of your principal. Pass "
+            "after_seq to pull only newer entries (incremental sync)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "after_seq": {"type": "integer"},
+                "kind": {"type": "string"},
+                "session_id": {"type": "string"},
+                "limit": {"type": "integer"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "hub_directory_list",
+        "description": (
+            "List the session/agent directory of your principal: one row per "
+            "session (id, actor, node, title, workspace, status, last active)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "status": {"type": "string"},
+                "actor_id": {"type": "string"},
+                "limit": {"type": "integer"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "hub_directory_get",
+        "description": (
+            "Drill into one session directory row. depth 0 = identity, "
+            "1 = invocation records, 2 = consensus digest, 3 = artifact refs."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "depth": {"type": "integer"},
+            },
+            "required": ["session_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "hub_directory_search",
+        "description": (
+            "Search the session/agent directory by title, workspace, or "
+            "objective text."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer"},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "hub_ask",
+        "description": (
+            "Ask another agent/session of your principal a question and "
+            "BLOCK until the answer arrives (default 60s, max 300s). "
+            "Returns the answer text, or timeout/expired/unsupported/declined."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target_actor_id": {"type": "string"},
+                "message": {"type": "string"},
+                "require": {"type": "string"},
+                "asker_session_id": {"type": "string"},
+                "asker_task_id": {"type": "string"},
+                "wait_seconds": {"type": "integer"},
+            },
+            "required": ["target_actor_id", "message"],
             "additionalProperties": False,
         },
     },
@@ -231,6 +339,57 @@ class McpService:
                 return self._tool_result(
                     {"task": self._cancel_task(arguments, context)}
                 )
+            if name == "hub_context_append":
+                tenant_id = self._tenant(context, arguments)
+                self._ensure_identity(tenant_id)
+                payload = dict(arguments)
+                payload.setdefault("scope", "consensus")
+                payload.setdefault(
+                    "principal_id", self._gateway_principal_id(tenant_id)
+                )
+                payload.setdefault("actor_id", self._gateway_actor_id(tenant_id))
+                _, result = self.api.post(
+                    "/v1/hub/contexts/append", payload, context
+                )
+                return self._tool_result({"event": result["event"]})
+            if name == "hub_context_read":
+                query = "&".join(
+                    f"{key}={quote(str(value))}"
+                    for key, value in arguments.items()
+                    if value is not None
+                )
+                _, result = self.api.get("/v1/hub/contexts", query, context)
+                return self._tool_result({"events": result["events"]})
+            if name == "hub_directory_list":
+                query = "&".join(
+                    f"{key}={quote(str(value))}"
+                    for key, value in arguments.items()
+                    if value is not None
+                )
+                _, result = self.api.get("/v1/hub/directory", query, context)
+                return self._tool_result({"rows": result["rows"]})
+            if name == "hub_directory_get":
+                session_id = self._required(arguments, "session_id")
+                depth = arguments.get("depth", 1)
+                depth = depth if isinstance(depth, int) else 1
+                _, result = self.api.get(
+                    f"/v1/hub/directory/{quote(session_id, safe='')}",
+                    f"depth={min(max(depth, 0), 3)}",
+                    context,
+                )
+                return self._tool_result({"row": result["row"]})
+            if name == "hub_directory_search":
+                query_value = self._required(arguments, "query")
+                limit = arguments.get("limit", 20)
+                limit = limit if isinstance(limit, int) else 20
+                _, result = self.api.get(
+                    "/v1/hub/directory",
+                    f"query={quote(query_value)}&limit={limit}",
+                    context,
+                )
+                return self._tool_result({"rows": result["rows"]})
+            if name == "hub_ask":
+                return self._tool_result({"answer": self._ask(arguments, context)})
             return self._tool_error(-32601, f"Unknown tool: {name}")
         except (ApiError, ValueError) as exc:
             return self._tool_error(-32602, str(exc))
@@ -319,6 +478,59 @@ class McpService:
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{name} is required")
         return value.strip()
+
+    def _ask(
+        self,
+        arguments: dict[str, Any],
+        context: AuthenticatedContext | None,
+    ) -> dict[str, Any]:
+        """Create a question and block until it is answered (bounded)."""
+        tenant_id = self._tenant(context, arguments)
+        self._ensure_identity(tenant_id)
+        payload = dict(arguments)
+        payload.setdefault("principal_id", self._gateway_principal_id(tenant_id))
+        payload.setdefault("asker_actor_id", self._gateway_actor_id(tenant_id))
+        _, result = self.api.post("/v1/hub/questions", payload, context)
+        question = result["question"]
+        question_id = str(question["question_id"])
+        if question["status"] == "unsupported":
+            return {
+                "status": "unsupported",
+                "question_id": question_id,
+                "answer": None,
+                "detail": "target actor has no online node",
+            }
+        raw_wait = arguments.get("wait_seconds", 60)
+        wait_seconds = raw_wait if isinstance(raw_wait, int) else 60
+        wait_seconds = min(max(wait_seconds, 1), 300)
+        deadline = time.monotonic() + wait_seconds
+        while time.monotonic() < deadline:
+            time.sleep(1)
+            _, current = self.api.get(
+                f"/v1/hub/questions/{quote(question_id, safe='')}",
+                "",
+                context,
+            )
+            status = str(current["question"]["status"])
+            if status == "answered":
+                return {
+                    "status": "answered",
+                    "question_id": question_id,
+                    "answer": current["question"].get("answer_text"),
+                    "answered_by": current["question"].get("target_actor_id"),
+                }
+            if status in {"expired", "unsupported"}:
+                return {
+                    "status": status,
+                    "question_id": question_id,
+                    "answer": None,
+                }
+        return {
+            "status": "timeout",
+            "question_id": question_id,
+            "answer": None,
+            "detail": f"no answer within {wait_seconds}s; the question stays pending",
+        }
 
     @staticmethod
     def _tool_result(value: Any) -> dict[str, Any]:

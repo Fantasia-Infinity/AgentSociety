@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+import json
 from typing import Any
 
 
@@ -181,6 +182,7 @@ class TaskUpdate:
     status: TaskStatus
     message: str | None
     result: dict[str, Any]
+    partial_result: dict[str, Any] | None = None
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "TaskUpdate":
@@ -197,6 +199,9 @@ class TaskUpdate:
             status=status,
             message=optional_text(payload, "message", maximum=10_000),
             result=object_value(payload, "result"),
+            partial_result=object_value(payload, "partial_result")
+            if payload.get("partial_result") is not None
+            else None,
         )
 
 
@@ -262,6 +267,51 @@ class ArtifactSubmission:
             sha256=sha256.lower() if sha256 is not None else None,
             size_bytes=size_bytes,
             metadata=object_value(payload, "metadata"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SharedEventAppend:
+    """One entry in a principal's shared memory (consensus / directory / qa).
+
+    The shared event log is append-only and idempotent (`event_id` derived
+    from content by the writer). Entries expire when `ttl_hours` is set.
+    """
+
+    scope: str
+    kind: str
+    payload: dict[str, Any]
+    principal_id: str
+    session_id: str | None = None
+    actor_id: str | None = None
+    node_id: str | None = None
+    ttl_hours: int | None = None
+    event_id: str | None = None
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "SharedEventAppend":
+        scope = required_text(payload, "scope", maximum=40)
+        if scope not in {"consensus", "directory", "qa"}:
+            raise ValueError("scope must be consensus, directory, or qa")
+        kind = required_text(payload, "kind", maximum=80)
+        body = object_value(payload, "payload")
+        encoded = json.dumps(body, ensure_ascii=False, sort_keys=True)
+        if len(encoded) > 8192:
+            raise ValueError("shared event payload exceeds 8192 characters")
+        ttl = payload.get("ttl_hours")
+        ttl_hours = None if ttl is None else int(ttl)
+        if ttl_hours is not None and ttl_hours <= 0:
+            raise ValueError("ttl_hours must be positive")
+        return cls(
+            scope=scope,
+            kind=kind,
+            payload=body,
+            principal_id=required_text(payload, "principal_id", maximum=200),
+            session_id=optional_text(payload, "session_id", maximum=200),
+            actor_id=optional_text(payload, "actor_id", maximum=200),
+            node_id=optional_text(payload, "node_id", maximum=200),
+            ttl_hours=ttl_hours,
+            event_id=optional_text(payload, "event_id", maximum=200),
         )
 
 

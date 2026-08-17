@@ -23,6 +23,10 @@
         provider: !!js process.env.AGENT_SOCIETY_PROVIDER ?? 'deepseek-official'
         model: !!js process.env.DSH_MODEL ?? process.env.AGENT_SOCIETY_MODEL ?? 'deepseek-v4-flash'
         maxTokens: !!js Number(process.env.AGENT_SOCIETY_MAX_TOKENS ?? 8192)
+        # Consensus digests into the Hub shared memory (default off).
+        contextEnabled: !!js process.env.AGENT_SOCIETY_CONTEXT === '1'
+        # Answer Hub questions addressed to this actor when idle (default on).
+        questionsEnabled: !!js process.env.AGENT_SOCIETY_QUESTIONS !== '0'
 
     # Dispatch surface: expose Hub coordination tools as mcp__agent-society__*.
     # This guard re-appends Hub tools after preset-level system-prompt
@@ -49,6 +53,47 @@
     # from every assembled catalog.
     - id: agent-society-web-tool-guard
       name: '@agent-society/dsh-agent-society/web-tool-guard'
+
+    # Session directory sync: push local session rows and maintain the local
+    # mirror of the Hub directory (~/.dsh/agent-society-directory.json).
+    - id: agent-society-directory
+      name: '@agent-society/dsh-agent-society/directory'
+      disabled: !!js process.env.AGENT_SOCIETY_DIRECTORY === '0'
+      config:
+        hubUrl: !!js process.env.AGENT_SOCIETY_HUB_URL
+        hubTokenEnv: 'AGENT_SOCIETY_HUB_TOKEN'
+        principalId: !!js process.env.AGENT_SOCIETY_PRINCIPAL_ID
+        actorId: !!js process.env.AGENT_SOCIETY_ACTOR_ID
+        nodeId: !!js process.env.AGENT_SOCIETY_NODE_ID
+        workspaceRoot: !!js process.env.AGENT_SOCIETY_WORKSPACE_ROOT ?? process.cwd()
+        sessionMode: !!js process.env.AGENT_SOCIETY_SESSION_MODE ?? 'per_task'
+        toolPolicy: !!js process.env.AGENT_SOCIETY_TOOL_POLICY ?? 'full'
+        pullSeconds: !!js Number(process.env.AGENT_SOCIETY_DIRECTORY_PULL_SECONDS ?? 10)
+
+    # Bounded shared-context prompt injection: consensus one-liners + the
+    # session directory index, read from the local mirror after assembly.
+    - id: agent-society-directory-index
+      name: '@agent-society/dsh-agent-society/directory-index'
+      disabled: !!js process.env.AGENT_SOCIETY_DIRECTORY === '0'
+
+    # Interactive-process question handling: auto-answer while unattended
+    # (or POLICY=standalone); with a human present (or POLICY=ask) questions
+    # stay pending for the browser question card.
+    - id: agent-society-question-bridge
+      name: '@agent-society/dsh-agent-society/question-bridge'
+      disabled: !!js process.env.AGENT_SOCIETY_QUESTIONS === '0'
+      config:
+        hubUrl: !!js process.env.AGENT_SOCIETY_HUB_URL
+        hubTokenEnv: 'AGENT_SOCIETY_HUB_TOKEN'
+        principalId: !!js process.env.AGENT_SOCIETY_PRINCIPAL_ID
+        actorId: !!js process.env.AGENT_SOCIETY_ACTOR_ID
+        nodeId: !!js process.env.AGENT_SOCIETY_NODE_ID
+        workspaceRoot: !!js process.env.AGENT_SOCIETY_WORKSPACE_ROOT ?? process.cwd()
+        provider: !!js process.env.AGENT_SOCIETY_PROVIDER ?? 'deepseek-official'
+        model: !!js process.env.DSH_MODEL ?? process.env.AGENT_SOCIETY_MODEL ?? 'deepseek-v4-flash'
+        maxTokens: !!js Number(process.env.AGENT_SOCIETY_MAX_TOKENS ?? 8192)
+        policy: !!js process.env.AGENT_SOCIETY_QUESTION_POLICY ?? 'auto'
+        pollSeconds: !!js Number(process.env.AGENT_SOCIETY_QUESTION_POLL_SECONDS ?? 10)
 
 # Host-level DeepSeek web tool. The provider services stay mounted because
 # presets may register their own tool-web row; disabling the host tool plus

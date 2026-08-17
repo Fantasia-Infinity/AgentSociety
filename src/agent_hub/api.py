@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from http import HTTPStatus
 from typing import Any
 import base64
@@ -15,6 +16,7 @@ from .domain import (
     PrincipalRegistration,
     RunStatus,
     RunSubmission,
+    SharedEventAppend,
     TenantRegistration,
     TaskSubmission,
     TaskUpdate,
@@ -25,6 +27,7 @@ from .domain import (
 from .errors import ApiError, map_error
 from .store import AgentHubStore
 from .object_store import ObjectStore
+from urllib.parse import unquote
 
 
 class AgentHubApi:
@@ -46,10 +49,47 @@ class AgentHubApi:
         object_store: ObjectStore | None = None,
         *,
         allow_registration: bool = True,
+        on_event: Callable[[str, str, dict[str, Any]], None] | None = None,
+        on_shared_event: Callable[[str, str, dict[str, Any]], None] | None = None,
     ) -> None:
         self.store = store
         self.object_store = object_store
         self.allow_registration = allow_registration
+        # Optional push sink installed by the HTTP server: called with
+        # (executor_node_id, event_name, data) whenever a worker-relevant
+        # event happens (new control, cancellation). None keeps the API
+        # usable from tests and stdio MCP without a server.
+        self.on_event = on_event
+        # Tenant-wide push sink (shared memory / directory updates): called
+        # with (tenant_id, event_name, data) and fanned out to every SSE
+        # subscriber of that tenant.
+        self.on_shared_event = on_shared_event
+
+    def _notify(
+        self, task: dict[str, Any], event_name: str, data: dict[str, Any]
+    ) -> None:
+        """Fan out one worker-relevant event to the task's executor node."""
+        if self.on_event is None:
+            return
+        node_id = task.get("executor_node_id")
+        if not node_id:
+            return
+        self.on_event(str(node_id), event_name, data)
+
+    def _notify_node(
+        self, node_id: str | None, event_name: str, data: dict[str, Any]
+    ) -> None:
+        """Fan out one event to a specific node (questions, controls)."""
+        if self.on_event is None or not node_id:
+            return
+        self.on_event(node_id, event_name, data)
+
+    def _notify_shared(
+        self, tenant_id: str, event_name: str, data: dict[str, Any]
+    ) -> None:
+        """Fan out one tenant-wide event (shared memory / directory)."""
+        if self.on_shared_event is not None:
+            self.on_shared_event(tenant_id, event_name, data)
 
     @classmethod
     def is_public_auth_post(cls, path: str) -> bool:
@@ -201,6 +241,101 @@ class AgentHubApi:
                     principal_id=principal_scope,
                 )
             }
+        if path == f"{self.prefix}/contexts":
+            query = parse_qs(query_string)
+            try:
+                after_seq = int((query.get("after_seq") or ["0"])[0])
+                limit = int((query.get("limit") or ["100"])[0])
+            except ValueError as exc:
+                raise ValueError("after_seq and limit must be integers") from exc
+            return HTTPStatus.OK, {
+                "events": self.store.list_shared_events(
+                    tenant_id=tenant_id or "default",
+                    principal_id=principal_scope,
+                    after_seq=after_seq,
+                    scope=(query.get("scope") or [None])[0],
+                    kind=(query.get("kind") or [None])[0],
+                    session_id=(query.get("session_id") or [None])[0],
+                    limit=limit,
+                )
+            }
+        if path == f"{self.prefix}/contexts/snapshot":
+            return HTTPStatus.OK, {
+                "snapshot": self.store.shared_snapshot(
+                    tenant_id=tenant_id or "default",
+                    principal_id=principal_scope,
+                )
+            }
+        if path == f"{self.prefix}/directory":
+            query = parse_qs(query_string)
+            try:
+                after_seq = int((query.get("after_seq") or ["0"])[0])
+                limit = int((query.get("limit") or ["100"])[0])
+            except ValueError as exc:
+                raise ValueError("after_seq and limit must be integers") from exc
+            return HTTPStatus.OK, {
+                "rows": self.store.list_directory(
+                    tenant_id=tenant_id or "default",
+                    principal_id=principal_scope,
+                    after_seq=after_seq,
+                    query=(query.get("query") or [None])[0],
+                    status=(query.get("status") or [None])[0],
+                    actor_id=(query.get("actor_id") or [None])[0],
+                    limit=limit,
+                )
+            }
+        if path == f"{self.prefix}/questions":
+            query = parse_qs(query_string)
+            try:
+                limit = int((query.get("limit") or ["100"])[0])
+            except ValueError as exc:
+                raise ValueError("limit must be an integer") from exc
+            return HTTPStatus.OK, {
+                "questions": self.store.list_questions(
+                    tenant_id=tenant_id or "default",
+                    principal_id=principal_scope,
+                    status=(query.get("status") or [None])[0],
+                    limit=limit,
+                )
+            }
+        parts = self._parts(path)
+        if len(parts) == 2 and parts[0] == "questions":
+            question = self.store.get_question(
+                unquote(parts[1]), tenant_id=tenant_id or "default"
+            )
+            self._assert_principal_owner(context, question)
+            return HTTPStatus.OK, {"question": question}
+        parts = self._parts(path)
+        if len(parts) == 2 and parts[0] == "directory":
+            session_id = unquote(parts[1])
+            row = self.store.get_directory_row(
+                tenant_id=tenant_id or "default",
+                principal_id=principal_scope,
+                session_id=session_id,
+            )
+            if row is None:
+                return None
+            query = parse_qs(query_string)
+            try:
+                depth = int((query.get("depth") or ["0"])[0])
+            except ValueError as exc:
+                raise ValueError("depth must be an integer") from exc
+            depth = min(max(depth, 0), 3)
+            if depth >= 2:
+                consensus = self.store.list_shared_events(
+                    tenant_id=tenant_id or "default",
+                    principal_id=principal_scope,
+                    scope="consensus",
+                    session_id=session_id,
+                    limit=20,
+                )
+                row["consensus"] = consensus[-3:]
+            if depth >= 3:
+                row["artifacts"] = self.store.artifacts_for_session(
+                    tenant_id=tenant_id or "default",
+                    session_id=session_id,
+                )
+            return HTTPStatus.OK, {"row": row}
 
         parts = self._parts(path)
         if len(parts) == 2 and parts[0] == "tenants":
@@ -552,6 +687,153 @@ class AgentHubApi:
                 ArtifactSubmission.from_dict(artifact_payload), tenant_id=tenant_id
             )
             return HTTPStatus.CREATED, {"artifact": artifact}
+        if path == f"{self.prefix}/contexts/append":
+            scoped = dict(payload)
+            scoped.setdefault("scope", "consensus")
+            scope_principal = self._principal_scope(context)
+            if scope_principal is not None:
+                scoped["principal_id"] = scope_principal
+                requested_actor = str(scoped.get("actor_id", "")).strip()
+                if context.actor_id is not None:
+                    if requested_actor and requested_actor != context.actor_id:
+                        raise PermissionError(
+                            "node token can only append as its own actor"
+                        )
+                    scoped["actor_id"] = context.actor_id
+                requested_node = str(scoped.get("node_id", "")).strip()
+                if context.node_id is not None:
+                    if requested_node and requested_node != context.node_id:
+                        raise PermissionError(
+                            "node token can only append for its own node"
+                        )
+                    scoped["node_id"] = context.node_id
+            item = SharedEventAppend.from_dict(scoped)
+            event = self.store.append_shared_event(
+                item, tenant_id=tenant_id or "default"
+            )
+            self._notify_shared(
+                tenant_id or "default",
+                "shared/event",
+                {
+                    "seq": int(event["seq"]),
+                    "scope": str(event["scope"]),
+                    "kind": str(event["kind"]),
+                    "session_id": event["session_id"],
+                    "actor_id": event["actor_id"],
+                    "node_id": event["node_id"],
+                    "principal_id": str(event["principal_id"]),
+                },
+            )
+            return HTTPStatus.CREATED, {"event": event}
+        parts = self._parts(path)
+        if len(parts) == 2 and parts[0] == "directory":
+            session_id = unquote(parts[1])
+            row_payload = dict(payload)
+            scoped = dict(payload)
+            scoped.setdefault("session_id", session_id)
+            if context is not None and not context.is_admin:
+                scope_principal = self._principal_scope(context)
+                if context.actor_id is not None:
+                    scoped["actor_id"] = context.actor_id
+                if context.node_id is not None:
+                    scoped["node_id"] = context.node_id
+                if scope_principal is not None:
+                    scoped["principal_id"] = scope_principal
+            row = self.store.upsert_directory_row(
+                tenant_id=tenant_id or "default",
+                principal_id=required_text(scoped, "principal_id", maximum=200),
+                session_id=session_id,
+                actor_id=required_text(scoped, "actor_id", maximum=200),
+                node_id=required_text(scoped, "node_id", maximum=200),
+                row=row_payload,
+            )
+            self._notify_shared(
+                tenant_id or "default",
+                "directory/updated",
+                {
+                    "session_id": session_id,
+                    "seq": int(row["seq"]),
+                    "status": row_payload.get("status"),
+                },
+            )
+            return HTTPStatus.CREATED, {"row": row}
+        if path == f"{self.prefix}/questions":
+            scoped = dict(payload)
+            if context is not None and not context.is_admin:
+                scope_principal = self._principal_scope(context)
+                if scope_principal is not None:
+                    scoped["principal_id"] = scope_principal
+                if context.actor_id is not None:
+                    scoped["asker_actor_id"] = context.actor_id
+                if context.node_id is not None:
+                    scoped["asker_node_id"] = context.node_id
+            question = self.store.create_question(
+                tenant_id=tenant_id or "default",
+                principal_id=required_text(scoped, "principal_id", maximum=200),
+                asker_actor_id=required_text(
+                    scoped, "asker_actor_id", maximum=200
+                ),
+                asker_task_id=optional_text(scoped, "asker_task_id", maximum=200),
+                asker_session_id=optional_text(
+                    scoped, "asker_session_id", maximum=200
+                ),
+                target_actor_id=required_text(
+                    scoped, "target_actor_id", maximum=200
+                ),
+                message=required_text(scoped, "message", maximum=50_000),
+                require=optional_text(scoped, "require", maximum=10_000),
+            )
+            target_node = self.store.actor_online_node(
+                str(question["target_actor_id"]), tenant_id or "default"
+            )
+            self._notify_node(
+                target_node,
+                "question/new",
+                {
+                    "question_id": str(question["question_id"]),
+                    "target_actor_id": str(question["target_actor_id"]),
+                    "asker_actor_id": str(question["asker_actor_id"]),
+                },
+            )
+            return HTTPStatus.CREATED, {"question": question}
+        parts = self._parts(path)
+        if len(parts) == 2 and parts[0] == "questions" and parts[1] == "claim":
+            actor_id = required_text(payload, "actor_id", maximum=200)
+            node_id = required_text(payload, "node_id", maximum=200)
+            if context is not None and not context.is_admin:
+                if context.actor_id != actor_id or context.node_id != node_id:
+                    raise PermissionError(
+                        "node token cannot claim questions for another node"
+                    )
+            questions = self.store.claim_questions(
+                actor_id=actor_id,
+                node_id=node_id,
+                limit=int(payload.get("limit", 5)),
+                tenant_id=tenant_id or "default",
+            )
+            return HTTPStatus.OK, {"questions": questions}
+        parts = self._parts(path)
+        if len(parts) == 3 and parts[0] == "questions" and parts[2] == "answer":
+            question_id = unquote(parts[1])
+            question = self.store.answer_question(
+                question_id,
+                lease_token=required_text(payload, "lease_token", maximum=200),
+                answer_text=required_text(payload, "answer_text", maximum=50_000),
+                tenant_id=tenant_id or "default",
+            )
+            asker_node = self.store.actor_online_node(
+                str(question["asker_actor_id"]), tenant_id or "default"
+            )
+            self._notify_node(
+                asker_node,
+                "question/answered",
+                {
+                    "question_id": question_id,
+                    "answer": str(question.get("answer_text") or ""),
+                    "answer_text": str(question.get("answer_text") or ""),
+                },
+            )
+            return HTTPStatus.OK, {"question": question}
 
         parts = self._parts(path)
         if len(parts) == 3 and parts[0] == "tenants" and parts[2] == "tokens":
@@ -587,6 +869,14 @@ class AgentHubApi:
                 reason=optional_text(payload, "reason", maximum=10_000),
                 tenant_id=tenant_id,
             )
+            self._notify(
+                task,
+                "task/cancelled",
+                {
+                    "task_id": str(task["task_id"]),
+                    "reason": task.get("error"),
+                },
+            )
             return HTTPStatus.OK, {"task": task}
         if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "controls":
             task = self.store.get_task(parts[1], tenant_id=tenant_id)
@@ -597,6 +887,15 @@ class AgentHubApi:
                 kind=required_text(payload, "kind", maximum=40),
                 message=required_text(payload, "message", maximum=50_000),
                 tenant_id=tenant_id,
+            )
+            self._notify(
+                task,
+                "control/new",
+                {
+                    "task_id": str(task["task_id"]),
+                    "control_id": str(control["control_id"]),
+                    "kind": str(control["kind"]),
+                },
             )
             return HTTPStatus.CREATED, {"control": control}
         if (
