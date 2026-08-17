@@ -55,6 +55,25 @@
     - id: agent-society-web-tool-guard
       name: '@agent-society/dsh-agent-society/web-tool-guard'
 
+    # Interactive-session consensus digests: detect the end of a manual
+    # TUI/Web interaction round and append an LLM-summarized digest.
+    - id: agent-society-session-digest
+      name: '@agent-society/dsh-agent-society/session-digest'
+      config:
+        hubUrl: !!js process.env.AGENT_SOCIETY_HUB_URL
+        hubTokenEnv: 'AGENT_SOCIETY_HUB_TOKEN'
+        principalId: !!js process.env.AGENT_SOCIETY_PRINCIPAL_ID
+        actorId: !!js process.env.AGENT_SOCIETY_ACTOR_ID
+        nodeId: !!js process.env.AGENT_SOCIETY_NODE_ID
+        workspaceRoot: !!js process.env.AGENT_SOCIETY_WORKSPACE_ROOT ?? process.cwd()
+        provider: !!js process.env.AGENT_SOCIETY_PROVIDER ?? 'deepseek-official'
+        model: !!js process.env.DSH_MODEL ?? process.env.AGENT_SOCIETY_MODEL ?? 'deepseek-v4-flash'
+        maxTokens: !!js Number(process.env.AGENT_SOCIETY_MAX_TOKENS ?? 2048)
+        pollSeconds: !!js Number(process.env.AGENT_SOCIETY_DIGEST_POLL_SECONDS ?? 15)
+        idleSeconds: !!js Number(process.env.AGENT_SOCIETY_DIGEST_IDLE_SECONDS ?? 60)
+        summarize: !!js process.env.AGENT_SOCIETY_CONTEXT_SUMMARIZE !== '0'
+        contextEnabled: !!js process.env.AGENT_SOCIETY_CONTEXT !== '0'
+
     # Session directory sync: push local session rows and maintain the local
     # mirror of the Hub directory (~/.dsh/agent-society-directory.json).
     - id: agent-society-directory

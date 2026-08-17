@@ -24,12 +24,18 @@ export function digestEventId(input) {
         .digest('hex')
         .slice(0, 64);
 }
-export function buildSessionDigest(input) {
+/**
+ * Build one consensus digest. `eventId` overrides the derived idempotency
+ * key (used by interactive-session digests, whose round counter is the
+ * deduplication salt); `summary` is the optional LLM/derived summary text
+ * attached to the payload.
+ */
+export function buildSessionDigest(input, options = {}) {
     const result = input.resultText.trim().slice(0, DIGEST_MAX_RESULT_CHARS);
     return {
         scope: 'consensus',
         kind: 'digest',
-        event_id: digestEventId(input),
+        event_id: options.eventId ?? digestEventId(input),
         principal_id: input.principalId,
         session_id: input.sessionId,
         actor_id: input.actorId,
@@ -47,6 +53,7 @@ export function buildSessionDigest(input) {
             toolCount: input.toolCount,
             messageCount: input.messageCount,
             createdAt: input.createdAt,
+            ...(options.summary ? { summary: options.summary } : {}),
         },
     };
 }

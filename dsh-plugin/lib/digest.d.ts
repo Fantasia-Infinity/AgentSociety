@@ -46,8 +46,19 @@ export interface ConsensusDigest {
         readonly toolCount: number;
         readonly messageCount: number;
         readonly createdAt: number;
+        /** LLM or deterministic summary for interactive-session digests. */
+        readonly summary?: string;
     };
 }
 /** Stable idempotency key: one digest per (principal, session, task run). */
 export declare function digestEventId(input: DigestInput): string;
-export declare function buildSessionDigest(input: DigestInput): ConsensusDigest;
+/**
+ * Build one consensus digest. `eventId` overrides the derived idempotency
+ * key (used by interactive-session digests, whose round counter is the
+ * deduplication salt); `summary` is the optional LLM/derived summary text
+ * attached to the payload.
+ */
+export declare function buildSessionDigest(input: DigestInput, options?: {
+    eventId?: string;
+    summary?: string;
+}): ConsensusDigest;
