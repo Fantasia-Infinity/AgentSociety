@@ -104,6 +104,22 @@ class WebAnswerStoreTests(unittest.TestCase):
             require="answer",
         )
 
+    def test_question_roundtrip_with_target_session(self) -> None:
+        question = self.store.create_question(
+            tenant_id="default",
+            principal_id="principal-a",
+            asker_actor_id="actor-asker",
+            asker_task_id=None,
+            asker_session_id="session-asker",
+            target_actor_id="actor-target",
+            target_session_id="session-target-123",
+            message="Continue from the target session context?",
+            require="answer",
+        )
+        self.assertEqual(question["target_session_id"], "session-target-123")
+        plain = self._ask()
+        self.assertIsNone(plain["target_session_id"])
+
     def test_web_answer_on_pending_writes_shared_event(self) -> None:
         question = self._ask()
         answered = self.store.answer_question_web(
