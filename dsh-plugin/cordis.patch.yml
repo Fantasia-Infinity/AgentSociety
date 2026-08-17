@@ -115,6 +115,21 @@
         policy: !!js process.env.AGENT_SOCIETY_QUESTION_POLICY ?? 'auto'
         pollSeconds: !!js Number(process.env.AGENT_SOCIETY_QUESTION_POLL_SECONDS ?? 10)
 
+    # Interactive-surface task acceptance: the web/TUI session executes Hub
+    # tasks addressed to this actor inside its own conversation while idle
+    # (AGENT_SOCIETY_UI_TASKS=1 is set by the agent-host web launcher).
+    - id: agent-society-task-bridge
+      name: '@agent-society/dsh-agent-society/task-bridge'
+      disabled: !!js process.env.AGENT_SOCIETY_UI_TASKS !== '1'
+      config:
+        hubUrl: !!js process.env.AGENT_SOCIETY_HUB_URL
+        hubTokenEnv: 'AGENT_SOCIETY_HUB_TOKEN'
+        principalId: !!js process.env.AGENT_SOCIETY_PRINCIPAL_ID
+        actorId: !!js process.env.AGENT_SOCIETY_ACTOR_ID
+        nodeId: !!js process.env.AGENT_SOCIETY_NODE_ID
+        workspaceRoot: !!js process.env.AGENT_SOCIETY_WORKSPACE_ROOT ?? process.cwd()
+        pollSeconds: !!js Number(process.env.AGENT_SOCIETY_TASK_POLL_SECONDS ?? 10)
+
 # Host-level DeepSeek web tool. The provider services stay mounted because
 # presets may register their own tool-web row; disabling the host tool plus
 # the assembly guard is enough to keep web_search out of the model catalog.

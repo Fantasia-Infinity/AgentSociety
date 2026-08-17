@@ -112,7 +112,7 @@ interface RunningTask {
   cancelled: boolean
 }
 
-const TASK_PROMPT = (
+export const TASK_PROMPT = (
   task: HubTask,
   runId: string,
   cwd: string,
@@ -1269,7 +1269,7 @@ function truncateTitleUtf8(value: string, maxBytes = 80): string {
   return result.trim()
 }
 
-function lastAssistantText(events: readonly SessionEvent[]): string {
+export function lastAssistantText(events: readonly SessionEvent[]): string {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
     if (!event || event.type !== 'assistant/message') continue

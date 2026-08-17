@@ -11,6 +11,10 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./task-bridge": {
+      "types": "./lib/task-bridge.d.ts",
+      "default": "./lib/task-bridge.js"
+    },
     "./worker": {
       "types": "./lib/worker-plugin.d.ts",
       "default": "./lib/worker-plugin.js"

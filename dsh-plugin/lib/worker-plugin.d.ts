@@ -8,6 +8,8 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import Schema from '@deepseek-ai/schemastery';
+import { type SessionEvent } from '@deepseek-ai/dsh-session';
+import { type HubTask } from './hub-client.js';
 export declare const name = "agent-society-worker";
 export declare const inject: string[];
 export type ToolPolicy = 'full' | 'read_only' | 'no_tools';
@@ -36,4 +38,6 @@ export interface Config {
     questionsEnabled?: boolean;
 }
 export declare const Config: Schema<Config>;
+export declare const TASK_PROMPT: (task: HubTask, runId: string, cwd: string, toolPolicy: ToolPolicy) => string;
 export declare function apply(ctx: Context, config: Config): Promise<void>;
+export declare function lastAssistantText(events: readonly SessionEvent[]): string;

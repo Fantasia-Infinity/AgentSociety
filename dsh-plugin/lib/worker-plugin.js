@@ -43,7 +43,7 @@ export const Config = Schema.object({
     directoryEnabled: Schema.boolean().required(false),
     questionsEnabled: Schema.boolean().required(false),
 });
-const TASK_PROMPT = (task, runId, cwd, toolPolicy) => [
+export const TASK_PROMPT = (task, runId, cwd, toolPolicy) => [
     'You are executing a durable task delegated through the AgentSociety Hub.',
     'This is a NEW task. Earlier conversation in this session is prior work:',
     'use it only where it is relevant, and do not let unrelated prior',
@@ -1050,7 +1050,7 @@ function truncateTitleUtf8(value, maxBytes = 80) {
     }
     return result.trim();
 }
-function lastAssistantText(events) {
+export function lastAssistantText(events) {
     for (let index = events.length - 1; index >= 0; index -= 1) {
         const event = events[index];
         if (!event || event.type !== 'assistant/message')

@@ -48,6 +48,9 @@ export function buildDshCommonEnv(
     AGENT_SOCIETY_NODE_ID: config.nodeId,
     AGENT_SOCIETY_PRINCIPAL_ID: config.principalId,
     AGENT_SOCIETY_DISPLAY_NAME: config.actorDisplayName,
+    // Interactive surfaces (TUI/Web) may accept Hub tasks into their own
+    // conversation; the task-bridge row in the bundle is gated on this flag.
+    AGENT_SOCIETY_UI_TASKS: "1",
   };
   if (hub && config.hubUrl) {
     if (options.hubConnection) {
