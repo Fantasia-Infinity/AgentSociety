@@ -156,7 +156,12 @@ export function apply(ctx, config) {
                 sessionMode: config.sessionMode ?? 'per_task',
                 toolPolicy: config.toolPolicy ?? 'full',
             });
-            const fingerprint = JSON.stringify(row);
+            const fingerprint = JSON.stringify({
+                ...row,
+                // last_active_at is a display timestamp that advances every cycle;
+                // it must not make the row look "changed" when nothing else did.
+                last_active_at: undefined,
+            });
             if (state.pushedRows[header.id] === fingerprint)
                 continue;
             await hub.upsertDirectoryRow({
