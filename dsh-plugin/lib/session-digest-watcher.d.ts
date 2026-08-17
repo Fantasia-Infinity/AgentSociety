@@ -49,5 +49,9 @@ interface SessionLike {
 }
 export declare function apply(ctx: Context, config: Config): void;
 export declare function extractFields(session: SessionLike): SummaryFields;
+export declare function messageCountOf(events: ReadonlyArray<{
+    type?: string;
+    time?: number;
+} | undefined>): number;
 export declare function digestEventIdForRound(principalId: string, sessionId: string, roundCount: number): string;
 export {};

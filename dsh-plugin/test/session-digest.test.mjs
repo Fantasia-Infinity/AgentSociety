@@ -78,3 +78,16 @@ test('deterministicSummary concatenates bounded fields', () => {
   const long = deterministicSummary({ title: 'T', objective: 'y'.repeat(5000), resultText: '', toolCount: 0, messageCount: 0 })
   assert.ok(long.length <= 600)
 })
+
+test('messageCountOf counts only user and assistant messages', async () => {
+  const { messageCountOf } = await import('../lib/session-digest-watcher.js')
+  const events = [
+    { type: 'user/message', time: 1 },
+    { type: 'tool/call', time: 2 },
+    { type: 'assistant/message', time: 3 },
+    { type: 'activity/status', time: 4 },
+    { type: 'user/message', time: 5 },
+    { type: 'session/title', time: 6 },
+  ]
+  assert.equal(messageCountOf(events), 3)
+})

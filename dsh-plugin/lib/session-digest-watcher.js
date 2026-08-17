@@ -140,7 +140,10 @@ export function apply(ctx, config) {
                     inFlight.add(header.id);
                     try {
                         const inspection = await persistence.inspect(header.id);
-                        const count = (inspection.events ?? []).length;
+                        const count = extractFields({
+                            id: header.id,
+                            events: inspection.events,
+                        }).messageCount;
                         const summary = await summarizeFor({ id: header.id, events: inspection.events }, count, { live: false, ...(info === undefined ? {} : { title: info.title }) });
                         const digest = buildSessionDigest({
                             principalId,
@@ -181,7 +184,10 @@ export function apply(ctx, config) {
     }
     async function handleRound(sessionId, events, options) {
         const now = Date.now();
-        const count = events.length;
+        // Round boundary and idempotency salt = real conversation messages only;
+        // events.length grows with UI activity events (activity/status etc.) and
+        // would re-trigger digests across process restarts.
+        const count = messageCountOf(events);
         const prior = state[sessionId];
         if (prior !== undefined && count <= prior.count)
             return;
@@ -320,6 +326,15 @@ export function extractFields(session) {
         toolCount,
         messageCount,
     };
+}
+export function messageCountOf(events) {
+    let count = 0;
+    for (const event of events) {
+        const type = event?.type;
+        if (type === 'user/message' || type === 'assistant/message')
+            count += 1;
+    }
+    return count;
 }
 export function digestEventIdForRound(principalId, sessionId, roundCount) {
     // Same round, same id — a restart or duplicate trigger cannot duplicate.
