@@ -80,6 +80,20 @@ export function apply(ctx: Context, config: Config): void {
   /** Claimed but not yet executed task (kept across polls until executed). */
   let activeClaim: HubClaim | null = null
 
+  // The Hub only hands tasks to nodes that heartbeated recently (stale
+  // after ~90s); without this the interactive node stays offline and every
+  // claim is rejected. Immediate first beat so a restart can claim right away.
+  const HEARTBEAT_SECONDS = 30
+  const heartbeat = ctx.setInterval(() => {
+    void hub.heartbeat(nodeId).catch((error) => {
+      ctx.logger.warn(
+        `agent-society-task-bridge heartbeat failed: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    })
+  }, HEARTBEAT_SECONDS * 1_000)
+  ctx.effect(() => () => heartbeat())
+  void hub.heartbeat(nodeId).catch(() => {})
+
   const timer = ctx.setInterval(() => {
     void poll()
   }, pollSeconds * 1_000)

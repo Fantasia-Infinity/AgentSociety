@@ -151,6 +151,11 @@ test('claims and executes a task in the idle UI session', async () => {
     assert.equal(claims.length, 1)
     assert.equal(claims[0].body.actor_id, 'agent-society-testhost')
 
+    // The bridge heartbeats the node so claims are accepted.
+    const beats = hub.calls.filter((c) => c.path === '/v1/hub/nodes/heartbeat')
+    assert.ok(beats.length >= 1, 'expected at least one node heartbeat')
+    assert.equal(beats[0].body.node_id, 'testhost')
+
     const taskUpdates = hub.calls.filter((c) => c.path.endsWith('/updates') && c.body?.run_id === RUN.run_id && c.body?.lease_token === LEASE)
     const statuses = taskUpdates.map((c) => c.body.status)
     assert.ok(statuses.includes('working'), `expected working update, got ${statuses}`)
