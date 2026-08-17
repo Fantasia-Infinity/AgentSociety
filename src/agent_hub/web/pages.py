@@ -11,6 +11,22 @@ def _esc(value: Any) -> str:
     return escape("" if value is None else str(value))
 
 
+def _display_title(payload: dict[str, Any]) -> str:
+    """Title cell: the real session title when present, otherwise a muted
+    fallback (workspace directory name, then 'untitled'). Untitled sessions
+    are common — test sessions and worker task sessions never emit a title
+    event — so the directory shows something recognizable instead of '-'."""
+    title = payload.get("title")
+    if isinstance(title, str) and title.strip():
+        return _esc(title)
+    workspace = payload.get("workspace")
+    if isinstance(workspace, str):
+        base = workspace.strip().rstrip("/").rsplit("/", 1)[-1]
+        if base:
+            return f'<span class="muted">({_esc(base)})</span>'
+    return '<span class="muted">(untitled)</span>'
+
+
 def _norm_ts(timestamp: float | None) -> float | None:
     """Normalize epoch timestamps: milliseconds (directory rows use JS
     Date.now()) to seconds. Second-epoch values are far below 1e11, so the
@@ -853,7 +869,7 @@ def directory_page(rows: list[dict[str, Any]], *, admin: bool = False) -> str:
             f'<td class="short-id"><a href="/web/directory/{_esc(session_id)}">'
             f"{_esc(_short_id(session_id))}</a></td>"
             f'<td class="short-id">{_esc(_short_id(row.get("actor_id") or "-"))}</td>'
-            f"<td>{_esc(str(payload.get('title') or '-'))}</td>"
+            f'<td>{_display_title(payload)}</td>'
             f"<td class=\"short-id\">{_esc(str(payload.get('workspace') or '-'))}</td>"
             f"<td>{_status_pill(payload.get('status') or 'idle')}</td>"
             f'<td class="time" title="{_fmt(payload.get("last_active_at"))}">'
@@ -908,7 +924,7 @@ def directory_detail_page(row: dict[str, Any], *, admin: bool = False) -> str:
         "<table>"
         f"<tr><th>Actor</th><td>{_esc(row.get('actor_id') or '-')}</td></tr>"
         f"<tr><th>Node</th><td>{_esc(row.get('node_id') or '-')}</td></tr>"
-        f"<tr><th>Title</th><td>{_esc(str(payload.get('title') or '-'))}</td></tr>"
+        f"<tr><th>Title</th><td>{_display_title(payload)}</td></tr>"
         f"<tr><th>Workspace</th><td>{_esc(str(payload.get('workspace') or '-'))}</td></tr>"
         f"<tr><th>Status</th><td>{_status_pill(payload.get('status') or 'idle')}</td></tr>"
         f"<tr><th>Session mode</th><td>{_esc(str(payload.get('session_mode') or '-'))}</td></tr>"

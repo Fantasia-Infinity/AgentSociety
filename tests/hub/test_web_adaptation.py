@@ -338,6 +338,37 @@ class WebAdaptationTests(unittest.TestCase):
                 "invocations": [],
             },
         )
+        # Untitled sessions (test/worker sessions never emit a title event)
+        # render a muted fallback instead of '-'.
+        self.store.upsert_directory_row(
+            tenant_id="default",
+            principal_id="human-owner",
+            session_id="session-2",
+            actor_id="actor-asker",
+            node_id="node-target",
+            row={
+                "workspace": "/opt/untitled-workspace",
+                "status": "idle",
+                "last_active_at": 1_700_000_000_000,
+                "session_mode": "per_task",
+                "tool_policy": "full",
+                "invocations": [],
+            },
+        )
+        self.store.upsert_directory_row(
+            tenant_id="default",
+            principal_id="human-owner",
+            session_id="session-3",
+            actor_id="actor-asker",
+            node_id="node-target",
+            row={
+                "status": "idle",
+                "last_active_at": 1_700_000_000_000,
+                "session_mode": "per_task",
+                "tool_policy": "full",
+                "invocations": [],
+            },
+        )
 
     def test_new_pages_render_with_data(self) -> None:
         self._login()
@@ -354,6 +385,8 @@ class WebAdaptationTests(unittest.TestCase):
         directory_html = self._get("/web/directory")
         self.assertIn("Pipeline session", directory_html)
         self.assertIn('/web/directory/session-1', directory_html)
+        self.assertIn("(untitled-workspace)", directory_html)
+        self.assertIn("(untitled)", directory_html)
 
         detail_html = self._get("/web/directory/session-1")
         self.assertIn("Tool policy", detail_html)
