@@ -85,6 +85,8 @@ export function apply(ctx: Context, config: Config): void {
   const state = {
     mirror: loadMirror(path),
     lastLocalPush: 0,
+    /** session_id -> JSON fingerprint of the last pushed local row. */
+    pushedRows: {} as Record<string, string>,
   }
 
   const timer = ctx.setInterval(() => {
@@ -179,7 +181,9 @@ export function apply(ctx: Context, config: Config): void {
       process.env.DSH_HOME?.trim() || resolve(homedir(), '.dsh'),
     )
     const now = Date.now()
-    // Push at most once per pull window per session to keep the log bounded.
+    // Push only rows whose content changed since the last sync: the Hub
+    // directory is deduplicated by latest-seq, and re-pushing unchanged
+    // rows on every 10s cycle would grow the shared event log without bound.
     for (const header of headers) {
       if (!header || typeof header.id !== 'string') continue
       const row = buildLocalRow({
@@ -191,6 +195,8 @@ export function apply(ctx: Context, config: Config): void {
         sessionMode: config.sessionMode ?? 'per_task',
         toolPolicy: config.toolPolicy ?? 'full',
       })
+      const fingerprint = JSON.stringify(row)
+      if (state.pushedRows[header.id] === fingerprint) continue
       await hub.upsertDirectoryRow({
         session_id: header.id,
         row,
@@ -198,6 +204,7 @@ export function apply(ctx: Context, config: Config): void {
         actor_id: actorId,
         node_id: nodeId,
       })
+      state.pushedRows[header.id] = fingerprint
       state.mirror.rows[header.id] = row
     }
     state.lastLocalPush = now
