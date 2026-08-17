@@ -107,7 +107,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "description": (
             "Append one entry to the shared consensus context of your "
             "principal (facts, decisions, session digests). Entries are "
-            "idempotent via event_id and expire after ttl_hours."
+            "idempotent via event_id and expire after ttl_hours. USE THIS "
+            "when you reach a reusable conclusion (a fact, a decision, a "
+            "result) during a task, so other sessions and devices do not "
+            "have to ask again."
         ),
         "inputSchema": {
             "type": "object",
@@ -126,7 +129,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "name": "hub_context_read",
         "description": (
             "Read the shared consensus context of your principal. Pass "
-            "after_seq to pull only newer entries (incremental sync)."
+            "after_seq to pull only newer entries (incremental sync). "
+            "USE THIS at the start of work or whenever you need facts, "
+            "decisions, or results produced by other sessions before "
+            "asking anyone."
         ),
         "inputSchema": {
             "type": "object",
@@ -143,7 +149,9 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "name": "hub_directory_list",
         "description": (
             "List the session/agent directory of your principal: one row per "
-            "session (id, actor, node, title, workspace, status, last active)."
+            "session (id, actor, node, title, workspace, status, last active). "
+            "USE THIS to discover which sessions/agents exist and what they "
+            "are doing, e.g. to find who can help or who owns a workspace."
         ),
         "inputSchema": {
             "type": "object",
@@ -160,7 +168,9 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "name": "hub_directory_get",
         "description": (
             "Drill into one session directory row. depth 0 = identity, "
-            "1 = invocation records, 2 = consensus digest, 3 = artifact refs."
+            "1 = invocation records, 2 = consensus digest, 3 = artifact refs. "
+            "USE THIS after hub_directory_list/search to inspect a specific "
+            "session before deciding to ask it anything."
         ),
         "inputSchema": {
             "type": "object",
@@ -176,7 +186,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "name": "hub_directory_search",
         "description": (
             "Search the session/agent directory by title, workspace, or "
-            "objective text."
+            "objective text. USE THIS when you need to find the session or "
+            "agent that worked on a topic or lives in a workspace."
         ),
         "inputSchema": {
             "type": "object",
@@ -193,7 +204,11 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "description": (
             "Ask another agent/session of your principal a question and "
             "BLOCK until the answer arrives (default 60s, max 300s). "
-            "Returns the answer text, or timeout/expired/unsupported/declined."
+            "Returns the answer text, or timeout/expired/unsupported/declined. "
+            "USE THIS ONLY AFTER hub_context_read and hub_directory_search "
+            "could not answer: prefer shared memory first, then a specific "
+            "target from the directory. Ask concrete questions; the answer "
+            "returns into your current turn."
         ),
         "inputSchema": {
             "type": "object",

@@ -24,7 +24,8 @@
         model: !!js process.env.DSH_MODEL ?? process.env.AGENT_SOCIETY_MODEL ?? 'deepseek-v4-flash'
         maxTokens: !!js Number(process.env.AGENT_SOCIETY_MAX_TOKENS ?? 8192)
         # Consensus digests into the Hub shared memory (default off).
-        contextEnabled: !!js process.env.AGENT_SOCIETY_CONTEXT === '1'
+        # Consensus digests into the Hub shared memory (AGENT_SOCIETY_CONTEXT=0 disables).
+        contextEnabled: !!js process.env.AGENT_SOCIETY_CONTEXT !== '0'
         # Answer Hub questions addressed to this actor when idle (default on).
         questionsEnabled: !!js process.env.AGENT_SOCIETY_QUESTIONS !== '0'
 

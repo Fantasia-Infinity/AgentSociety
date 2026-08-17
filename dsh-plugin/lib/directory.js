@@ -161,7 +161,7 @@ export function buildSharedContextSections(mirror) {
                 name: CONSENSUS_SECTION,
                 text: '## 共享共识上下文（AgentSociety）\n' +
                     consensus.join('\n') +
-                    '\n（共享记忆：用 hub_context_read 读取详情）',
+                    '\n（需要跨设备信息或历史结论时，先 hub_context_read 查共享记忆）',
             });
         }
         if (directory.length > 0) {
@@ -169,7 +169,8 @@ export function buildSharedContextSections(mirror) {
                 name: DIRECTORY_INDEX_SECTION,
                 text: '## 会话/Agent 目录（AgentSociety）\n' +
                     directory.join('\n') +
-                    '\n（可跨设备协作：用 hub_directory_get / hub_ask 查询详情与交互）',
+                    '\n（需要找到相关会话/向谁求助时：先 hub_directory_search/get 下钻；' +
+                    '仍无答案再 hub_ask 提问；任务中得出可复用结论时 hub_context_append 写回）',
             });
         }
         return sections;

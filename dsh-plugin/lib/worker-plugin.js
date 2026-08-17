@@ -123,7 +123,7 @@ export async function apply(ctx, config) {
         toolPolicy,
         selfUpdateEnabled,
         repositoryRoot,
-        contextEnabled: config.contextEnabled ?? process.env.AGENT_SOCIETY_CONTEXT === '1',
+        contextEnabled: config.contextEnabled ?? process.env.AGENT_SOCIETY_CONTEXT !== '0',
         directoryEnabled: config.directoryEnabled ?? process.env.AGENT_SOCIETY_DIRECTORY !== '0',
         questionsEnabled: config.questionsEnabled ?? process.env.AGENT_SOCIETY_QUESTIONS !== '0',
         provider: config.provider ?? 'deepseek-official',
