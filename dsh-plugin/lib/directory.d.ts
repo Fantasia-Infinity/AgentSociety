@@ -76,16 +76,23 @@ export declare function loadProjectionActivity(dshHome: string): Map<string, {
 export declare const DIRECTORY_INDEX_SECTION = "agent-society:directory-index";
 export declare const CONSENSUS_SECTION = "agent-society:consensus";
 export declare const PROMPT_BUDGET_CHARS = 4000;
-/** One-line consensus summaries for the prompt (most recent first). */
-export declare function consensusPromptLines(mirror: DirectoryMirror): string[];
+/** One-line consensus summaries for the prompt (most recent first).
+ *
+ * KV-cache stability: this session's own digests are excluded. The digest
+ * watcher writes a new entry whenever the session idles ~60s, so an active
+ * conversation would otherwise change the injected bytes every round and
+ * break the request prefix (cache miss) — while adding nothing the model
+ * does not already have in the transcript.
+ */
+export declare function consensusPromptLines(mirror: DirectoryMirror, currentSessionId?: string): string[];
 /** Ranked directory index lines: working > recently active > recent rows. */
-export declare function directoryPromptLines(mirror: DirectoryMirror): string[];
+export declare function directoryPromptLines(mirror: DirectoryMirror, currentSessionId?: string): string[];
 /**
  * Build the two bounded prompt sections for one assembly. Total text stays
  * under {@link PROMPT_BUDGET_CHARS}; entries are dropped from the directory
  * index first, then the consensus list, until the budget fits.
  */
-export declare function buildSharedContextSections(mirror: DirectoryMirror): Array<{
+export declare function buildSharedContextSections(mirror: DirectoryMirror, currentSessionId?: string): Array<{
     name: string;
     text: string;
 }>;

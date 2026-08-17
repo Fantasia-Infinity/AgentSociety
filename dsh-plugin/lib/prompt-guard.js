@@ -27,7 +27,12 @@ export function apply(ctx) {
     ctx.on('system-prompt/assemble', async (assembly, _context, next) => {
         const assembled = await next();
         try {
-            const sections = buildSharedContextSections(loadMirror(path));
+            // The current session id keeps this session's own digests and row
+            // out of the injected text: the digest watcher writes on every
+            // ~60s idle gap, which would churn the prompt prefix each round.
+            const current = _context.agent?.session?.id;
+            const currentSessionId = typeof current === 'string' ? current : undefined;
+            const sections = buildSharedContextSections(loadMirror(path), currentSessionId);
             if (sections.length === 0)
                 return assembled;
             const existing = new Set(assembled.sections.map((section) => section.name));

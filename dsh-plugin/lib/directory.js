@@ -155,16 +155,26 @@ export const CONSENSUS_SECTION = 'agent-society:consensus';
 export const PROMPT_BUDGET_CHARS = 4_000;
 const MAX_CONSENSUS_LINES = 8;
 const MAX_DIRECTORY_LINES = 20;
-/** One-line consensus summaries for the prompt (most recent first). */
-export function consensusPromptLines(mirror) {
-    return mirror.consensus.entries.slice(0, MAX_CONSENSUS_LINES).map((entry) => {
+/** One-line consensus summaries for the prompt (most recent first).
+ *
+ * KV-cache stability: this session's own digests are excluded. The digest
+ * watcher writes a new entry whenever the session idles ~60s, so an active
+ * conversation would otherwise change the injected bytes every round and
+ * break the request prefix (cache miss) — while adding nothing the model
+ * does not already have in the transcript.
+ */
+export function consensusPromptLines(mirror, currentSessionId) {
+    return mirror.consensus.entries
+        .filter((entry) => entry.session_id !== currentSessionId)
+        .slice(0, MAX_CONSENSUS_LINES)
+        .map((entry) => {
         const where = entry.session_id ? ` ${entry.session_id}` : '';
         return `- [${entry.kind}]${where}: ${entry.summary}`;
     });
 }
 /** Ranked directory index lines: working > recently active > recent rows. */
-export function directoryPromptLines(mirror) {
-    const rows = Object.values(mirror.rows);
+export function directoryPromptLines(mirror, currentSessionId) {
+    const rows = Object.values(mirror.rows).filter((row) => row.session_id !== currentSessionId);
     const rank = (row) => (row.status === 'working' ? 0 : 1);
     // KV-cache stability: rank first, then session_id (stable byte order).
     // last_active_at changes on every mirror pull and would reorder rows
@@ -184,9 +194,9 @@ export function directoryPromptLines(mirror) {
  * under {@link PROMPT_BUDGET_CHARS}; entries are dropped from the directory
  * index first, then the consensus list, until the budget fits.
  */
-export function buildSharedContextSections(mirror) {
-    const consensusLines = consensusPromptLines(mirror);
-    const directoryLines = directoryPromptLines(mirror);
+export function buildSharedContextSections(mirror, currentSessionId) {
+    const consensusLines = consensusPromptLines(mirror, currentSessionId);
+    const directoryLines = directoryPromptLines(mirror, currentSessionId);
     const build = (consensus, directory) => {
         const sections = [];
         if (consensus.length > 0) {

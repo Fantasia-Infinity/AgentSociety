@@ -3,6 +3,10 @@ import assert from 'node:assert/strict'
 
 import { buildSessionDigest, digestEventId } from '../lib/digest.js'
 import { HubClient } from '../lib/hub-client.js'
+import {
+  consensusPromptLines,
+  buildSharedContextSections,
+} from '../lib/directory.js'
 
 const INPUT = {
   principalId: 'principal-a',
@@ -129,4 +133,46 @@ test('extractAnswer pulls the marked answer or falls back to full text', async (
   assert.equal(extractAnswer('plain answer text'), 'plain answer text')
   const long = extractAnswer('x'.repeat(20_000))
   assert.ok(long.length <= 8000)
+})
+
+test('consensusPromptLines excludes the current session digests', () => {
+  const mirror = {
+    seq: 1,
+    updated_at: 1,
+    rows: {},
+    consensus: {
+      seq: 5,
+      entries: [
+        { seq: 5, kind: 'digest', session_id: 'mine', summary: 'mine-latest' },
+        { seq: 4, kind: 'digest', session_id: 'other', summary: 'other-1' },
+        { seq: 3, kind: 'digest', session_id: 'mine', summary: 'mine-old' },
+        { seq: 2, kind: 'decision', session_id: 'other', summary: 'decision-1' },
+      ],
+    },
+  }
+  const mine = consensusPromptLines(mirror, 'mine')
+  assert.deepEqual(mine, [
+    '- [digest] other: other-1',
+    '- [decision] other: decision-1',
+  ])
+  // Without the filter every entry is injected.
+  const all = consensusPromptLines(mirror)
+  assert.equal(all.length, 4)
+})
+
+test('buildSharedContextSections excludes the current session row', () => {
+  const mirror = {
+    seq: 1,
+    updated_at: 1,
+    consensus: { seq: 1, entries: [] },
+    rows: {
+      'mine': { session_id: 'mine', title: 'T', workspace: '/w', status: 'idle', last_active_at: 3, session_mode: 'per_task', tool_policy: 'full', invocations: [] },
+      'other': { session_id: 'other', title: 'O', workspace: '/o', status: 'idle', last_active_at: 2, session_mode: 'continuous', tool_policy: 'full', invocations: [] },
+    },
+  }
+  const sections = buildSharedContextSections(mirror, 'mine')
+  const dir = sections.find(s => s.name === 'agent-society:directory-index')
+  assert.ok(dir)
+  assert.ok(dir.text.includes('other'))
+  assert.ok(!dir.text.includes('mine |'))
 })
