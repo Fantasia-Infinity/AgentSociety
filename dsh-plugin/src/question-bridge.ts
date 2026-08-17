@@ -23,7 +23,7 @@ import { HubClient } from './hub-client.js'
 import { answerQuestionWithSession } from './answer.js'
 
 export const name = 'agent-society-question-bridge'
-export const inject: string[] = []
+export const inject = ['timer']
 
 export type QuestionPolicy = 'auto' | 'ask' | 'standalone'
 
@@ -89,8 +89,11 @@ export function apply(ctx: Context, config: Config): void {
   }
   // Public surface for the client card (P6a): report presence and read the
   // pending questions. Plain values; the browser half calls these over the
-  // host RPC bridge once wired.
-  ctx.reflect.provide('agentSocietyQuestionBridge', {
+  // host RPC bridge once wired. `reflect` is an optional host service.
+  const reflect = ctx.get('reflect') as
+    | { provide(name: string, value: unknown): unknown }
+    | undefined
+  reflect?.provide('agentSocietyQuestionBridge', {
     setHumanPresent(present: boolean): void {
       state.humanPresent = present
     },

@@ -26,7 +26,7 @@ import {
 } from './directory.js'
 
 export const name = 'agent-society-directory'
-export const inject: string[] = []
+export const inject = ['timer']
 
 export interface Config {
   hubUrl?: string

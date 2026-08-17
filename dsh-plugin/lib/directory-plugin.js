@@ -14,7 +14,7 @@ import { resolve } from 'node:path';
 import { HubClient } from './hub-client.js';
 import { buildLocalRow, loadMirror, loadProjectionTitles, mirrorPath, saveMirror, } from './directory.js';
 export const name = 'agent-society-directory';
-export const inject = [];
+export const inject = ['timer'];
 export const Config = Schema.object({
     hubUrl: Schema.string().required(false),
     hubTokenEnv: Schema.string().required(false),
