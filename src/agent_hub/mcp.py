@@ -132,7 +132,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "after_seq to pull only newer entries (incremental sync). "
             "USE THIS at the start of work or whenever you need facts, "
             "decisions, or results produced by other sessions before "
-            "asking anyone."
+            "asking anyone. The runtime-context injection only shows "
+            "one-line summaries; this tool returns the full entries "
+            "(objective/result text), so use it before deciding to ask "
+            "a session anything."
         ),
         "inputSchema": {
             "type": "object",
@@ -170,7 +173,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "Drill into one session directory row. depth 0 = identity, "
             "1 = invocation records, 2 = consensus digest, 3 = artifact refs. "
             "USE THIS after hub_directory_list/search to inspect a specific "
-            "session before deciding to ask it anything."
+            "session before deciding to ask it anything: depth 2 shows the "
+            "session's digests/conclusions - enough to judge whether it "
+            "really holds what you need; if it does, follow up with hub_ask "
+            "carrying that session_id as target_session_id."
         ),
         "inputSchema": {
             "type": "object",
@@ -208,7 +214,13 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "USE THIS ONLY AFTER hub_context_read and hub_directory_search "
             "could not answer: prefer shared memory first, then a specific "
             "target from the directory. Ask concrete questions; the answer "
-            "returns into your current turn."
+            "returns into your current turn. "
+            "Pass target_session_id to have the question answered INSIDE that "
+            "session's own context (its history becomes the prompt prefix; the "
+            "question and answer are appended back to that session) - ideal "
+            "when the session already holds the relevant context. Without "
+            "target_session_id the answerer picks the target actor's most "
+            "recent idle session automatically."
         ),
         "inputSchema": {
             "type": "object",
