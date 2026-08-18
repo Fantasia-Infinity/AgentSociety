@@ -87,6 +87,10 @@ export interface AgentHostConfig {
   dshWebSearch?: boolean;
   /** dsh session log compression. none keeps transcripts readable by `agent observe`. */
   dshSessionCompression?: "none" | "zstd";
+  /** Advertise an opt-in DSH Web capability to the Hub. Default off; set AGENT_HUB_DSH_WEB=1 to enable. */
+  dshWebEnabled?: boolean;
+  /** dsh profile name advertised for the web bridge, default "agent-society-web". */
+  dshWebProfile?: string;
 }
 
 export function loadProjectEnv(path?: string): void {
@@ -483,6 +487,9 @@ export function loadConfig(
     dshSessionCompression,
     dshHubMcp: process.env.AGENT_DSH_HUB_MCP !== "0",
     dshWebSearch: process.env.AGENT_DSH_WEB_SEARCH !== "0",
+    dshWebEnabled: process.env.AGENT_HUB_DSH_WEB === "1",
+    dshWebProfile:
+      process.env.AGENT_HUB_DSH_WEB_PROFILE?.trim() || "agent-society-web",
   };
 }
 

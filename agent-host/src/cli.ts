@@ -538,6 +538,23 @@ async function runDshWeb(
   config: AgentHostConfig,
   hub: HubClient | undefined,
 ): Promise<void> {
+  if (hub && config.dshWebEnabled) {
+    try {
+      await hub.updateNodeWeb(config.nodeId, {
+        enabled: true,
+        protocol_version: "1",
+        profile: config.dshWebProfile ?? "agent-society-web",
+        capabilities: ["session.read"],
+      });
+      console.log(
+        `Advertised DSH Web capability to the Hub as ${config.nodeId}`,
+      );
+    } catch (error) {
+      console.warn(
+        `Could not advertise DSH Web capability (${error instanceof Error ? error.message : String(error)}); the Hub will not list this device.`,
+      );
+    }
+  }
   const dshHome =
     process.env.DSH_HOME?.trim() || resolve(homedir(), ".dsh");
   const profile = "agent-society-web";

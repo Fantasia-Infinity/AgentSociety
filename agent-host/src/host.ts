@@ -4,6 +4,22 @@ import type { AgentHostConfig } from "./config.js";
 import type { AdapterManifest } from "./bridge-types.js";
 import type { HubClient } from "./hub-client.js";
 
+export function nodeWebMetadata(
+  config: AgentHostConfig,
+): Record<string, unknown> | undefined {
+  if (!config.dshWebEnabled) return undefined;
+  return {
+    enabled: true,
+    protocol_version: "1",
+    profile: config.dshWebProfile ?? "agent-society-web",
+    capabilities: ["session.read"],
+  };
+}
+
+export function nodeWebCapabilities(config: AgentHostConfig): string[] {
+  return config.dshWebEnabled ? ["dsh-web"] : [];
+}
+
 export async function registerHost(
   config: AgentHostConfig,
   hub: HubClient,
@@ -48,11 +64,19 @@ export async function registerHost(
     node_id: config.nodeId,
     actor_id: config.actorId,
     display_name: config.nodeDisplayName,
-    capabilities: ["filesystem", "local-interactive", "remote-worker"],
+    capabilities: [
+      "filesystem",
+      "local-interactive",
+      "remote-worker",
+      ...nodeWebCapabilities(config),
+    ],
     metadata: {
       platform: platform(),
       release: release(),
       workspace_root: config.workspaceRoot,
+      ...(nodeWebMetadata(config)
+        ? { dsh_web: nodeWebMetadata(config) }
+        : {}),
     },
   });
 }
@@ -90,12 +114,19 @@ export async function registerDshHost(
     node_id: config.nodeId,
     actor_id: config.actorId,
     display_name: config.nodeDisplayName,
-    capabilities: ["filesystem", "remote-worker"],
+    capabilities: [
+      "filesystem",
+      "remote-worker",
+      ...nodeWebCapabilities(config),
+    ],
     metadata: {
       platform: platform(),
       release: release(),
       workspace_root: config.workspaceRoot,
       runtime: "dsh",
+      ...(nodeWebMetadata(config)
+        ? { dsh_web: nodeWebMetadata(config) }
+        : {}),
     },
   });
 }

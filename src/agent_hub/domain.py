@@ -141,6 +141,44 @@ class NodeRegistration:
 
 
 @dataclass(frozen=True, slots=True)
+class NodeWebRegistration:
+    """Optional DSH Web capability advertised by one node.
+
+    Metadata only: the Hub never dials the endpoint. A future outbound node
+    tunnel owns the data path with an explicit path allowlist, so this
+    registration cannot turn the Hub into an arbitrary SSRF proxy.
+    """
+
+    enabled: bool
+    protocol_version: str | None
+    dsh_version: str | None
+    profile: str | None
+    capabilities: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "protocol_version": self.protocol_version,
+            "dsh_version": self.dsh_version,
+            "profile": self.profile,
+            "capabilities": list(self.capabilities),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "NodeWebRegistration":
+        raw_enabled = payload.get("enabled", False)
+        if not isinstance(raw_enabled, bool):
+            raise ValueError("web.enabled must be a boolean")
+        return cls(
+            enabled=raw_enabled,
+            protocol_version=optional_text(payload, "protocol_version", maximum=80),
+            dsh_version=optional_text(payload, "dsh_version", maximum=120),
+            profile=optional_text(payload, "profile", maximum=200),
+            capabilities=string_list(payload, "capabilities"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class TaskSubmission:
     principal_id: str
     delegator_actor_id: str

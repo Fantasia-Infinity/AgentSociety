@@ -9,6 +9,7 @@ from ..domain import (
     PrincipalRegistration,
 )
 from .base import (
+    _decode,
     _json,
 )
 
@@ -161,6 +162,36 @@ class IdentityStore:
                 WHERE node_id=?
                 """,
                 (now, now, node_id),
+            )
+            if cursor.rowcount != 1:
+                raise LookupError("node not found")
+            return self._node(node_id)
+
+    def update_node_web(
+        self, node_id: str, web_metadata: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Merge a validated DSH Web capability block into node metadata.
+
+        Only the owning node (or an admin) may call this through the API; the
+        store itself only performs a read-modify-write under the lock.
+        """
+
+        now = time.time()
+        with self._condition, self._connection:
+            row = self._connection.execute(
+                "SELECT metadata_json FROM hub_nodes WHERE node_id=?", (node_id,)
+            ).fetchone()
+            if row is None:
+                raise LookupError("node not found")
+            metadata = _decode(str(row["metadata_json"]))
+            metadata["dsh_web"] = web_metadata
+            cursor = self._connection.execute(
+                """
+                UPDATE hub_nodes
+                SET metadata_json=?, status='online', last_seen_at=?, updated_at=?
+                WHERE node_id=?
+                """,
+                (_json(metadata), now, now, node_id),
             )
             if cursor.rowcount != 1:
                 raise LookupError("node not found")

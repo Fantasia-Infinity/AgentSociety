@@ -83,6 +83,23 @@ export class HubClient {
     });
   }
 
+  async updateNodeWeb(
+    nodeId: string,
+    web: {
+      enabled: boolean;
+      protocol_version?: string;
+      dsh_version?: string;
+      profile?: string;
+      capabilities?: string[];
+    },
+  ): Promise<NodeRecord> {
+    const response = await this.request<{ node: NodeRecord }>(
+      "/v1/hub/nodes/web",
+      { method: "POST", body: { node_id: nodeId, web } },
+    );
+    return response.node;
+  }
+
   async listActors(): Promise<Actor[]> {
     const response = await this.request<{ actors: Actor[] }>("/v1/hub/actors");
     return response.actors;

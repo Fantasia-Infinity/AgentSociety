@@ -13,6 +13,7 @@ from .domain import (
     ArtifactSubmission,
     AuthTokenCreation,
     NodeRegistration,
+    NodeWebRegistration,
     PrincipalRegistration,
     RunStatus,
     RunSubmission,
@@ -195,11 +196,12 @@ class AgentHubApi:
                 )
             }
         if path == f"{self.prefix}/nodes":
-            return HTTPStatus.OK, {
-                "nodes": self.store.list_nodes(
-                    tenant_id=tenant_id, principal_id=principal_scope
-                )
-            }
+            nodes = self.store.list_nodes(
+                tenant_id=tenant_id, principal_id=principal_scope
+            )
+            for node in nodes:
+                node["web"] = self._public_node_web(node)
+            return HTTPStatus.OK, {"nodes": nodes}
         if path == f"{self.prefix}/tasks":
             query = parse_qs(query_string)
             status = (query.get("status") or [None])[0]
@@ -541,10 +543,35 @@ class AgentHubApi:
             return HTTPStatus.OK, {"actor": item}
         if path == f"{self.prefix}/nodes":
             self._require_registration(context, "node", payload)
-            item = self.store.register_node(
-                NodeRegistration.from_dict(payload), tenant_id=tenant_id
+            scoped = dict(payload)
+            raw_web = scoped.get("dsh_web")
+            if raw_web is not None:
+                if not isinstance(raw_web, dict):
+                    raise ValueError("dsh_web must be an object")
+                metadata = dict(object_value(scoped, "metadata"))
+                metadata["dsh_web"] = NodeWebRegistration.from_dict(
+                    raw_web
+                ).to_dict()
+                scoped["metadata"] = metadata
+            item = NodeRegistration.from_dict(scoped)
+            if item.metadata.get("dsh_web"):
+                item = self._with_node_web_capability(item)
+            node = self.store.register_node(item, tenant_id=tenant_id)
+            node["web"] = self._public_node_web(node)
+            return HTTPStatus.OK, {"node": node}
+        if path == f"{self.prefix}/nodes/web":
+            node_id = required_text(payload, "node_id", maximum=200)
+            if context is not None and not context.is_admin:
+                if context.node_id != node_id:
+                    raise PermissionError(
+                        "node token cannot update web capability of another node"
+                    )
+            web = NodeWebRegistration.from_dict(
+                object_value(payload, "web")
             )
-            return HTTPStatus.OK, {"node": item}
+            node = self.store.update_node_web(node_id, web.to_dict())
+            node["web"] = self._public_node_web(node)
+            return HTTPStatus.OK, {"node": node}
         if path == f"{self.prefix}/nodes/heartbeat":
             node_id = required_text(payload, "node_id", maximum=200)
             if context is not None and not context.is_admin:
@@ -1053,6 +1080,42 @@ class AgentHubApi:
             elif str(payload.get("principal_id", "")).strip() == context.principal_id:
                 return
         raise PermissionError("tenant manager role required")
+
+    def _with_node_web_capability(
+        self, item: NodeRegistration
+    ) -> NodeRegistration:
+        """Advertise the dsh-web capability when a node registers it."""
+        if "dsh-web" in item.capabilities:
+            return item
+        return NodeRegistration(
+            node_id=item.node_id,
+            actor_id=item.actor_id,
+            display_name=item.display_name,
+            capabilities=(*item.capabilities, "dsh-web"),
+            metadata=item.metadata,
+        )
+
+    @staticmethod
+    def _public_node_web(node: dict[str, Any]) -> dict[str, Any]:
+        """Redacted browser-facing DSH Web capability view.
+
+        Never expose node credentials, workspace paths, or any dialable
+        endpoint: stage one is metadata only and the Hub does not proxy.
+        """
+
+        raw = (node.get("metadata") or {}).get("dsh_web")
+        if not isinstance(raw, dict) or raw.get("enabled") is not True:
+            return {"enabled": False}
+        capabilities = raw.get("capabilities", [])
+        if not isinstance(capabilities, list):
+            capabilities = []
+        return {
+            "enabled": True,
+            "protocol_version": raw.get("protocol_version"),
+            "dsh_version": raw.get("dsh_version"),
+            "profile": raw.get("profile"),
+            "capabilities": [str(item) for item in capabilities[:100]],
+        }
 
     def _parts(self, path: str) -> list[str]:
         prefix = f"{self.prefix}/"
