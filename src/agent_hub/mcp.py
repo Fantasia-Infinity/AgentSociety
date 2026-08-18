@@ -128,10 +128,12 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "hub_context_read",
         "description": (
-            "Read the shared consensus context of your principal. Pass "
-            "after_seq to pull only newer entries (incremental sync). "
-            "USE THIS at the start of work or whenever you need facts, "
-            "decisions, or results produced by other sessions before "
+            "Read the shared consensus context of your principal. "
+            "Defaults to the NEWEST entries (latest first, up to limit); "
+            "pass after_seq to pull only newer entries (incremental sync). "
+            "The result includes latest_seq so you know the true head of "
+            "the log. USE THIS at the start of work or whenever you need "
+            "facts, decisions, or results produced by other sessions before "
             "asking anyone. The runtime-context injection only shows "
             "one-line summaries; this tool returns the full entries "
             "(objective/result text), so use it before deciding to ask "
@@ -381,13 +383,27 @@ class McpService:
                 )
                 return self._tool_result({"event": result["event"]})
             if name == "hub_context_read":
-                query = "&".join(
-                    f"{key}={quote(str(value))}"
+                query_args = {
+                    key: value
                     for key, value in arguments.items()
                     if value is not None
+                }
+                # Default to the newest entries (descending) unless an
+                # incremental pull is requested; latest_seq tells the caller
+                # how far the head of the log is.
+                if "after_seq" not in query_args:
+                    query_args.setdefault("order", "desc")
+                query = "&".join(
+                    f"{key}={quote(str(value))}"
+                    for key, value in query_args.items()
                 )
                 _, result = self.api.get("/v1/hub/contexts", query, context)
-                return self._tool_result({"events": result["events"]})
+                return self._tool_result(
+                    {
+                        "events": result["events"],
+                        "latest_seq": result.get("latest_seq"),
+                    }
+                )
             if name == "hub_directory_list":
                 query = "&".join(
                     f"{key}={quote(str(value))}"

@@ -133,6 +133,22 @@ class SharedStore:
             ).fetchall()
             return [self._shared_event_dict(row) for row in rows]
 
+    def max_shared_event_seq(
+        self, *, tenant_id: str, principal_id: str | None = None
+    ) -> int:
+        """Highest seq visible to this tenant/principal (0 when empty)."""
+        with self._lock:
+            params: list[Any] = [tenant_id]
+            where = ["tenant_id=?"]
+            if principal_id is not None:
+                where.append("principal_id=?")
+                params.append(principal_id)
+            row = self._connection.execute(
+                f"SELECT MAX(seq) AS m FROM hub_shared_events WHERE {' AND '.join(where)}",
+                tuple(params),
+            ).fetchone()
+            return int(row["m"] or 0) if row else 0
+
     def shared_snapshot(
         self, *, tenant_id: str, principal_id: str | None = None
     ) -> dict[str, Any]:

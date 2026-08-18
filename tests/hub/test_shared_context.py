@@ -138,6 +138,60 @@ class SharedStoreTests(unittest.TestCase):
         self.assertEqual([e["event_id"] for e in events], ["evt-live"])
 
 
+    def test_desc_order_returns_newest_first(self) -> None:
+        for index in range(5):
+            self._append(
+                kind="digest",
+                session_id=f"session-{index}",
+                event_id=f"evt-desc-{index}",
+            )
+        events = self.store.list_shared_events(
+            tenant_id="default", order="desc"
+        )
+        self.assertEqual(len(events), 5)
+        seqs = [event["seq"] for event in events]
+        self.assertEqual(seqs, sorted(seqs, reverse=True))
+        self.assertEqual(events[0]["event_id"], "evt-desc-4")
+        # Incremental pulls stay ascending even with order=desc.
+        incremental = self.store.list_shared_events(
+            tenant_id="default", after_seq=seqs[1], order="desc"
+        )
+        self.assertEqual(
+            [event["seq"] for event in incremental], sorted(seqs[0:1])
+        )
+
+    def test_latest_seq_reports_log_head(self) -> None:
+        self.assertEqual(self.store.max_shared_event_seq(tenant_id="default"), 0)
+        self._append(kind="digest", session_id="s-1", event_id="evt-head-1")
+        self._append(kind="fact", session_id=None, event_id="evt-head-2")
+        self.assertEqual(
+            self.store.max_shared_event_seq(
+                tenant_id="default", principal_id="principal-a"
+            ),
+            2,
+        )
+        # Other principal's entries do not move our head.
+        self.store.register_principal(
+            PrincipalRegistration(
+                principal_id="principal-other",
+                kind="human",
+                display_name="Other",
+                metadata={},
+            )
+        )
+        self._append(
+            kind="digest",
+            session_id="s-other",
+            event_id="evt-head-3",
+            principal_id="principal-other",
+        )
+        self.assertEqual(
+            self.store.max_shared_event_seq(
+                tenant_id="default", principal_id="principal-a"
+            ),
+            2,
+        )
+
 class SharedContextApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = TemporaryDirectory()
@@ -344,6 +398,34 @@ class SharedContextApiTests(unittest.TestCase):
         events = json.loads(read["result"]["content"][0]["text"])["events"]
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["event_id"], event["event_id"])
+
+    def test_mcp_context_read_defaults_to_newest(self) -> None:
+        service = McpService(self.api)
+        for index in range(3):
+            _mcp_call(
+                service,
+                "tools/call",
+                {
+                    "name": "hub_context_append",
+                    "arguments": {
+                        "kind": "digest",
+                        "payload": {"title": f"T{index}", "summary": "s"},
+                        "session_id": f"session-{index}",
+                        "event_id": f"evt-mcp-{index}",
+                    },
+                },
+            )
+        read = _mcp_call(
+            service,
+            "tools/call",
+            {"name": "hub_context_read", "arguments": {"limit": 2}},
+        )
+        body = json.loads(read["result"]["content"][0]["text"])
+        events = body["events"]
+        # Newest first: the last appended event leads the default read.
+        self.assertEqual(events[0]["event_id"], "evt-mcp-2")
+        self.assertEqual(events[1]["event_id"], "evt-mcp-1")
+        self.assertEqual(body["latest_seq"], 3)
 
 
 if __name__ == "__main__":

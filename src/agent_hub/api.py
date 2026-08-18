@@ -261,7 +261,13 @@ class AgentHubApi:
                     session_id=(query.get("session_id") or [None])[0],
                     limit=limit,
                     order=order,
-                )
+                ),
+                # True head of the log for this principal, so a caller that
+                # just read a window knows whether newer entries exist.
+                "latest_seq": self.store.max_shared_event_seq(
+                    tenant_id=tenant_id or "default",
+                    principal_id=principal_scope,
+                ),
             }
         if path == f"{self.prefix}/contexts/snapshot":
             return HTTPStatus.OK, {
