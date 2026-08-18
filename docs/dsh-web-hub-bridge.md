@@ -1,8 +1,9 @@
-# Hub DSH Web Bridge（第一阶段）
+# Hub DSH Web Bridge
 
 本文档描述在 AgentSociety Hub 上为 DeepSeek Harness（dsh）Web 提供
-**跨设备统一访问**的第一阶段实现：节点可选择性向 Hub 注册 `dsh_web`
-能力，Hub 保存并对外暴露脱敏的能力视图。**本阶段不包含任何代理/隧道**。
+**跨设备统一访问**的分阶段实现。第一阶段：节点可选择性向 Hub 注册
+`dsh_web` 能力，Hub 保存并对外暴露脱敏的能力视图；P1（已实现）：
+设备出站受控隧道 + Hub 同源 HTTP 代理。
 
 ## 目标与范围
 
@@ -10,16 +11,52 @@
 - 设备可选地通过环境变量 `AGENT_HUB_DSH_WEB=1` 声明自己提供 dsh Web 能力。
 - Hub 在节点注册/心跳时保存 `dsh_web` 元数据，并仅在节点令牌（或管理员）认证下允许更新。
 - 浏览器端可以通过受租户/主体作用域约束的 `GET /v1/hub/nodes` 读取每个节点的
-  脱敏 `web` 视图（`enabled`、`protocol_version`、`profile` 等），用于后续的
-  设备选择器 UI。
+  脱敏 `web` 视图（`enabled`、`protocol_version`、`profile` 等），用于设备选择器 UI。
+- 设备通过 `agent web-bridge` 出站隧道接入 Hub，浏览器经 Hub 同源路径访问设备
+  的 dsh Web HTTP 面（`/api` RPC 与静态资源）。
 
-明确**不在**本阶段范围内（后续阶段设计）：
+明确**不在**当前范围内（后续阶段设计）：
 
-- Hub 到设备的 HTTP/WebSocket 反向代理或隧道（传输层必须使用节点主动出站的
-  受控 tunnel，配显式路径白名单，绝不能变成任意 SSRF 代理）。
+- 浏览器 WebSocket 事件流（`/api/events.mux`、`/api/events.host`）经 Hub 的
+  upgrade 转发（HTTP 部分已完成；WS upgrade 转发为下一步）。
 - 把设备本地 `.dsh/sessions` 文件或 live session 序列化后交给 Hub。
 - 向浏览器下发节点令牌 / DeepSeek 模型凭据。
-- Hub `/web` 直接反向代理远端 dsh UI。
+- Hub `/web` 直接反向代理远端 dsh UI（当前用受控隧道协议，见下）。
+
+## 隧道协议（P1，已实现）
+
+设备主动出站连接 Hub（NAT/防火墙友好），Hub 把浏览器请求路由回去：
+
+1. 设备用节点令牌调用 `POST /v1/hub/nodes/web/tunnel`，获得一次性短时
+   ticket（默认 120s）。
+2. 设备连接 `GET /v1/web/tunnel/ws?ticket=<ticket>`（WebSocket 升级，
+   纯标准库 RFC 6455 实现，`src/agent_hub/websocket.py`），ticket 消费后
+   注册为该节点的活跃隧道（`src/agent_hub/tunnel.py`）。
+3. 浏览器经 Hub 认证后访问 `GET/POST/HEAD /v1/web/<node_id>/<path>`，
+   Hub 把请求打包为 JSON 消息经隧道转发；设备端 bridge
+   （`agent-host/src/web-bridge.ts`，`agent web-bridge` 命令）fetch 本地
+   `dsh web`（仅回环地址，默认 `http://127.0.0.1:3001`，可用
+   `AGENT_DSH_WEB_TARGET` 覆盖），把响应原样回传。
+4. 路径白名单：`/`、`/api`、`/api/*`、`/assets/*`；请求头白名单
+   （Accept/Content-Type/X-Requested-With）、响应头白名单
+   （Content-Type/Cache-Control/Content-Encoding/ETag/Last-Modified）；
+   Hub 凭据/Cookie 绝不转发给设备。请求体上限 16MiB、响应 32MiB、
+   代理超时 30s，设备离线返回 502。
+
+消息契约（Hub↔设备，WebSocket text JSON）：
+
+```jsonc
+// Hub -> 设备
+{"type":"http","id":"<request-id>","method":"POST","path":"/api/session.list",
+ "headers":{...},"body_b64":"<base64|null>"}
+// 设备 -> Hub
+{"type":"http-response","id":"<request-id>","status":200,"headers":{...},
+ "body_b64":"<base64|null>"}
+// 保活（预留）
+{"type":"ping"} / {"type":"pong"}
+```
+
+浏览器 WebSocket 事件流升级转发（ws-open/ws-frame 消息）为下一阶段。
 
 ## 契约
 

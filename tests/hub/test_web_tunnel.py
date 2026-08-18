@@ -1,0 +1,305 @@
+from __future__ import annotations
+
+import base64
+import json
+import os
+import secrets
+import socket
+import struct
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+import unittest
+
+from agent_hub.api import AgentHubApi
+from agent_hub.server import HubHttpServer
+from agent_hub.store import AgentHubStore
+from agent_hub.websocket import accept_key
+
+
+class FakeDshWebServer:
+    """Stand-in for the device-local dsh web HTTP surface."""
+
+    def __init__(self) -> None:
+        requests: list[str] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                self._answer()
+            def do_POST(self) -> None:  # noqa: N802
+                self._answer()
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+            def _answer(self) -> None:
+                requests.append(f"{self.command} {self.path}")
+                body = json.dumps(
+                    {"ok": True, "path": self.path, "device": "fake-dsh-web"}
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.requests = requests
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class MiniWebSocketClient:
+    """Minimal RFC 6455 client for the device side of the tunnel."""
+
+    def __init__(self, url: str) -> None:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        self.sock = socket.create_connection((parsed.hostname, parsed.port))
+        key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
+        path = parsed.path or "/"
+        if parsed.query:
+            path += "?" + parsed.query
+        request = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {parsed.hostname}:{parsed.port}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n\r\n"
+        )
+        self.sock.sendall(request.encode("ascii"))
+        response = b""
+        while b"\r\n\r\n" not in response:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                raise RuntimeError("handshake closed")
+            response += chunk
+        head, _, _ = response.partition(b"\r\n\r\n")
+        if b" 101 " not in head.split(b"\r\n")[0]:
+            raise RuntimeError(f"handshake failed: {head!r}")
+        for line in head.split(b"\r\n"):
+            if line.lower().startswith(b"sec-websocket-accept:"):
+                expected = accept_key(key)
+                if line.split(b":", 1)[1].strip().decode("ascii") != expected:
+                    raise RuntimeError("bad accept key")
+        self._buffer = b""
+
+    def send_text(self, text: str) -> None:
+        payload = text.encode("utf-8")
+        mask = secrets.token_bytes(4)
+        header = bytearray([0x81])
+        length = len(payload)
+        if length < 126:
+            header.append(0x80 | length)
+        elif length < 65536:
+            header.append(0x80 | 126)
+            header += struct.pack("!H", length)
+        else:
+            header.append(0x80 | 127)
+            header += struct.pack("!Q", length)
+        body = bytes(payload[i] ^ mask[i % 4] for i in range(length))
+        self.sock.sendall(bytes(header) + mask + body)
+
+    def recv_text(self, timeout: float = 10.0) -> str:
+        self.sock.settimeout(timeout)
+        while True:
+            if len(self._buffer) >= 2:
+                first, second = self._buffer[0], self._buffer[1]
+                opcode = first & 0x0F
+                length = second & 0x7F
+                offset = 2
+                if length == 126:
+                    if len(self._buffer) < 4:
+                        self._buffer += self._read_more()
+                        continue
+                    length = struct.unpack("!H", self._buffer[2:4])[0]
+                    offset = 4
+                elif length == 127:
+                    if len(self._buffer) < 10:
+                        self._buffer += self._read_more()
+                        continue
+                    length = struct.unpack("!Q", self._buffer[2:10])[0]
+                    offset = 10
+                if len(self._buffer) < offset + length:
+                    self._buffer += self._read_more()
+                    continue
+                frame = self._buffer[offset : offset + length]
+                self._buffer = self._buffer[offset + length :]
+                if opcode == 0x9:  # ping -> pong
+                    mask = secrets.token_bytes(4)
+                    header = bytes([0x8A, 0x80 | len(frame)]) + mask
+                    body = bytes(frame[i] ^ mask[i % 4] for i in range(len(frame)))
+                    self.sock.sendall(header + body)
+                    continue
+                if opcode == 0x8:
+                    raise RuntimeError("closed by server")
+                if opcode in (0x1, 0x2):
+                    return frame.decode("utf-8")
+            else:
+                self._buffer += self._read_more()
+
+    def _read_more(self) -> bytes:
+        chunk = self.sock.recv(4096)
+        if not chunk:
+            raise RuntimeError("connection closed")
+        return chunk
+
+    def close(self) -> None:
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+class WebTunnelIntegrationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temporary = TemporaryDirectory()
+        self.store = AgentHubStore(Path(self._temporary.name) / "hub.sqlite3")
+        self.api = AgentHubApi(self.store)
+        self.token = "standalone-hub-token-123456789"
+        self.server = HubHttpServer(
+            ("127.0.0.1", 0), self.api, self.token
+        )
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.port = self.server.server_address[1]
+        self.base = f"http://127.0.0.1:{self.port}"
+        self.fake_web = FakeDshWebServer()
+        self.store.register_principal(
+            __import__("agent_hub.domain", fromlist=["PrincipalRegistration"]).PrincipalRegistration(
+                principal_id="principal-owner", kind="human",
+                display_name="Owner", metadata={},
+            )
+        )
+        self.store.register_actor(
+            __import__("agent_hub.domain", fromlist=["ActorRegistration"]).ActorRegistration(
+                actor_id="actor-pi", principal_id="principal-owner", kind="agent",
+                display_name="Pi", capabilities=(), metadata={},
+            )
+        )
+        self.store.register_node(
+            __import__("agent_hub.domain", fromlist=["NodeRegistration"]).NodeRegistration(
+                node_id="node-device", actor_id="actor-pi", display_name="Device",
+                capabilities=("filesystem",), metadata={},
+            )
+        )
+
+    def tearDown(self) -> None:
+        self.fake_web.close()
+        self.server.shutdown()
+        self.server.server_close()
+        self.store.close()
+        self._temporary.cleanup()
+
+    def _open_tunnel(self) -> MiniWebSocketClient:
+        request = Request(
+            f"{self.base}/v1/hub/nodes/web/tunnel",
+            data=json.dumps({"node_id": "node-device"}).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.token}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        with urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        ticket = payload["ticket"]
+        ws = MiniWebSocketClient(
+            f"ws://127.0.0.1:{self.port}{payload['ws_path']}?ticket={ticket}"
+        )
+        # First message the device receives is the forwarded browser request.
+        return ws
+
+    def test_full_tunnel_proxy_roundtrip(self) -> None:
+        ws = self._open_tunnel()
+
+        def device_loop() -> None:
+            message = json.loads(ws.recv_text())
+            self.assertEqual(message["type"], "http")
+            self.assertEqual(message["method"], "POST")
+            self.assertEqual(message["path"], "/api/session.list")
+            forwarded = Request(
+                f"{self.fake_web.base_url}{message['path']}",
+                data=base64.b64decode(message["body_b64"]),
+                headers={k: v for k, v in message["headers"].items()},
+                method="POST",
+            )
+            with urlopen(forwarded, timeout=5) as response:
+                body = response.read()
+            ws.send_text(
+                json.dumps(
+                    {
+                        "type": "http-response",
+                        "id": message["id"],
+                        "status": response.status,
+                        "headers": {"Content-Type": response.headers.get("Content-Type", "")},
+                        "body_b64": base64.b64encode(body).decode("ascii"),
+                    }
+                )
+            )
+
+        thread = threading.Thread(target=device_loop, daemon=True)
+        thread.start()
+        try:
+            browser_body = json.dumps(
+                {"type": "client-request", "rpcId": "1", "method": "session.list", "payload": {}}
+            ).encode("utf-8")
+            request = Request(
+                f"{self.base}/v1/web/node-device/api/session.list",
+                data=browser_body,
+                headers={
+                    "Authorization": f"Bearer {self.token}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with urlopen(request, timeout=15) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["path"], "/api/session.list")
+            self.assertEqual(result["device"], "fake-dsh-web")
+            self.assertEqual(
+                self.fake_web.requests, ["POST /api/session.list"]
+            )
+        finally:
+            ws.close()
+
+    def test_proxy_rejects_disallowed_path(self) -> None:
+        request = Request(
+            f"{self.base}/v1/web/node-device/etc/passwd",
+            headers={"Authorization": f"Bearer {self.token}"},
+        )
+        with self.assertRaises(HTTPError) as raised:
+            urlopen(request, timeout=5)
+        self.assertEqual(raised.exception.code, 403)
+
+    def test_proxy_requires_auth(self) -> None:
+        request = Request(f"{self.base}/v1/web/node-device/api/session.list")
+        with self.assertRaises(HTTPError) as raised:
+            urlopen(request, timeout=5)
+        self.assertEqual(raised.exception.code, 401)
+
+    def test_proxy_offline_device_returns_bad_gateway(self) -> None:
+        request = Request(
+            f"{self.base}/v1/web/node-device/api/session.list",
+            headers={"Authorization": f"Bearer {self.token}"},
+        )
+        with self.assertRaises(HTTPError) as raised:
+            urlopen(request, timeout=5)
+        self.assertEqual(raised.exception.code, 502)
+
+
+if __name__ == "__main__":
+    unittest.main()

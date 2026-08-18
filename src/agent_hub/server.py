@@ -21,8 +21,18 @@ from .mcp import MCP_PROTOCOL_VERSION, McpService
 from .ratelimit import AuthRateLimiter
 from .store import AgentHubStore
 from .object_store import build_object_store
+from .tunnel import TunnelRegistry
 from .web import WebSession
 from .web.handlers import WebHandlersMixin
+from .web_proxy import (
+    FORWARDED_REQUEST_HEADERS,
+    FORWARDED_RESPONSE_HEADERS,
+    MAX_PROXY_REQUEST_BODY,
+    WebTunnelCoordinator,
+    decode_proxy_body,
+    validate_proxy_path,
+)
+from .websocket import WebSocket, WebSocketProtocolError, accept_key
 
 
 logger = logging.getLogger(__name__)
@@ -71,6 +81,11 @@ class HubHttpServer(ThreadingHTTPServer):
         self.disable_bootstrap = disable_bootstrap
         self.oidc_provider = oidc_provider
         self.rate_limiter = rate_limiter
+        # Outbound DSH Web tunnels: devices connect out and the Hub routes
+        # browser requests back to them over the live WebSocket.
+        self.tunnels = TunnelRegistry()
+        self.web_tunnel = WebTunnelCoordinator(self.tunnels)
+        api.tunnel_registry = self.tunnels
         # SSE subscribers for /v1/hub/events: one entry per connected worker
         # node. Entries are {node_id, tenant_id, queue}; publish() fans a
         # worker-relevant event out to the matching node's stream.
@@ -158,6 +173,12 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
         if parsed.path == "/health":
             self._send_json(HTTPStatus.OK, {"status": "ok"})
             return
+        if parsed.path == "/v1/web/tunnel/ws":
+            self._tunnel_device_ws(parse_qs(parsed.query))
+            return
+        if parsed.path.startswith("/v1/web/"):
+            self._web_proxy("GET")
+            return
         if parsed.path == "/v1/hub/events":
             self._sse_events_stream(parse_qs(parsed.query))
             return
@@ -201,6 +222,9 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
             return
         if self.server.web is not None and parsed.path.startswith("/web"):
             self._web_post(parsed.path)
+            return
+        if parsed.path.startswith("/v1/web/"):
+            self._web_proxy("POST")
             return
         if parsed.path == "/mcp":
             if self.server.mcp is None:
@@ -299,6 +323,101 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: Any) -> None:
         logger.info("http %s", format % args)
+
+    def do_HEAD(self) -> None:
+        self._web_proxy("HEAD")
+
+    def _tunnel_device_ws(self, query: dict[str, list[str]]) -> None:
+        """Device outbound tunnel endpoint: ticket-authenticated WS upgrade."""
+        ticket = (query.get("ticket") or [""])[0].strip()
+        node_id = self.server.tunnels.consume_ticket(ticket)
+        if node_id is None:
+            self._send_json(
+                HTTPStatus.UNAUTHORIZED, {"error": "invalid or expired tunnel ticket"}
+            )
+            return
+        key = self.headers.get("Sec-WebSocket-Key", "").strip()
+        if not key:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST, {"error": "missing Sec-WebSocket-Key"}
+            )
+            return
+        self.protocol_version = "HTTP/1.1"
+        self.send_response(HTTPStatus.SWITCHING_PROTOCOLS)
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept_key(key))
+        self.end_headers()
+        self.close_connection = True
+        ws = WebSocket(self.rfile, self.wfile)
+        self.server.web_tunnel.handle_device_ws(ws, node_id)
+
+    def _web_proxy(self, method: str) -> None:
+        """Browser-facing DSH Web proxy: /v1/web/{node_id}/<path>."""
+        parsed = urlparse(self.path)
+        rest = parsed.path
+        # /v1/web/<node_id>[/<rest>]
+        segments = [part for part in rest.split("/") if part]
+        if len(segments) < 2 or segments[0] != "v1" or segments[1] != "web":
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+            return
+        node_id = segments[2]
+        path = "/" + "/".join(segments[3:]) if len(segments) > 3 else "/"
+        if not validate_proxy_path(path):
+            self._send_json(
+                HTTPStatus.FORBIDDEN, {"error": "path not allowed on the tunnel"}
+            )
+            return
+        context = self._authorized()
+        if context is None:
+            return
+        headers = {
+            key: value
+            for key, value in self.headers.items()
+            if key.lower() in FORWARDED_REQUEST_HEADERS
+        }
+        body: bytes | None = None
+        if method in ("POST", "PUT", "PATCH"):
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST, {"error": "invalid Content-Length"}
+                )
+                return
+            if length > MAX_PROXY_REQUEST_BODY:
+                self._send_json(
+                    HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                    {"error": "request body too large"},
+                )
+                return
+            if length:
+                body = self.rfile.read(length)
+        response = self.server.web_tunnel.proxy_request(
+            node_id, method, path, headers, body
+        )
+        if response is None:
+            self._send_json(
+                HTTPStatus.BAD_GATEWAY, {"error": "device tunnel unavailable"}
+            )
+            return
+        try:
+            status = int(response.get("status", 502))
+            response_headers = response.get("headers") or {}
+            body_bytes = decode_proxy_body(response.get("body_b64")) or b""
+        except (TypeError, ValueError):
+            self._send_json(HTTPStatus.BAD_GATEWAY, {"error": "bad tunnel response"})
+            return
+        self.protocol_version = "HTTP/1.1"
+        self.send_response(status)
+        for key, value in response_headers.items():
+            if key.lower() in FORWARDED_RESPONSE_HEADERS:
+                self.send_header(key, str(value))
+        self.send_header("Content-Length", str(len(body_bytes)))
+        self._send_security_headers()
+        self.end_headers()
+        if method != "HEAD" and body_bytes:
+            self.wfile.write(body_bytes)
 
     def _rate_limited(self, path: str) -> bool:
         limiter = self.server.rate_limiter

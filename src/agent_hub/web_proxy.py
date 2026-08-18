@@ -1,0 +1,168 @@
+"""Hub-side DSH Web tunnel coordination: device WebSocket loop and the
+browser-facing request/response pairing. Transport-agnostic apart from the
+WebSocket object it is handed by the HTTP server.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import logging
+import queue
+import secrets
+import threading
+from typing import Any
+
+from .tunnel import TunnelRegistry, SendFn, CloseFn
+from .websocket import WebSocket, WebSocketProtocolError
+
+logger = logging.getLogger(__name__)
+
+PROXY_TIMEOUT_SECONDS = 30.0
+MAX_PROXY_REQUEST_BODY = 16 * 1024 * 1024  # 16 MiB
+MAX_PROXY_RESPONSE_BODY = 32 * 1024 * 1024  # 32 MiB
+
+# Headers allowed to pass from the browser to the device. Never forward
+# Authorization, Cookie, Host, Connection, Upgrade, or Content-Length: Hub
+# credentials and session cookies must not leak to the device.
+FORWARDED_REQUEST_HEADERS = frozenset(
+    {"accept", "content-type", "x-requested-with"}
+)
+# Response headers allowed back to the browser.
+FORWARDED_RESPONSE_HEADERS = frozenset(
+    {"content-type", "cache-control", "content-encoding", "etag", "last-modified"}
+)
+
+ALLOWED_PROXY_PATHS = ("/api", "/api/", "/assets/", "/")
+
+
+class WebTunnelCoordinator:
+    """Owns pending proxy requests and dispatches device messages."""
+
+    def __init__(self, registry: TunnelRegistry) -> None:
+        self.registry = registry
+        self._pending: dict[str, queue.Queue[dict[str, Any]]] = {}
+        self._pending_lock = threading.Lock()
+
+    # -- device side ------------------------------------------------------
+
+    def handle_device_ws(self, ws: WebSocket, node_id: str) -> None:
+        """Blocking loop for one device tunnel connection."""
+        send: SendFn = lambda message: ws.send_json(message)  # noqa: E731
+        close: CloseFn = lambda: ws.close()  # noqa: E731
+        self.registry.attach(node_id, send, close)
+        logger.info("tunnel_online node=%s", node_id)
+        try:
+            while True:
+                opcode, payload = ws.recv_message()
+                if opcode != 0x1:
+                    continue  # binary frames are not part of the contract
+                try:
+                    message = json.loads(payload.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    logger.warning("tunnel_bad_json node=%s", node_id)
+                    continue
+                if not isinstance(message, dict):
+                    continue
+                self._dispatch_device_message(node_id, message)
+        except (WebSocketProtocolError, OSError, ValueError) as exc:
+            logger.info("tunnel_offline node=%s reason=%s", node_id, exc)
+        finally:
+            self.registry.detach(node_id, close)
+            self._fail_pending(node_id)
+
+    def _dispatch_device_message(
+        self, node_id: str, message: dict[str, Any]
+    ) -> None:
+        kind = message.get("type")
+        if kind == "http-response":
+            request_id = str(message.get("id", ""))
+            if not request_id:
+                return
+            with self._pending_lock:
+                pending = self._pending.pop(request_id, None)
+            if pending is not None:
+                try:
+                    pending.put_nowait(message)
+                except queue.Full:
+                    pass
+            return
+        if kind == "pong":
+            return
+        # ws-open / ws-frame (browser event-stream tunneling) are reserved
+        # for the next stage; unknown message types are ignored.
+        logger.debug("tunnel_message node=%s type=%s", node_id, kind)
+
+    def _fail_pending(self, node_id: str) -> None:
+        with self._pending_lock:
+            pending = list(self._pending.values())
+            self._pending.clear()
+        for item in pending:
+            try:
+                item.put_nowait(
+                    {"type": "http-response", "status": 502, "headers": {}, "body_b64": None}
+                )
+            except queue.Full:
+                pass
+
+    # -- browser side -----------------------------------------------------
+
+    def proxy_request(
+        self,
+        node_id: str,
+        method: str,
+        path: str,
+        headers: dict[str, str],
+        body: bytes | None,
+    ) -> dict[str, Any] | None:
+        """Forward one browser request to the node tunnel and await the reply.
+
+        Returns the http-response message, or None when the node is offline,
+        the request timed out, or the tunnel rejected the send.
+        """
+        if not self.registry.is_online(node_id):
+            return None
+        request_id = secrets.token_hex(8)
+        pending: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1)
+        with self._pending_lock:
+            self._pending[request_id] = pending
+        forwarded = self.registry.send_to(
+            node_id,
+            {
+                "type": "http",
+                "id": request_id,
+                "method": method,
+                "path": path,
+                "headers": headers,
+                "body_b64": (
+                    base64.b64encode(body).decode("ascii") if body else None
+                ),
+            },
+        )
+        if not forwarded:
+            with self._pending_lock:
+                self._pending.pop(request_id, None)
+            return None
+        try:
+            return pending.get(timeout=PROXY_TIMEOUT_SECONDS)
+        except queue.Empty:
+            return None
+        finally:
+            with self._pending_lock:
+                self._pending.pop(request_id, None)
+
+
+def validate_proxy_path(path: str) -> bool:
+    """Allowlist for the device-side dsh web surface."""
+    if path in ALLOWED_PROXY_PATHS:
+        return True
+    return path.startswith("/api/") or path.startswith("/assets/")
+
+
+def decode_proxy_body(body_b64: str | None) -> bytes | None:
+    if body_b64 is None:
+        return None
+    raw = base64.b64decode(body_b64, validate=True)
+    if len(raw) > MAX_PROXY_RESPONSE_BODY:
+        raise ValueError("response body too large")
+    return raw

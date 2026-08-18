@@ -10,6 +10,7 @@ import { homedir, userInfo } from "node:os";
 import { Writable } from "node:stream";
 
 import { runDshChild } from "./dsh-child.js";
+import { WebBridge } from "./web-bridge.js";
 import { buildDshCommonEnv, buildDshDispatchEnv, buildDshWorkerEnv } from "./dsh-env.js";
 import { listAdapterIds, loadAdapterManifest } from "./adapter-registry.js";
 import { BridgeWorker } from "./bridge.js";
@@ -131,6 +132,7 @@ async function main(): Promise<void> {
     "dsh-once",
     "dsh-worker",
     "dsh-dispatch",
+    "web-bridge",
   ]);
   if (hubCommands.has(command) && !hub) {
     throw new Error(
@@ -278,6 +280,11 @@ async function main(): Promise<void> {
 
   if (command === "web") {
     await runDshWeb(config, hub);
+    return;
+  }
+
+  if (command === "web-bridge") {
+    await runWebBridge(config, hub!);
     return;
   }
 
@@ -532,6 +539,29 @@ function profileIncludesCorePlugin(profilePackage: string): boolean {
   } catch {
     return false;
   }
+}
+
+async function runWebBridge(
+  config: AgentHostConfig,
+  hub: HubClient,
+): Promise<void> {
+  const target =
+    process.env.AGENT_DSH_WEB_TARGET?.trim() || "http://127.0.0.1:3001";
+  const bridge = new WebBridge({
+    hubUrl: config.hubUrl!,
+    nodeToken: hub.nodeToken,
+    nodeId: config.nodeId,
+    target,
+  });
+  const stop = () => bridge.stop();
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  console.log(
+    `Starting DSH Web bridge: ${config.nodeId} -> ${target} via ${config.hubUrl}`,
+  );
+  await bridge.run();
+  // The bridge only returns after stop(); a clean signal exit ends the process.
+  process.exit(0);
 }
 
 async function runDshWeb(

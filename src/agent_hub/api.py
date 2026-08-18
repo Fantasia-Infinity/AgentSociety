@@ -52,6 +52,7 @@ class AgentHubApi:
         allow_registration: bool = True,
         on_event: Callable[[str, str, dict[str, Any]], None] | None = None,
         on_shared_event: Callable[[str, str, dict[str, Any]], None] | None = None,
+        tunnel_registry: Any | None = None,
     ) -> None:
         self.store = store
         self.object_store = object_store
@@ -65,6 +66,9 @@ class AgentHubApi:
         # with (tenant_id, event_name, data) and fanned out to every SSE
         # subscriber of that tenant.
         self.on_shared_event = on_shared_event
+        # Outbound DSH Web tunnel ticket registry, injected by the HTTP
+        # server. None disables the tunnel ticket endpoint.
+        self.tunnel_registry = tunnel_registry
 
     def _notify(
         self, task: dict[str, Any], event_name: str, data: dict[str, Any]
@@ -572,6 +576,25 @@ class AgentHubApi:
             node = self.store.update_node_web(node_id, web.to_dict())
             node["web"] = self._public_node_web(node)
             return HTTPStatus.OK, {"node": node}
+        if path == f"{self.prefix}/nodes/web/tunnel":
+            if self.tunnel_registry is None:
+                raise ApiError(
+                    "tunnel support is not enabled on this Hub",
+                    HTTPStatus.NOT_IMPLEMENTED,
+                )
+            node_id = required_text(payload, "node_id", maximum=200)
+            if context is not None and not context.is_admin:
+                if context.node_id != node_id:
+                    raise PermissionError(
+                        "node token cannot open a tunnel for another node"
+                    )
+            self.store.heartbeat_node(node_id)
+            ticket = self.tunnel_registry.issue_ticket(node_id)
+            return HTTPStatus.OK, {
+                "ticket": ticket,
+                "expires_in": self.tunnel_registry.ticket_ttl_seconds,
+                "ws_path": "/v1/web/tunnel/ws",
+            }
         if path == f"{self.prefix}/nodes/heartbeat":
             node_id = required_text(payload, "node_id", maximum=200)
             if context is not None and not context.is_admin:
