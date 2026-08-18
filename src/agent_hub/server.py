@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hmac
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,9 +29,12 @@ from .web_proxy import (
     FORWARDED_REQUEST_HEADERS,
     FORWARDED_RESPONSE_HEADERS,
     MAX_PROXY_REQUEST_BODY,
+    MAX_WS_FRAME,
+    WS_OPEN_TIMEOUT_SECONDS,
     WebTunnelCoordinator,
     decode_proxy_body,
     validate_proxy_path,
+    validate_ws_path,
 )
 from .websocket import WebSocket, WebSocketProtocolError, accept_key
 
@@ -175,6 +179,17 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
             return
         if parsed.path == "/v1/web/tunnel/ws":
             self._tunnel_device_ws(parse_qs(parsed.query))
+            return
+        segments = [part for part in parsed.path.split("/") if part]
+        if (
+            len(segments) >= 6
+            and segments[0] == "v1"
+            and segments[1] == "web"
+            and segments[3] == "ws"
+            and segments[4] == "events"
+            and segments[5] in ("mux", "host")
+        ):
+            self._browser_event_ws(segments[2], segments[5])
             return
         if parsed.path.startswith("/v1/web/"):
             self._web_proxy("GET")
@@ -352,23 +367,190 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
         ws = WebSocket(self.rfile, self.wfile)
         self.server.web_tunnel.handle_device_ws(ws, node_id)
 
+    def _authorize_browser(self, node_id: str) -> AuthenticatedContext | None:
+        """Browser auth for proxied DSH Web surfaces.
+
+        Accepts the same bearer tokens as the Hub API, or the Hub web UI
+        session cookie when the Hub web app is enabled. Either way the caller
+        must be allowed to reach the node's dsh_web capability (admin, same
+        tenant, or same principal owner). A None return means a response was
+        already written.
+        """
+        context: AuthenticatedContext | None = None
+        if self.headers.get("Authorization", "").strip():
+            context = self._authorized()
+            if context is None:
+                return None
+        elif self.server.web is not None:
+            session = self._web_session()
+            if session is not None:
+                _, claims = session
+                context = AuthenticatedContext.from_dict(claims)
+        if context is None:
+            self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+            return None
+        if not self._node_web_allowed(context, node_id):
+            self._send_json(
+                HTTPStatus.FORBIDDEN, {"error": "node web access denied"}
+            )
+            return None
+        return context
+
+    def _node_web_allowed(
+        self, context: AuthenticatedContext, node_id: str
+    ) -> bool:
+        """The node exists, advertises dsh_web, and the caller may reach it."""
+        if not context.is_admin:
+            tenant_id = context.tenant_id or "default"
+            principal_id = (
+                None if context.role == "tenant_admin" else context.principal_id
+            )
+        else:
+            tenant_id = None
+            principal_id = None
+        try:
+            nodes = self.server.api.store.list_nodes(
+                tenant_id=tenant_id, principal_id=principal_id
+            )
+        except Exception:  # noqa: BLE001 - store failure must not leak
+            logger.exception("node_web_lookup_failed node=%s", node_id)
+            return False
+        node = next(
+            (item for item in nodes if item.get("node_id") == node_id), None
+        )
+        if node is None:
+            return False
+        raw = (node.get("metadata") or {}).get("dsh_web")
+        return isinstance(raw, dict) and raw.get("enabled") is True
+
+    def _browser_event_ws(self, node_id: str, kind: str) -> None:
+        """Browser DSH event downlink: /v1/web/{node}/ws/events/{mux|host}.
+
+        Upgrades the browser socket only after the device confirms its local
+        event stream opened, then pumps device frames to the browser
+        (downlink-only: browser frames close 1008, matching dsh semantics).
+        """
+        context = self._authorize_browser(node_id)
+        if context is None:
+            return
+        path = f"/api/events.{kind}"
+        if not validate_ws_path(path):
+            self._send_json(
+                HTTPStatus.FORBIDDEN, {"error": "event stream not allowed"}
+            )
+            return
+        key = self.headers.get("Sec-WebSocket-Key", "").strip()
+        if not key:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST, {"error": "missing Sec-WebSocket-Key"}
+            )
+            return
+        opened = self.server.web_tunnel.open_event_stream(node_id, path)
+        if opened is None:
+            self._send_json(
+                HTTPStatus.BAD_GATEWAY, {"error": "device tunnel unavailable"}
+            )
+            return
+        stream_id, channel = opened
+        try:
+            ack = channel.get(timeout=WS_OPEN_TIMEOUT_SECONDS)
+        except queue.Empty:
+            self.server.web_tunnel.close_event_stream(node_id, stream_id)
+            self._send_json(
+                HTTPStatus.GATEWAY_TIMEOUT,
+                {"error": "device did not open the event stream"},
+            )
+            return
+        if ack.get("type") != "ws-open-ack" or ack.get("ok") is not True:
+            self.server.web_tunnel.close_event_stream(node_id, stream_id)
+            self._send_json(
+                HTTPStatus.BAD_GATEWAY,
+                {"error": ack.get("error") or "device rejected the event stream"},
+            )
+            return
+        self.protocol_version = "HTTP/1.1"
+        self.send_response(HTTPStatus.SWITCHING_PROTOCOLS)
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept_key(key))
+        self.end_headers()
+        self.close_connection = True
+        browser_ws = WebSocket(self.rfile, self.wfile)
+        self._pump_event_stream(browser_ws, channel, node_id, stream_id)
+
+    def _pump_event_stream(
+        self,
+        browser_ws: WebSocket,
+        channel: "queue.Queue[dict[str, Any]]",
+        node_id: str,
+        stream_id: str,
+    ) -> None:
+        """Relay device frames to the browser until either side closes."""
+        def pump() -> None:
+            try:
+                while True:
+                    try:
+                        message = channel.get(timeout=5)
+                    except queue.Empty:
+                        continue
+                    mtype = message.get("type")
+                    if mtype == "ws-frame":
+                        try:
+                            payload = base64.b64decode(
+                                message.get("payload_b64") or "", validate=True
+                            )
+                            if len(payload) > MAX_WS_FRAME:
+                                continue
+                            if int(message.get("opcode", 1)) == 0x2:
+                                browser_ws.send_bytes(payload)
+                            else:
+                                browser_ws.send_text(
+                                    payload.decode("utf-8", errors="replace")
+                                )
+                        except (ValueError, WebSocketProtocolError, OSError):
+                            return
+                    elif mtype in ("ws-close", "ws-open-ack"):
+                        return
+            finally:
+                try:
+                    browser_ws.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        thread = threading.Thread(target=pump, daemon=True)
+        thread.start()
+        try:
+            while True:
+                opcode, _payload = browser_ws.recv_message()
+                if opcode == 0x8:
+                    return
+                # DSH event streams are server-to-browser only.
+                browser_ws.close(1008, b"downlink only")
+                return
+        except (WebSocketProtocolError, OSError, ValueError):
+            return
+        finally:
+            self.server.web_tunnel.close_event_stream(node_id, stream_id)
+
     def _web_proxy(self, method: str) -> None:
         """Browser-facing DSH Web proxy: /v1/web/{node_id}/<path>."""
         parsed = urlparse(self.path)
         rest = parsed.path
         # /v1/web/<node_id>[/<rest>]
         segments = [part for part in rest.split("/") if part]
-        if len(segments) < 2 or segments[0] != "v1" or segments[1] != "web":
+        if len(segments) < 3 or segments[0] != "v1" or segments[1] != "web":
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
             return
         node_id = segments[2]
         path = "/" + "/".join(segments[3:]) if len(segments) > 3 else "/"
+        if parsed.query:
+            path += "?" + parsed.query
         if not validate_proxy_path(path):
             self._send_json(
                 HTTPStatus.FORBIDDEN, {"error": "path not allowed on the tunnel"}
             )
             return
-        context = self._authorized()
+        context = self._authorize_browser(node_id)
         if context is None:
             return
         headers = {

@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import struct
+import threading
 from typing import Any
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -46,6 +47,9 @@ class WebSocket:
         self._writer = writer
         self._max_payload = max_payload
         self._closed = False
+        # Browser and device pumps may write concurrently; preserve frame
+        # boundaries and prevent a close racing a response frame.
+        self._write_lock = threading.RLock()
 
     # -- outgoing ---------------------------------------------------------
 
@@ -68,7 +72,8 @@ class WebSocket:
             return
         try:
             payload = struct.pack("!H", code) + reason[:123]
-            self._send_frame_unchecked(0x8, payload)
+            with self._write_lock:
+                self._send_frame_unchecked(0x8, payload)
         except OSError:
             pass
         self._closed = True
@@ -80,7 +85,8 @@ class WebSocket:
     def _send_frame(self, opcode: int, payload: bytes) -> None:
         if self._closed:
             raise WebSocketProtocolError("connection closed")
-        self._send_frame_unchecked(opcode, payload)
+        with self._write_lock:
+            self._send_frame_unchecked(opcode, payload)
 
     def _send_frame_unchecked(self, opcode: int, payload: bytes) -> None:
         if self._closed:

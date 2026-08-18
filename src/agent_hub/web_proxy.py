@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 PROXY_TIMEOUT_SECONDS = 30.0
 MAX_PROXY_REQUEST_BODY = 16 * 1024 * 1024  # 16 MiB
 MAX_PROXY_RESPONSE_BODY = 32 * 1024 * 1024  # 32 MiB
+MAX_WS_PATH = 512
+MAX_WS_FRAME = 16 * 1024 * 1024
+WS_OPEN_TIMEOUT_SECONDS = 10.0
+ALLOWED_WS_PATHS = frozenset({"/api/events.mux", "/api/events.host"})
 
 # Headers allowed to pass from the browser to the device. Never forward
 # Authorization, Cookie, Host, Connection, Upgrade, or Content-Length: Hub
@@ -43,6 +47,8 @@ class WebTunnelCoordinator:
         self.registry = registry
         self._pending: dict[str, queue.Queue[dict[str, Any]]] = {}
         self._pending_lock = threading.Lock()
+        self._ws_lock = threading.Lock()
+        self._ws_channels: dict[str, queue.Queue[dict[str, Any]]] = {}
 
     # -- device side ------------------------------------------------------
 
@@ -69,7 +75,7 @@ class WebTunnelCoordinator:
             logger.info("tunnel_offline node=%s reason=%s", node_id, exc)
         finally:
             self.registry.detach(node_id, close)
-            self._fail_pending(node_id)
+            self._fail_node(node_id)
 
     def _dispatch_device_message(
         self, node_id: str, message: dict[str, Any]
@@ -89,11 +95,22 @@ class WebTunnelCoordinator:
             return
         if kind == "pong":
             return
-        # ws-open / ws-frame (browser event-stream tunneling) are reserved
-        # for the next stage; unknown message types are ignored.
+        if kind in ("ws-open-ack", "ws-frame", "ws-close"):
+            stream_id = str(message.get("id", ""))
+            if not stream_id:
+                return
+            with self._ws_lock:
+                channel = self._ws_channels.get(stream_id)
+                if channel is None:
+                    return
+            try:
+                channel.put_nowait(message)
+            except queue.Full:
+                pass
+            return
         logger.debug("tunnel_message node=%s type=%s", node_id, kind)
 
-    def _fail_pending(self, node_id: str) -> None:
+    def _fail_node(self, node_id: str) -> None:
         with self._pending_lock:
             pending = list(self._pending.values())
             self._pending.clear()
@@ -104,6 +121,46 @@ class WebTunnelCoordinator:
                 )
             except queue.Full:
                 pass
+        with self._ws_lock:
+            channels = list(self._ws_channels.values())
+            self._ws_channels.clear()
+        for channel in channels:
+            try:
+                channel.put_nowait({"type": "ws-close", "id": "", "code": 1006})
+            except queue.Full:
+                pass
+
+    # -- browser-side event streams ---------------------------------------
+
+    def open_event_stream(self, node_id: str, path: str) -> tuple[str, queue.Queue] | None:
+        """Ask the device to open a local WebSocket event stream.
+
+        Returns (stream_id, frames queue); the queue receives ws-open-ack /
+        ws-frame / ws-close messages from the device. None when the tunnel is
+        offline or the request could not be sent.
+        """
+        if not self.registry.is_online(node_id):
+            return None
+        stream_id = secrets.token_hex(8)
+        channel: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=64)
+        with self._ws_lock:
+            self._ws_channels[stream_id] = channel
+        forwarded = self.registry.send_to(
+            node_id,
+            {"type": "ws-open", "id": stream_id, "path": path},
+        )
+        if not forwarded:
+            with self._ws_lock:
+                self._ws_channels.pop(stream_id, None)
+            return None
+        return stream_id, channel
+
+    def close_event_stream(self, node_id: str, stream_id: str) -> None:
+        with self._ws_lock:
+            self._ws_channels.pop(stream_id, None)
+        self.registry.send_to(
+            node_id, {"type": "ws-close", "id": stream_id, "code": 1000}
+        )
 
     # -- browser side -----------------------------------------------------
 
@@ -157,6 +214,11 @@ def validate_proxy_path(path: str) -> bool:
     if path in ALLOWED_PROXY_PATHS:
         return True
     return path.startswith("/api/") or path.startswith("/assets/")
+
+
+def validate_ws_path(path: str) -> bool:
+    """Allowlist for the tunneled DSH event WebSocket surface."""
+    return len(path) <= MAX_WS_PATH and path in ALLOWED_WS_PATHS
 
 
 def decode_proxy_body(body_b64: str | None) -> bytes | None:

@@ -17,11 +17,11 @@
 
 明确**不在**当前范围内（后续阶段设计）：
 
-- 浏览器 WebSocket 事件流（`/api/events.mux`、`/api/events.host`）经 Hub 的
-  upgrade 转发（HTTP 部分已完成；WS upgrade 转发为下一步）。
 - 把设备本地 `.dsh/sessions` 文件或 live session 序列化后交给 Hub。
 - 向浏览器下发节点令牌 / DeepSeek 模型凭据。
 - Hub `/web` 直接反向代理远端 dsh UI（当前用受控隧道协议，见下）。
+- 原版 dsh Web UI 的原样承载：UI 写死同源路径（`/api/*`、`/api/events.mux`），
+  在 Hub 根路径多节点复用需要前端适配层或子域路由，属于后续阶段。
 
 ## 隧道协议（P1，已实现）
 
@@ -37,11 +37,18 @@
    （`agent-host/src/web-bridge.ts`，`agent web-bridge` 命令）fetch 本地
    `dsh web`（仅回环地址，默认 `http://127.0.0.1:3001`，可用
    `AGENT_DSH_WEB_TARGET` 覆盖），把响应原样回传。
-4. 路径白名单：`/`、`/api`、`/api/*`、`/assets/*`；请求头白名单
-   （Accept/Content-Type/X-Requested-With）、响应头白名单
-   （Content-Type/Cache-Control/Content-Encoding/ETag/Last-Modified）；
-   Hub 凭据/Cookie 绝不转发给设备。请求体上限 16MiB、响应 32MiB、
-   代理超时 30s，设备离线返回 502。
+4. 浏览器 DSH 事件流：`GET /v1/web/<node_id>/ws/events/{mux|host}`
+   （WebSocket 升级）。Hub 先让设备打开本地
+   `ws://127.0.0.1:<target>/api/events.{mux|host}`（ws-open/ws-open-ack），
+   确认成功后升级浏览器连接，再把设备帧经隧道转发给浏览器
+   （ws-frame；downlink-only，浏览器上行帧关闭 1008，与 dsh 语义一致）。
+   设备本地事件流断开时浏览器端随之关闭。
+5. 安全边界：路径白名单 `/`、`/api`、`/api/*`、`/assets/*`；事件流仅
+   `/api/events.mux`、`/api/events.host`；请求头白名单（Accept/Content-Type/
+   X-Requested-With）、响应头白名单；Hub 凭据/Cookie 绝不转发给设备。
+   请求体上限 16MiB、响应 32MiB、代理超时 30s，设备离线返回 502。
+   浏览器访问需 Hub 认证（Bearer 或 Hub web 会话 Cookie），且目标节点
+   必须声明 `dsh_web` 能力并位于调用者的租户/主体作用域内。
 
 消息契约（Hub↔设备，WebSocket text JSON）：
 
@@ -49,14 +56,25 @@
 // Hub -> 设备
 {"type":"http","id":"<request-id>","method":"POST","path":"/api/session.list",
  "headers":{...},"body_b64":"<base64|null>"}
+{"type":"ws-open","id":"<stream-id>","path":"/api/events.mux"}
+{"type":"ws-close","id":"<stream-id>","code":1000}
 // 设备 -> Hub
 {"type":"http-response","id":"<request-id>","status":200,"headers":{...},
  "body_b64":"<base64|null>"}
+{"type":"ws-open-ack","id":"<stream-id>","ok":true,"error":null}
+{"type":"ws-frame","id":"<stream-id>","opcode":1,"payload_b64":"<base64>"}
+{"type":"ws-close","id":"<stream-id>","code":1000}
 // 保活（预留）
 {"type":"ping"} / {"type":"pong"}
 ```
 
-浏览器 WebSocket 事件流升级转发（ws-open/ws-frame 消息）为下一阶段。
+浏览器侧端点语义：
+
+- `GET /v1/web/<node_id>/api/...`（HTTP）：普通代理调用，业务错误保持
+  dsh 契约（200 + ServerResponse）。
+- `GET /v1/web/<node_id>/ws/events/{mux|host}`（WS 升级）：事件 downlink，
+  帧内容为 dsh `ServerRequest` JSON（`{"type":"server-request",...}`），
+  与本地 dsh 的 `MUX_EVENTS_PATH`/`HOST_EVENTS_PATH` 帧完全一致。
 
 ## 契约
 

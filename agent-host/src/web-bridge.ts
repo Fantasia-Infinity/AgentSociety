@@ -39,6 +39,8 @@ export class WebBridge {
   private stopped = false;
   private readonly log: (message: string) => void;
   private readonly target: string;
+  /** Hub-issued event stream id -> local device WebSocket. */
+  private readonly eventStreams = new Map<string, WebSocket>();
 
   constructor(private readonly options: WebBridgeOptions) {
     this.log = options.log ?? console.log;
@@ -65,6 +67,14 @@ export class WebBridge {
 
   stop(): void {
     this.stopped = true;
+    for (const local of this.eventStreams.values()) {
+      try {
+        local.close();
+      } catch {
+        // already closing
+      }
+    }
+    this.eventStreams.clear();
     this.ws?.close();
   }
 
@@ -96,6 +106,14 @@ export class WebBridge {
       ws.addEventListener("close", () => resolve(), { once: true });
       ws.addEventListener("error", () => resolve(), { once: true });
     });
+    for (const local of this.eventStreams.values()) {
+      try {
+        local.close();
+      } catch {
+        // already closing
+      }
+    }
+    this.eventStreams.clear();
     this.log("web-bridge tunnel closed; reconnecting");
   }
 
@@ -103,6 +121,23 @@ export class WebBridge {
     const message = JSON.parse(String(data)) as Record<string, unknown>;
     if (message.type === "ping") {
       this.ws?.send(JSON.stringify({ type: "pong" }));
+      return;
+    }
+    if (message.type === "ws-open") {
+      this.openEventStream(message);
+      return;
+    }
+    if (message.type === "ws-close") {
+      const streamId = String(message.id ?? "");
+      const local = this.eventStreams.get(streamId);
+      if (local !== undefined) {
+        this.eventStreams.delete(streamId);
+        try {
+          local.close();
+        } catch {
+          // already closing
+        }
+      }
       return;
     }
     if (message.type !== "http") return;
@@ -149,8 +184,90 @@ export class WebBridge {
     );
   }
 
-  private async fetchTicket(): Promise<string> {
-    const response = await fetch(
+  /** Open one device-local DSH event downlink and relay its frames to the Hub. */
+  private openEventStream(message: Record<string, unknown>): void {
+    const streamId = String(message.id ?? "");
+    if (!streamId) return;
+    const path = String(message.path ?? "/");
+    if (!/^\/api\/events\.(mux|host)$/u.test(path)) {
+      this.ws?.send(
+        JSON.stringify({
+          type: "ws-open-ack",
+          id: streamId,
+          ok: false,
+          error: "event path not allowed",
+        }),
+      );
+      return;
+    }
+    let local: WebSocket;
+    try {
+      local = new WebSocket(`${this.target}${path}`);
+    } catch (error) {
+      this.ws?.send(
+        JSON.stringify({
+          type: "ws-open-ack",
+          id: streamId,
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+      return;
+    }
+    this.eventStreams.set(streamId, local);
+    local.addEventListener("open", () => {
+      this.ws?.send(
+        JSON.stringify({ type: "ws-open-ack", id: streamId, ok: true }),
+      );
+    }, { once: true });
+    local.addEventListener("message", (event) => {
+      const frame = event.data;
+      let opcode: number;
+      let payload: Buffer;
+      if (typeof frame === "string") {
+        opcode = 1;
+        payload = Buffer.from(frame);
+      } else if (frame instanceof ArrayBuffer) {
+        opcode = 2;
+        payload = Buffer.from(frame);
+      } else if (ArrayBuffer.isView(frame)) {
+        opcode = 2;
+        payload = Buffer.from(frame.buffer, frame.byteOffset, frame.byteLength);
+      } else {
+        return;
+      }
+      this.ws?.send(
+        JSON.stringify({
+          type: "ws-frame",
+          id: streamId,
+          opcode,
+          payload_b64: payload.toString("base64"),
+        }),
+      );
+    });
+    local.addEventListener("error", () => {
+      if (local.readyState === WebSocket.CONNECTING) {
+        this.eventStreams.delete(streamId);
+        this.ws?.send(
+          JSON.stringify({
+            type: "ws-open-ack",
+            id: streamId,
+            ok: false,
+            error: "local event stream failed",
+          }),
+        );
+      }
+    }, { once: true });
+    local.addEventListener("close", () => {
+      if (this.eventStreams.delete(streamId)) {
+        this.ws?.send(
+          JSON.stringify({ type: "ws-close", id: streamId, code: 1000 }),
+        );
+      }
+    }, { once: true });
+  }
+
+  private async fetchTicket(): Promise<string> {    const response = await fetch(
       `${this.options.hubUrl}/v1/hub/nodes/web/tunnel`,
       {
         method: "POST",

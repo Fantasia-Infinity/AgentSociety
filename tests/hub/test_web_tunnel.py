@@ -12,22 +12,26 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+import time
 import unittest
 
 from agent_hub.api import AgentHubApi
 from agent_hub.server import HubHttpServer
 from agent_hub.store import AgentHubStore
-from agent_hub.websocket import accept_key
+from agent_hub.websocket import WebSocket, accept_key
 
 
 class FakeDshWebServer:
-    """Stand-in for the device-local dsh web HTTP surface."""
+    """Stand-in for the device-local dsh web HTTP + event WS surface."""
 
     def __init__(self) -> None:
         requests: list[str] = []
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802
+                if self.path == "/api/events.mux":
+                    self._serve_events()
+                    return
                 self._answer()
             def do_POST(self) -> None:  # noqa: N802
                 self._answer()
@@ -43,6 +47,34 @@ class FakeDshWebServer:
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+            def _serve_events(self) -> None:
+                key = self.headers.get("Sec-WebSocket-Key", "").strip()
+                if not key:
+                    self.send_response(400)
+                    self.end_headers()
+                    return
+                self.protocol_version = "HTTP/1.1"
+                self.send_response(101)
+                self.send_header("Upgrade", "websocket")
+                self.send_header("Connection", "Upgrade")
+                self.send_header("Sec-WebSocket-Accept", accept_key(key))
+                self.end_headers()
+                self.close_connection = True
+                ws = WebSocket(self.rfile, self.wfile)
+                try:
+                    for index in range(3):
+                        frame = {
+                            "type": "server-request",
+                            "rpcId": f"fx{index}",
+                            "method": "mux/update",
+                            "payload": {"seq": index},
+                        }
+                        ws.send_text(json.dumps(frame))
+                        time.sleep(0.05)
+                    while True:
+                        ws.recv_message()
+                except Exception:  # noqa: BLE001
+                    pass
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
@@ -62,7 +94,7 @@ class FakeDshWebServer:
 class MiniWebSocketClient:
     """Minimal RFC 6455 client for the device side of the tunnel."""
 
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, headers: dict[str, str] | None = None) -> None:
         from urllib.parse import urlparse
 
         parsed = urlparse(url)
@@ -71,13 +103,15 @@ class MiniWebSocketClient:
         path = parsed.path or "/"
         if parsed.query:
             path += "?" + parsed.query
+        extra = "".join(f"{name}: {value}\r\n" for name, value in (headers or {}).items())
         request = (
             f"GET {path} HTTP/1.1\r\n"
             f"Host: {parsed.hostname}:{parsed.port}\r\n"
             "Upgrade: websocket\r\n"
             "Connection: Upgrade\r\n"
             f"Sec-WebSocket-Key: {key}\r\n"
-            "Sec-WebSocket-Version: 13\r\n\r\n"
+            "Sec-WebSocket-Version: 13\r\n"
+            f"{extra}\r\n"
         )
         self.sock.sendall(request.encode("ascii"))
         response = b""
@@ -192,7 +226,8 @@ class WebTunnelIntegrationTests(unittest.TestCase):
         self.store.register_node(
             __import__("agent_hub.domain", fromlist=["NodeRegistration"]).NodeRegistration(
                 node_id="node-device", actor_id="actor-pi", display_name="Device",
-                capabilities=("filesystem",), metadata={},
+                capabilities=("filesystem", "dsh-web"),
+                metadata={"dsh_web": {"enabled": True, "protocol_version": "1"}},
             )
         )
 
@@ -299,6 +334,89 @@ class WebTunnelIntegrationTests(unittest.TestCase):
         with self.assertRaises(HTTPError) as raised:
             urlopen(request, timeout=5)
         self.assertEqual(raised.exception.code, 502)
+
+    def test_browser_event_ws_forwards_device_frames(self) -> None:
+        """Full event path: browser WS -> Hub -> tunnel -> device local WS."""
+        ws = self._open_tunnel()
+        relay_error: list[Exception] = []
+
+        def device_loop() -> None:
+            try:
+                while True:
+                    message = json.loads(ws.recv_text())
+                    kind = message["type"]
+                    if kind == "ws-open":
+                        local = MiniWebSocketClient(
+                            f"ws://127.0.0.1:{self.fake_web.server.server_address[1]}{message['path']}"
+                        )
+                        ws.send_text(
+                            json.dumps(
+                                {"type": "ws-open-ack", "id": message["id"], "ok": True}
+                            )
+                        )
+                        try:
+                            while True:
+                                frame = local.recv_text(timeout=5)
+                                ws.send_text(
+                                    json.dumps(
+                                        {
+                                            "type": "ws-frame",
+                                            "id": message["id"],
+                                            "opcode": 1,
+                                            "payload_b64": base64.b64encode(
+                                                frame.encode("utf-8")
+                                            ).decode("ascii"),
+                                        }
+                                    )
+                                )
+                        except Exception as exc:  # noqa: BLE001
+                            relay_error.append(exc)
+                            return
+                    elif kind == "ws-close":
+                        return
+            except Exception as exc:  # noqa: BLE001
+                relay_error.append(exc)
+
+        thread = threading.Thread(target=device_loop, daemon=True)
+        thread.start()
+        try:
+            browser = MiniWebSocketClient(
+                f"ws://127.0.0.1:{self.port}/v1/web/node-device/ws/events/mux",
+                headers={"Authorization": f"Bearer {self.token}"},
+            )
+            received = []
+            try:
+                for _ in range(3):
+                    frame = json.loads(browser.recv_text(timeout=10))
+                    received.append(frame)
+            finally:
+                browser.close()
+            self.assertEqual(
+                [frame["payload"]["seq"] for frame in received], [0, 1, 2]
+            )
+            self.assertEqual(received[0]["rpcId"], "fx0")
+            self.assertEqual(received[0]["method"], "mux/update")
+        finally:
+            ws.close()
+        self.assertEqual(relay_error, [])
+
+    def test_event_ws_rejects_disabled_node_web(self) -> None:
+        # A second node without the dsh_web capability must be denied.
+        self.store.register_node(
+            __import__("agent_hub.domain", fromlist=["NodeRegistration"]).NodeRegistration(
+                node_id="node-plain", actor_id="actor-pi", display_name="Plain",
+                capabilities=("filesystem",), metadata={},
+            )
+        )
+        try:
+            browser = MiniWebSocketClient(
+                f"ws://127.0.0.1:{self.port}/v1/web/node-plain/ws/events/mux",
+                headers={"Authorization": f"Bearer {self.token}"},
+            )
+            browser.close()
+            self.fail("expected the disabled node to be rejected")
+        except RuntimeError as exc:
+            self.assertIn("handshake failed", str(exc))
 
 
 if __name__ == "__main__":
