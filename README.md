@@ -31,6 +31,36 @@ flowchart LR
 AgentSociety 只负责**协调**：谁是谁、谁在跑什么、跑到哪一步、结果放在哪里。
 真正的“干活”始终发生在你自己的设备上，由你自己安装的 Agent 完成。
 
+### 最近更新：远程访问设备上的 DSH Web
+
+AgentSociety 现在可以把每台设备上的本地 DSH Web 安全地挂载到 Hub，浏览器无需把设备端口暴露到公网：
+
+- `agent web-bridge` 通过设备主动出站的受控 WebSocket 隧道连接 Hub；NAT 和防火墙后的设备也可以接入。
+- 浏览器使用 `/v1/web/<node_id>/` 访问对应设备，Hub 只做认证、授权和透明转发，不改写 HTML，也不注入全局运行时补丁。
+- DSH Web 前端使用原生相对路径，API、插件、静态资源、manifest、favicon、HMR 和 `events.mux` / `events.host` WebSocket 都能在节点挂载路径下工作。
+- bridge 默认会自动启动本机 `agent-society-web` profile；如果已经运行 `agent web`，则复用已有实例，退出时只回收自己启动的子进程。
+- bridge 启动时会幂等创建默认 workspace（默认是当前用户 home），并在 Web 页面加载后自动进入该 workspace。
+
+快速启动：
+
+```bash
+./agent web-bridge
+# 默认本地 DSH Web: http://127.0.0.1:3080
+# 远程访问: https://<hub>/v1/web/<node_id>/
+```
+
+常用环境变量：
+
+```bash
+AGENT_DSH_WEB_TARGET=http://127.0.0.1:3080
+AGENT_DSH_WEB_DEFAULT_WORKSPACE=/path/to/workspace
+AGENT_DSH_WEB_BRIDGE_START=0  # 仅使用外部管理的 DSH Web，不自动启动
+```
+
+同一个 `node_id` 只应运行一个 bridge；多个 bridge 会互相替换隧道并反复重连。完整协议、路径白名单和安全边界见 [DSH Web Hub Bridge](docs/dsh-web-hub-bridge.md)。
+
+真正的“干活”始终发生在你自己的设备上，由你自己安装的 Agent 完成。
+
 ## 核心概念
 
 | 概念 | 含义 |
@@ -236,6 +266,7 @@ npm --prefix dsh-plugin run build
 ```
 
 ## 项目状态
+- DSH Web 远程访问已可用：`agent web-bridge` 自动管理本地 Web、通过 Hub 原生挂载到 `/v1/web/<node_id>/`，并转发 RPC 与事件 WebSocket；详见 [DSH Web Hub Bridge](docs/dsh-web-hub-bridge.md)。
 
 - 默认运行时：AgentSociety 作为 dsh 插件加载；`./agent` 打开 dsh-TUI，
   `./agent worker` 启动 dsh 进程内 worker；Pi 保留为兼容回退。

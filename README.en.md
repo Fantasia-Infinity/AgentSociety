@@ -38,6 +38,35 @@ opens the dsh-TUI, `./agent web` opens the dsh Web UI over the same core, and
 adapters sharing dsh sessions and the AgentSociety plugin; Pi remains as a
 compatibility fallback.
 
+### Recent: remote access to each device's DSH Web
+
+AgentSociety can now mount a device's local DSH Web through the Hub without exposing the device port publicly:
+
+- `agent web-bridge` opens a controlled, device-initiated WebSocket tunnel to the Hub, so devices behind NAT or firewalls can connect.
+- Browsers use `/v1/web/<node_id>/` for the selected device. The Hub performs authentication, authorization, and transparent forwarding; it does not rewrite HTML or inject runtime patches.
+- The DSH Web frontend uses native relative paths, so APIs, plugins, static assets, the manifest, favicon, HMR, and the `events.mux` / `events.host` WebSockets work under the node mount.
+- The bridge starts the local `agent-society-web` profile automatically by default. If `agent web` is already running, it reuses that instance and only stops a child it started itself.
+- At bridge startup, a default workspace is created idempotently (the current user's home by default), and the browser automatically enters that workspace after the page renders.
+
+Start it with:
+
+```bash
+./agent web-bridge
+# local DSH Web: http://127.0.0.1:3080 by default
+# remote URL: https://<hub>/v1/web/<node_id>/
+```
+
+Useful environment variables:
+
+```bash
+AGENT_DSH_WEB_TARGET=http://127.0.0.1:3080
+AGENT_DSH_WEB_DEFAULT_WORKSPACE=/path/to/workspace
+AGENT_DSH_WEB_BRIDGE_START=0  # require an externally managed DSH Web
+```
+
+Run only one bridge per `node_id`; multiple bridges replace each other's tunnel and repeatedly reconnect. See [DSH Web Hub Bridge](docs/dsh-web-hub-bridge.md) for the protocol, path allowlist, and security boundaries.
+
+
 ## Core concepts
 
 | Concept | Meaning |
@@ -253,6 +282,7 @@ npm --prefix dsh-plugin run build
 ## Project status
 
 - Default runtime: AgentSociety loads as a dsh plugin; `./agent` opens the
+- Remote DSH Web access is available: `agent web-bridge` manages local Web startup, mounts it natively at `/v1/web/<node_id>/` through the Hub, and forwards RPC plus event WebSockets. See [DSH Web Hub Bridge](docs/dsh-web-hub-bridge.md).
   dsh-TUI and `./agent worker` runs the in-process dsh worker. Pi remains as
   a compatibility fallback.
 - Available now: cross-device task dispatch, continuous sessions, MCP/Web/REST
