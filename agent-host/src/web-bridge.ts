@@ -448,14 +448,23 @@ export class WebBridge {
       });
       return;
     }
+    const forwarded = rewriteMountPaths(this.options.nodeId, responseBody, response);
+    const responseHeaders = Object.fromEntries(response.headers.entries());
+    if (forwarded !== responseBody) {
+      // The rewritten body differs from the device's original bytes while
+      // the ?rev= cache key stays the same, so a previously cached copy
+      // would stay stale forever. Force revalidation-free refetching for
+      // adapted responses (and drop any stale validators).
+      responseHeaders["cache-control"] = "no-store";
+      delete responseHeaders["etag"];
+      delete responseHeaders["last-modified"];
+    }
     this.sendTunnel(ws, {
       type: "http-response",
       id: requestId,
       status: response.status,
-      headers: Object.fromEntries(response.headers.entries()),
-      body_b64: rewriteMountPaths(this.options.nodeId, responseBody, response).toString(
-        "base64",
-      ),
+      headers: responseHeaders,
+      body_b64: forwarded.toString("base64"),
     });
   }
 
