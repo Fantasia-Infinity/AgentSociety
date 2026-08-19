@@ -171,9 +171,11 @@ export function rewriteMountPaths(
   let rewritten = text
     .replaceAll('"/plugins/', `"${mount}/plugins/`)
     .replaceAll('"/api/', `"${mount}/api/`)
-    // The RPC base constant in the client bundles. Other "/api" literals
-    // (rpc.call channel names, gateway channel comparisons) are identifiers
-    // and must stay untouched.
+    // The RPC base in the client bundles is a template literal (`/api/...`),
+    // while other "/api" literals (rpc.call channel names, gateway channel
+    // comparisons) are identifiers and must stay untouched.
+    .replaceAll("`/api/", `\`${mount}/api/`)
+    // The RPC base constant in the client bundles.
     .replaceAll('API_PATH = "/api"', `API_PATH = "${mount}/api"`)
     .replaceAll('API_PATH="/api"', `API_PATH="${mount}/api"`);
   if (rewritten === text) return body;
