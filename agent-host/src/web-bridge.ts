@@ -139,6 +139,46 @@ export function buildLocalUrl(target: string, path: string): URL {
   return url;
 }
 
+/**
+ * Frontend adaptation for the tunneled dsh web surface.
+ *
+ * The dsh web UI hardcodes absolute same-origin paths: the boot config's
+ * /plugins/… client bundles and the client bundles' API_PATH="/api"
+ * (including /api/events.{mux,host}). Served through the Hub at
+ * /v1/web/<node>/ those resolve against the Hub origin and fail. Prefix
+ * them with the node mount in HTML and JavaScript responses so the page
+ * works behind the bridge. Compressed payloads and non-text responses are
+ * left untouched.
+ */
+export function rewriteMountPaths(
+  nodeId: string,
+  body: Buffer,
+  response: Pick<Response, "headers">,
+): Buffer {
+  if (body.byteLength === 0) return body;
+  const encoding = (response.headers.get("content-encoding") ?? "").trim();
+  if (encoding !== "" && encoding !== "identity") return body;
+  const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
+  if (
+    !contentType.includes("text/html") &&
+    !contentType.includes("javascript")
+  ) {
+    return body;
+  }
+  const mount = `/v1/web/${nodeId}`;
+  const text = body.toString("utf8");
+  let rewritten = text
+    .replaceAll('"/plugins/', `"${mount}/plugins/`)
+    .replaceAll('"/api/', `"${mount}/api/`)
+    // The RPC base constant in the client bundles. Other "/api" literals
+    // (rpc.call channel names, gateway channel comparisons) are identifiers
+    // and must stay untouched.
+    .replaceAll('API_PATH = "/api"', `API_PATH = "${mount}/api"`)
+    .replaceAll('API_PATH="/api"', `API_PATH="${mount}/api"`);
+  if (rewritten === text) return body;
+  return Buffer.from(rewritten, "utf8");
+}
+
 export class WebBridge {
   private ws: WebSocket | undefined;
   private stopped = false;
@@ -413,7 +453,9 @@ export class WebBridge {
       id: requestId,
       status: response.status,
       headers: Object.fromEntries(response.headers.entries()),
-      body_b64: responseBody.toString("base64"),
+      body_b64: rewriteMountPaths(this.options.nodeId, responseBody, response).toString(
+        "base64",
+      ),
     });
   }
 
