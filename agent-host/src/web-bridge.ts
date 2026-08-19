@@ -1,4 +1,5 @@
 import { isIP } from "node:net";
+import { homedir } from "node:os";
 
 /**
  * Device-side outbound DSH Web bridge.
@@ -177,6 +178,55 @@ export function rewriteMountPaths(
     .replaceAll('API_PATH="/api"', `API_PATH="${mount}/api"`);
   if (rewritten === text) return body;
   return Buffer.from(rewritten, "utf8");
+}
+
+/**
+ * Auto-enter a default workspace in the browser.
+ *
+ * The dsh web shell always lands on the workspace list after login and has
+ * no auto-selection or deep-link mechanism, so every visit needs a manual
+ * click. For the index page, inject a small script that clicks the
+ * workspace row whose title matches the default workspace
+ * (AGENT_DSH_WEB_DEFAULT_WORKSPACE, or the user's home) once it renders.
+ * Best-effort: no match within 90s simply leaves the UI untouched.
+ */
+export function injectDefaultWorkspaceAutoEnter(
+  path: string,
+  body: Buffer,
+): Buffer {
+  if (path !== "/" || body.byteLength === 0) return body;
+  if (
+    !body.includes(Buffer.from("</body>")) &&
+    !body.includes(Buffer.from("</html>"))
+  ) {
+    return body;
+  }
+  const root = (
+    process.env.AGENT_DSH_WEB_DEFAULT_WORKSPACE?.trim() ||
+    homedir()
+  ).trim();
+  if (!root) return body;
+  const target = JSON.stringify(root.replace(/\/+$/u, "").split("/").pop() ?? "");
+  const script = Buffer.from(
+    `<script>(()=>{const target=${target};let n=0;const t=setInterval(()=>{` +
+      `const rows=Array.from(document.querySelectorAll('[role="treeitem"]'));` +
+      `const hit=rows.find(r=>(r.textContent||"").trim()===target);` +
+      `if(hit){hit.click();clearInterval(t);}else if(++n>=90){clearInterval(t);}`, 
+    "utf8",
+  );
+  const tail = Buffer.from(
+    `},1000);})();\u003c/script>`,
+    "utf8",
+  );
+  const marker = body.includes(Buffer.from("</body>"))
+    ? Buffer.from("</body>")
+    : Buffer.from("</html>");
+  return Buffer.concat([
+    body.subarray(0, body.indexOf(marker)),
+    script,
+    tail,
+    body.subarray(body.indexOf(marker)),
+  ]);
 }
 
 export class WebBridge {
@@ -450,7 +500,8 @@ export class WebBridge {
     }
     const forwarded = rewriteMountPaths(this.options.nodeId, responseBody, response);
     const responseHeaders = Object.fromEntries(response.headers.entries());
-    if (forwarded !== responseBody) {
+    const adapted = injectDefaultWorkspaceAutoEnter(path, forwarded);
+    if (adapted !== responseBody) {
       // The rewritten body differs from the device's original bytes while
       // the ?rev= cache key stays the same, so a previously cached copy
       // would stay stale forever. Force revalidation-free refetching for
@@ -464,7 +515,7 @@ export class WebBridge {
       id: requestId,
       status: response.status,
       headers: responseHeaders,
-      body_b64: forwarded.toString("base64"),
+      body_b64: adapted.toString("base64"),
     });
   }
 
