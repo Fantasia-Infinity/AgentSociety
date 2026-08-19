@@ -80,6 +80,9 @@ case "$command" in
     web)
         exec npm --prefix "$agent_host" run start -- web "$@"
         ;;
+    web-bridge)
+        exec npm --prefix "$agent_host" run web-bridge -- "$@"
+        ;;
     doctor|sessions|dsh-doctor)
         exec npm --prefix "$agent_host" run "$command"
         ;;
@@ -87,7 +90,7 @@ case "$command" in
         exec npm --prefix "$agent_host" run start -- "$command" "$@"
         ;;
     *)
-        echo "Usage: ./agent [setup|tui|web|local|worker|connect|bridge --adapter ID|doctor|dsh-doctor|sessions|register|once|observe ID|attach ID|steer|follow-up|cancel|control|dsh-worker|dsh-once|dsh-dispatch]" >&2
+        echo "Usage: ./agent [setup|tui|web|web-bridge|local|worker|connect|bridge --adapter ID|doctor|dsh-doctor|sessions|register|once|observe ID|attach ID|steer|follow-up|cancel|control|dsh-worker|dsh-once|dsh-dispatch]" >&2
         exit 2
         ;;
 esac

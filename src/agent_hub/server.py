@@ -30,6 +30,7 @@ from .web_proxy import (
     FORWARDED_RESPONSE_HEADERS,
     MAX_PROXY_REQUEST_BODY,
     MAX_WS_FRAME,
+    TUNNEL_KEEPALIVE_SECONDS,
     WS_OPEN_TIMEOUT_SECONDS,
     WebTunnelCoordinator,
     decode_proxy_body,
@@ -365,7 +366,25 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
         ws = WebSocket(self.rfile, self.wfile)
-        self.server.web_tunnel.handle_device_ws(ws, node_id)
+        keepalive_stop = threading.Event()
+
+        def keepalive() -> None:
+            while not keepalive_stop.wait(TUNNEL_KEEPALIVE_SECONDS):
+                try:
+                    ws.ping()
+                except (OSError, WebSocketProtocolError):
+                    return
+
+        keepalive_thread = threading.Thread(
+            target=keepalive,
+            name=f"dsh-web-tunnel-keepalive-{node_id}",
+            daemon=True,
+        )
+        keepalive_thread.start()
+        try:
+            self.server.web_tunnel.handle_device_ws(ws, node_id)
+        finally:
+            keepalive_stop.set()
 
     def _authorize_browser(self, node_id: str) -> AuthenticatedContext | None:
         """Browser auth for proxied DSH Web surfaces.
@@ -487,11 +506,20 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
     ) -> None:
         """Relay device frames to the browser until either side closes."""
         def pump() -> None:
+            last_ping = time.monotonic()
             try:
                 while True:
                     try:
-                        message = channel.get(timeout=5)
+                        message = channel.get(
+                            timeout=min(5.0, max(0.05, TUNNEL_KEEPALIVE_SECONDS))
+                        )
                     except queue.Empty:
+                        if time.monotonic() - last_ping >= TUNNEL_KEEPALIVE_SECONDS:
+                            try:
+                                browser_ws.ping()
+                            except (OSError, WebSocketProtocolError):
+                                return
+                            last_ping = time.monotonic()
                         continue
                     mtype = message.get("type")
                     if mtype == "ws-frame":
@@ -545,13 +573,16 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
         path = "/" + "/".join(segments[3:]) if len(segments) > 3 else "/"
         if parsed.query:
             path += "?" + parsed.query
+        # Authenticate before revealing whether a path belongs to the proxy
+        # allowlist. This keeps unauthenticated callers from probing the
+        # device surface's path policy.
+        context = self._authorize_browser(node_id)
+        if context is None:
+            return
         if not validate_proxy_path(path):
             self._send_json(
                 HTTPStatus.FORBIDDEN, {"error": "path not allowed on the tunnel"}
             )
-            return
-        context = self._authorize_browser(node_id)
-        if context is None:
             return
         headers = {
             key: value

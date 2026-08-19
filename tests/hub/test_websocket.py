@@ -55,6 +55,21 @@ class WebSocketTests(unittest.TestCase):
         self.assertEqual(opcode, 0x1)
         self.assertEqual(payload, b"hello")
 
+    def test_rejects_unmasked_client_frame(self) -> None:
+        self.client.sendall(b"\x81\x01x")
+        with self.assertRaises(WebSocketProtocolError):
+            self.server.recv_message()
+
+    def test_rejects_fragmented_control_frame(self) -> None:
+        self._send_client_frame(0x9, b"x", fin=False)
+        with self.assertRaises(WebSocketProtocolError):
+            self.server.recv_message()
+
+    def test_rejects_oversized_control_frame(self) -> None:
+        self._send_client_frame(0x9, b"x" * 126)
+        with self.assertRaises(WebSocketProtocolError):
+            self.server.recv_message()
+
     def test_answers_ping_with_pong(self) -> None:
         import threading
 

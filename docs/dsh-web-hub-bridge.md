@@ -35,7 +35,7 @@
 3. 浏览器经 Hub 认证后访问 `GET/POST/HEAD /v1/web/<node_id>/<path>`，
    Hub 把请求打包为 JSON 消息经隧道转发；设备端 bridge
    （`agent-host/src/web-bridge.ts`，`agent web-bridge` 命令）fetch 本地
-   `dsh web`（仅回环地址，默认 `http://127.0.0.1:3001`，可用
+   `dsh web`（仅回环地址，默认 `http://127.0.0.1:3080`，可用
    `AGENT_DSH_WEB_TARGET` 覆盖），把响应原样回传。
 4. 浏览器 DSH 事件流：`GET /v1/web/<node_id>/ws/events/{mux|host}`
    （WebSocket 升级）。Hub 先让设备打开本地

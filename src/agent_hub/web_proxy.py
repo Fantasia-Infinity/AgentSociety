@@ -8,9 +8,11 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import posixpath
 import queue
 import secrets
 import threading
+from urllib.parse import unquote, urlsplit
 from typing import Any
 
 from .tunnel import TunnelRegistry, SendFn, CloseFn
@@ -24,6 +26,9 @@ MAX_PROXY_RESPONSE_BODY = 32 * 1024 * 1024  # 32 MiB
 MAX_WS_PATH = 512
 MAX_WS_FRAME = 16 * 1024 * 1024
 WS_OPEN_TIMEOUT_SECONDS = 10.0
+# Keep upgraded WebSocket connections active without removing the ordinary
+# HTTP socket timeout used for non-upgraded requests.
+TUNNEL_KEEPALIVE_SECONDS = 25.0
 ALLOWED_WS_PATHS = frozenset({"/api/events.mux", "/api/events.host"})
 
 # Headers allowed to pass from the browser to the device. Never forward
@@ -209,11 +214,60 @@ class WebTunnelCoordinator:
                 self._pending.pop(request_id, None)
 
 
+def normalize_proxy_path(path: str) -> str | None:
+    """Return a safe origin path, rejecting URL dot-segment tricks.
+
+    The device bridge appends this value to a loopback origin and the WHATWG
+    URL parser normalizes dot segments there. Rejecting them at the Hub keeps
+    the proxy allowlist meaningful instead of allowing ``/api/../...`` to
+    escape the dsh web surface.
+    """
+    parsed = urlsplit(path)
+    if parsed.scheme or parsed.netloc or not parsed.path.startswith("/"):
+        return None
+    raw_path = parsed.path
+    if "\\" in raw_path or any(ord(char) < 0x20 for char in raw_path):
+        return None
+    # Reject both literal and once-percent-decoded dot segments. A literal
+    # backslash is rejected above because WHATWG HTTP URLs treat it as a path
+    # separator during normalization.
+    decoded_path = unquote(raw_path)
+    if (
+        "\\" in decoded_path
+        or any(segment in (".", "..") for segment in decoded_path.split("/"))
+    ):
+        return None
+    # Reject multiple encoded layers as well. The device-side URL parser only
+    # decodes the URL once today, but rejecting nested encodings keeps this
+    # allowlist safe if another intermediary decodes before forwarding.
+    decoded_again = unquote(decoded_path)
+    if "\\" in decoded_again or any(
+        segment in (".", "..") for segment in decoded_again.split("/")
+    ):
+        return None
+    normalized = posixpath.normpath(raw_path)
+    if raw_path.endswith("/") and not normalized.endswith("/"):
+        normalized += "/"
+    if normalized == ".":
+        normalized = "/"
+    if not normalized.startswith("/"):
+        normalized = "/" + normalized
+    # Do not silently change duplicate separators or other path syntax. The
+    # local dsh server must receive exactly the path that was authorized.
+    if normalized != raw_path:
+        return None
+    return normalized + ("?" + parsed.query if parsed.query else "")
+
+
 def validate_proxy_path(path: str) -> bool:
     """Allowlist for the device-side dsh web surface."""
-    if path in ALLOWED_PROXY_PATHS:
+    normalized = normalize_proxy_path(path)
+    if normalized is None:
+        return False
+    path_only = urlsplit(normalized).path
+    if path_only in ALLOWED_PROXY_PATHS:
         return True
-    return path.startswith("/api/") or path.startswith("/assets/")
+    return path_only.startswith("/api/") or path_only.startswith("/assets/")
 
 
 def validate_ws_path(path: str) -> bool:

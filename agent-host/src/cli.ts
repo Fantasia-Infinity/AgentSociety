@@ -546,7 +546,7 @@ async function runWebBridge(
   hub: HubClient,
 ): Promise<void> {
   const target =
-    process.env.AGENT_DSH_WEB_TARGET?.trim() || "http://127.0.0.1:3001";
+    process.env.AGENT_DSH_WEB_TARGET?.trim() || "http://127.0.0.1:3080";
   const bridge = new WebBridge({
     hubUrl: config.hubUrl!,
     nodeToken: hub.nodeToken,

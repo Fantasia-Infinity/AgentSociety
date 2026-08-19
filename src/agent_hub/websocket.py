@@ -123,7 +123,14 @@ class WebSocket:
             fin = bool(first & 0x80)
             op = first & 0x0F
             masked = bool(second & 0x80)
+            if not masked:
+                raise WebSocketProtocolError("client frame must be masked")
             length = second & 0x7F
+            if op in (0x8, 0x9, 0xA):
+                if not fin:
+                    raise WebSocketProtocolError("control frame must not be fragmented")
+                if length > 125:
+                    raise WebSocketProtocolError("control frame payload too large")
             if length == 126:
                 length = struct.unpack("!H", self._read_exact(2))[0]
             elif length == 127:

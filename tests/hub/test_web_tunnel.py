@@ -19,6 +19,7 @@ from agent_hub.api import AgentHubApi
 from agent_hub.server import HubHttpServer
 from agent_hub.store import AgentHubStore
 from agent_hub.websocket import WebSocket, accept_key
+from agent_hub.web_proxy import validate_proxy_path
 
 
 class FakeDshWebServer:
@@ -146,43 +147,43 @@ class MiniWebSocketClient:
         body = bytes(payload[i] ^ mask[i % 4] for i in range(length))
         self.sock.sendall(bytes(header) + mask + body)
 
-    def recv_text(self, timeout: float = 10.0) -> str:
+    def recv_frame(self, timeout: float = 10.0) -> tuple[int, bytes]:
         self.sock.settimeout(timeout)
         while True:
-            if len(self._buffer) >= 2:
-                first, second = self._buffer[0], self._buffer[1]
-                opcode = first & 0x0F
-                length = second & 0x7F
-                offset = 2
-                if length == 126:
-                    if len(self._buffer) < 4:
-                        self._buffer += self._read_more()
-                        continue
-                    length = struct.unpack("!H", self._buffer[2:4])[0]
-                    offset = 4
-                elif length == 127:
-                    if len(self._buffer) < 10:
-                        self._buffer += self._read_more()
-                        continue
-                    length = struct.unpack("!Q", self._buffer[2:10])[0]
-                    offset = 10
-                if len(self._buffer) < offset + length:
-                    self._buffer += self._read_more()
-                    continue
-                frame = self._buffer[offset : offset + length]
-                self._buffer = self._buffer[offset + length :]
-                if opcode == 0x9:  # ping -> pong
-                    mask = secrets.token_bytes(4)
-                    header = bytes([0x8A, 0x80 | len(frame)]) + mask
-                    body = bytes(frame[i] ^ mask[i % 4] for i in range(len(frame)))
-                    self.sock.sendall(header + body)
-                    continue
-                if opcode == 0x8:
-                    raise RuntimeError("closed by server")
-                if opcode in (0x1, 0x2):
-                    return frame.decode("utf-8")
-            else:
+            while len(self._buffer) < 2:
                 self._buffer += self._read_more()
+            first, second = self._buffer[0], self._buffer[1]
+            opcode = first & 0x0F
+            length = second & 0x7F
+            offset = 2
+            if length == 126:
+                while len(self._buffer) < 4:
+                    self._buffer += self._read_more()
+                length = struct.unpack("!H", self._buffer[2:4])[0]
+                offset = 4
+            elif length == 127:
+                while len(self._buffer) < 10:
+                    self._buffer += self._read_more()
+                length = struct.unpack("!Q", self._buffer[2:10])[0]
+                offset = 10
+            while len(self._buffer) < offset + length:
+                self._buffer += self._read_more()
+            frame = self._buffer[offset : offset + length]
+            self._buffer = self._buffer[offset + length :]
+            if opcode == 0x9:  # ping -> pong
+                mask = secrets.token_bytes(4)
+                header = bytes([0x8A, 0x80 | len(frame)]) + mask
+                body = bytes(frame[i] ^ mask[i % 4] for i in range(len(frame)))
+                self.sock.sendall(header + body)
+            return opcode, frame
+
+    def recv_text(self, timeout: float = 10.0) -> str:
+        while True:
+            opcode, frame = self.recv_frame(timeout)
+            if opcode == 0x8:
+                raise RuntimeError("closed by server")
+            if opcode in (0x1, 0x2):
+                return frame.decode("utf-8")
 
     def _read_more(self) -> bytes:
         chunk = self.sock.recv(4096)
@@ -238,6 +239,14 @@ class WebTunnelIntegrationTests(unittest.TestCase):
         self.store.close()
         self._temporary.cleanup()
 
+    def test_proxy_path_allowlist_rejects_dot_segments(self) -> None:
+        self.assertFalse(validate_proxy_path("/api/../../etc/passwd"))
+        self.assertFalse(validate_proxy_path("/api/%2e%2e/etc/passwd"))
+        self.assertFalse(validate_proxy_path("/api/%252e%252e/etc/passwd"))
+        self.assertTrue(validate_proxy_path("/api/session.list?x=1"))
+        self.assertTrue(validate_proxy_path("/?x=1"))
+        self.assertFalse(validate_proxy_path("/assets/../api/session.list"))
+
     def _open_tunnel(self) -> MiniWebSocketClient:
         request = Request(
             f"{self.base}/v1/hub/nodes/web/tunnel",
@@ -256,6 +265,76 @@ class WebTunnelIntegrationTests(unittest.TestCase):
         )
         # First message the device receives is the forwarded browser request.
         return ws
+
+    def test_idle_device_tunnel_stays_online_with_ping_pong(self) -> None:
+        import agent_hub.server as server_module
+
+        old_keepalive = server_module.TUNNEL_KEEPALIVE_SECONDS
+        old_timeout = server_module.HubRequestHandler.timeout
+        server_module.TUNNEL_KEEPALIVE_SECONDS = 0.2
+        server_module.HubRequestHandler.timeout = 0.5
+        ws = self._open_tunnel()
+        try:
+            deadline = time.monotonic() + 2.0
+            pings = 0
+            while time.monotonic() < deadline and pings < 3:
+                opcode, _payload = ws.recv_frame(timeout=1.0)
+                if opcode == 0x9:
+                    pings += 1
+            self.assertGreaterEqual(pings, 2)
+            self.assertTrue(self.server.tunnels.is_online("node-device"))
+        finally:
+            ws.close()
+            server_module.TUNNEL_KEEPALIVE_SECONDS = old_keepalive
+            server_module.HubRequestHandler.timeout = old_timeout
+
+    def test_idle_browser_event_ws_stays_open_with_ping_pong(self) -> None:
+        import agent_hub.server as server_module
+
+        old_keepalive = server_module.TUNNEL_KEEPALIVE_SECONDS
+        server_module.TUNNEL_KEEPALIVE_SECONDS = 0.2
+        ws = self._open_tunnel()
+        device_done = threading.Event()
+
+        def device_loop() -> None:
+            try:
+                message = json.loads(ws.recv_text(timeout=5))
+                self.assertEqual(message["type"], "ws-open")
+                ws.send_text(
+                    json.dumps(
+                        {"type": "ws-open-ack", "id": message["id"], "ok": True}
+                    )
+                )
+                while True:
+                    opcode, _payload = ws.recv_frame(timeout=5)
+                    if opcode == 0x8:
+                        return
+            except (OSError, RuntimeError, TimeoutError):
+                return
+            finally:
+                device_done.set()
+
+        thread = threading.Thread(target=device_loop, daemon=True)
+        thread.start()
+        try:
+            browser = MiniWebSocketClient(
+                f"ws://127.0.0.1:{self.port}/v1/web/node-device/ws/events/mux",
+                headers={"Authorization": f"Bearer {self.token}"},
+            )
+            try:
+                pings = 0
+                deadline = time.monotonic() + 1.5
+                while time.monotonic() < deadline and pings < 2:
+                    opcode, _payload = browser.recv_frame(timeout=1.0)
+                    if opcode == 0x9:
+                        pings += 1
+                self.assertGreaterEqual(pings, 2)
+            finally:
+                browser.close()
+        finally:
+            ws.close()
+            device_done.wait(timeout=2)
+            server_module.TUNNEL_KEEPALIVE_SECONDS = old_keepalive
 
     def test_full_tunnel_proxy_roundtrip(self) -> None:
         ws = self._open_tunnel()
