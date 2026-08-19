@@ -9,7 +9,7 @@ import { stdin, stdout } from "node:process";
 import { homedir, userInfo } from "node:os";
 import { Writable } from "node:stream";
 
-import { runDshChild } from "./dsh-child.js";
+import { runDshChild, startDshChild } from "./dsh-child.js";
 import { WebBridge } from "./web-bridge.js";
 import { buildDshCommonEnv, buildDshDispatchEnv, buildDshWorkerEnv } from "./dsh-env.js";
 import { listAdapterIds, loadAdapterManifest } from "./adapter-registry.js";
@@ -541,28 +541,179 @@ function profileIncludesCorePlugin(profilePackage: string): boolean {
   }
 }
 
+const DSH_WEB_STARTUP_TIMEOUT_MS = 30_000;
+const DSH_WEB_PROBE_TIMEOUT_MS = 750;
+
+async function probeDshWeb(target: string): Promise<boolean> {
+  try {
+    const response = await fetch(target, {
+      method: "GET",
+      redirect: "manual",
+      signal: AbortSignal.timeout(DSH_WEB_PROBE_TIMEOUT_MS),
+    });
+    await response.body?.cancel();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForDshWeb(
+  target: string,
+  child: ReturnType<typeof startDshChild>,
+): Promise<boolean> {
+  const deadline = Date.now() + DSH_WEB_STARTUP_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (await probeDshWeb(target)) return true;
+    const result = await Promise.race([
+      child.exited.then(() => "exit" as const),
+      new Promise<"retry">((resolve) => setTimeout(resolve, 250)),
+    ]);
+    if (result === "exit") return false;
+  }
+  return probeDshWeb(target);
+}
+
+async function advertiseDshWeb(
+  config: AgentHostConfig,
+  hub: HubClient | undefined,
+): Promise<void> {
+  if (!hub || !config.dshWebEnabled) return;
+  try {
+    await hub.updateNodeWeb(config.nodeId, {
+      enabled: true,
+      protocol_version: "1",
+      profile: config.dshWebProfile ?? "agent-society-web",
+      capabilities: ["session.read"],
+    });
+    console.log(
+      `Advertised DSH Web capability to the Hub as ${config.nodeId}`,
+    );
+  } catch (error) {
+    console.warn(
+      `Could not advertise DSH Web capability (${error instanceof Error ? error.message : String(error)}); the Hub will not list this device.`,
+    );
+  }
+}
+
 async function runWebBridge(
   config: AgentHostConfig,
   hub: HubClient,
 ): Promise<void> {
   const target =
     process.env.AGENT_DSH_WEB_TARGET?.trim() || "http://127.0.0.1:3080";
+  const dshWeb = await ensureDshWeb(config, hub, target);
+  await advertiseDshWeb(config, hub);
   const bridge = new WebBridge({
     hubUrl: config.hubUrl!,
     nodeToken: hub.nodeToken,
     nodeId: config.nodeId,
     target,
   });
-  const stop = () => bridge.stop();
+  let stopping = false;
+  const stop = () => {
+    if (stopping) return;
+    stopping = true;
+    bridge.stop();
+    dshWeb?.stop();
+  };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   console.log(
     `Starting DSH Web bridge: ${config.nodeId} -> ${target} via ${config.hubUrl}`,
   );
-  await bridge.run();
-  // The bridge only returns after stop(); a clean signal exit ends the process.
-  process.exit(0);
+  if (dshWeb === undefined && process.env.AGENT_DSH_WEB_BRIDGE_START === "0") {
+    console.warn(
+      "Automatic local DSH Web startup is disabled (AGENT_DSH_WEB_BRIDGE_START=0); the bridge expects an existing server.",
+    );
+  }
+  const bridgeRun = bridge.run();
+  if (dshWeb !== undefined) {
+    const result = await Promise.race([
+      bridgeRun.then(() => "bridge" as const),
+      dshWeb.exited.then(() => "dsh-web" as const),
+    ]);
+    if (result === "dsh-web" && !stopping) {
+      bridge.stop();
+      await bridgeRun;
+      return;
+    }
+  } else {
+    await bridgeRun;
+  }
+  stop();
 }
+
+async function ensureDshWeb(
+  config: AgentHostConfig,
+  hub: HubClient,
+  target: string,
+) {
+  // Do not start a second server when the user already ran `agent web`.
+  if (await probeDshWeb(target)) return undefined;
+  if (process.env.AGENT_DSH_WEB_BRIDGE_START === "0") return undefined;
+  const child = startDshWebChild(config, hub, target);
+  const ready = await waitForDshWeb(target, child);
+  if (!ready) {
+    child.stop();
+    await child.exited;
+    throw new Error(
+      `Local DSH Web did not become ready at ${target} within ${DSH_WEB_STARTUP_TIMEOUT_MS / 1000}s.`,
+    );
+  }
+  console.log(`Local DSH Web is ready at ${target}`);
+  return child;
+}
+
+function startDshWebChild(
+  config: AgentHostConfig,
+  hub: HubClient,
+  target: string,
+) {
+  const dshHome =
+    process.env.DSH_HOME?.trim() || resolve(homedir(), ".dsh");
+  const profile = "agent-society-web";
+  const profilePackage = resolve(dshHome, "profiles", profile, "package.json");
+  const profileReady = profileIncludesCorePlugin(profilePackage);
+  const legacyPatch = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "..",
+    "dsh",
+    "agent-society.dsh.yml",
+  );
+  const port = new URL(target).port || "3080";
+  const command = profileReady
+    ? [...(config.dshCommand ?? ["dsh"]), "--profile", profile, "--port", port]
+    : [
+        ...(config.dshCommand ?? ["dsh"]),
+        "web",
+        "--patch",
+        legacyPatch,
+        "--port",
+        port,
+      ];
+  const env = buildDshCommonEnv(config, hub, {
+    worker: false,
+    hubMcp: true,
+  });
+  console.log(`Starting local dsh web for bridge: ${command.join(" ")}`);
+  return startDshChild(command, env, {
+    onError: (error) => {
+      console.error(`Could not start dsh web for bridge: ${error.message}`);
+      return false;
+    },
+    onExit: (code, signal) => {
+      if (code !== 0 && signal !== "SIGTERM" && signal !== "SIGINT") {
+        console.error(
+          `Local dsh web exited before bridge shutdown (code ${code ?? "none"}, signal ${signal ?? "none"}).`,
+        );
+      }
+      return false;
+    },
+  });
+}
+
 
 async function runDshWeb(
   config: AgentHostConfig,

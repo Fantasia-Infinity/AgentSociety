@@ -29,6 +29,70 @@ export interface DshChildResult {
 }
 
 /**
+ * Start a dsh child without waiting for it to exit. Composite commands use
+ * this to own a local DSH Web process alongside another long-lived service.
+ */
+export interface ManagedDshChild {
+  child: ChildProcess
+  stop: () => void
+  exited: Promise<DshChildResult>
+}
+
+export function startDshChild(
+  command: readonly string[],
+  env: NodeJS.ProcessEnv,
+  options: DshChildOptions = {},
+): ManagedDshChild {
+  const child: ChildProcess = spawn(command[0]!, command.slice(1), {
+    stdio: 'inherit',
+    env,
+    ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+  })
+  let stopped = false
+  let settled = false
+  let resolveExit!: (result: DshChildResult) => void
+  const exited = new Promise<DshChildResult>((resolve) => {
+    resolveExit = resolve
+  })
+  const forwardSignal = (signal: NodeJS.Signals): void => {
+    if (!stopped) child.kill(signal)
+  }
+  const cleanup = (): void => {
+    process.removeListener('SIGINT', forwardSignal)
+    process.removeListener('SIGTERM', forwardSignal)
+  }
+  const finish = (result: DshChildResult): void => {
+    if (settled) return
+    settled = true
+    cleanup()
+    resolveExit(result)
+  }
+  const stop = (): void => {
+    if (stopped) return
+    stopped = true
+    cleanup()
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGTERM')
+    }
+  }
+  process.once('SIGINT', forwardSignal)
+  process.once('SIGTERM', forwardSignal)
+  child.once('error', (error: Error) => {
+    const handled = options.onError?.(error)
+    finish({ started: handled !== false, restart: false })
+  })
+  child.once('exit', (code, signal) => {
+    const restart = options.onExit?.(code, signal) === true
+    if (code) process.exitCode = code
+    if (signal && !['SIGINT', 'SIGTERM'].includes(signal)) {
+      process.exitCode = 1
+    }
+    finish({ started: true, restart })
+  })
+  return { child, stop, exited }
+}
+
+/**
  * Run one dsh child process with the standard signal forwarding and exit-code
  * handling shared by TUI, Web, worker, and dispatch launchers.
  */

@@ -8,6 +8,9 @@
 ## 目标与范围
 
 - 每台设备继续运行自己的本地 `dsh web`（默认仅绑定 `127.0.0.1`，不做任何修改）。
+  运行 `agent web-bridge` 时，如果目标地址尚未监听，Agent Host 会自动启动本地
+  DSH Web，并在退出 bridge 时一并停止；若已经运行 `agent web`，则复用已有服务。
+  可设置 `AGENT_DSH_WEB_BRIDGE_START=0` 禁用自动启动。
 - 设备可选地通过环境变量 `AGENT_HUB_DSH_WEB=1` 声明自己提供 dsh Web 能力。
 - Hub 在节点注册/心跳时保存 `dsh_web` 元数据，并仅在节点令牌（或管理员）认证下允许更新。
 - 浏览器端可以通过受租户/主体作用域约束的 `GET /v1/hub/nodes` 读取每个节点的
@@ -37,7 +40,10 @@
    Hub 把请求打包为 JSON 消息经隧道转发；设备端 bridge
    （`agent-host/src/web-bridge.ts`，`agent web-bridge` 命令）fetch 本地
    `dsh web`（仅回环地址，默认 `http://127.0.0.1:3080`，可用
-   `AGENT_DSH_WEB_TARGET` 覆盖），把响应原样回传。
+   `AGENT_DSH_WEB_TARGET` 覆盖）。`agent web-bridge` 默认会在目标端口没有服务时
+   自动启动 `dsh --profile agent-society-web --port <port>`，并在 bridge 停止时回收
+   这个子进程；如果目标已经可用，则不会启动第二个 DSH Web 实例。可用
+   `AGENT_DSH_WEB_BRIDGE_START=0` 明确要求外部管理本地 DSH Web。bridge 将响应原样回传。
 4. 浏览器 DSH 事件流：`GET /v1/web/<node_id>/api/events.{mux|host}`
    （WebSocket 升级）。Hub 先让设备打开本地
    `ws://127.0.0.1:<target>/api/events.{mux|host}`（ws-open/ws-open-ack），
