@@ -42,7 +42,7 @@ FORWARDED_RESPONSE_HEADERS = frozenset(
     {"content-type", "cache-control", "content-encoding", "etag", "last-modified"}
 )
 
-ALLOWED_PROXY_PATHS = ("/api", "/api/", "/assets/", "/")
+ALLOWED_PROXY_PATHS = ("/api", "/api/", "/assets/", "/plugins/", "/")
 
 
 class WebTunnelCoordinator:
@@ -267,7 +267,11 @@ def validate_proxy_path(path: str) -> bool:
     path_only = urlsplit(normalized).path
     if path_only in ALLOWED_PROXY_PATHS:
         return True
-    return path_only.startswith("/api/") or path_only.startswith("/assets/")
+    return (
+        path_only.startswith("/api/")
+        or path_only.startswith("/assets/")
+        or path_only.startswith("/plugins/")
+    )
 
 
 def validate_ws_path(path: str) -> bool:

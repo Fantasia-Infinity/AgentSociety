@@ -245,7 +245,8 @@ class WebTunnelIntegrationTests(unittest.TestCase):
         self.assertFalse(validate_proxy_path("/api/%252e%252e/etc/passwd"))
         self.assertTrue(validate_proxy_path("/api/session.list?x=1"))
         self.assertTrue(validate_proxy_path("/?x=1"))
-        self.assertFalse(validate_proxy_path("/assets/../api/session.list"))
+        self.assertTrue(validate_proxy_path("/plugins/@deepseek-ai/dsh-base/client.js?rev=1"))
+        self.assertFalse(validate_proxy_path("/plugin/escape.js"))
 
     def _open_tunnel(self) -> MiniWebSocketClient:
         request = Request(
