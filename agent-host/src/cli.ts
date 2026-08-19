@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { dirname, resolve } from "node:path";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
@@ -604,6 +604,7 @@ async function runWebBridge(
     process.env.AGENT_DSH_WEB_TARGET?.trim() || "http://127.0.0.1:3080";
   const dshWeb = await ensureDshWeb(config, hub, target);
   await advertiseDshWeb(config, hub);
+  await ensureDefaultWorkspace(config, target);
   const bridge = new WebBridge({
     hubUrl: config.hubUrl!,
     nodeToken: hub.nodeToken,
@@ -663,6 +664,60 @@ async function ensureDshWeb(
   }
   console.log(`Local DSH Web is ready at ${target}`);
   return child;
+}
+
+/**
+ * Make sure the web surface always has a default workspace so the browser
+ * can land in one instead of facing an empty picker. The directory comes
+ * from AGENT_DSH_WEB_DEFAULT_WORKSPACE (default: the user's home). Creation
+ * goes through the device's own workspace RPC, so records and ordering stay
+ * consistent with the registry. Best-effort: failures only warn.
+ */
+async function ensureDefaultWorkspace(
+  config: AgentHostConfig,
+  target: string,
+): Promise<void> {
+  const root = (
+    process.env.AGENT_DSH_WEB_DEFAULT_WORKSPACE?.trim() || homedir()
+  ).trim();
+  if (!root) return;
+  try {
+    const canonical = realpathSync(root);
+    const base = `${target.replace(/\/$/u, "")}/api/`;
+    const rpc = (method: string, payload: unknown) =>
+      fetch(`${base}${method}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "client-request",
+          rpcId: `ws-default-${Date.now()}`,
+          method,
+          params: {},
+          payload,
+        }),
+      }).then((response) => response.json());
+    const listed = await rpc("workspace.list", {});
+    const items = listed?.result?.value?.items ?? [];
+    const exists = items.some(
+      (workspace: { path?: string }) =>
+        (workspace.path ?? "").replace(/\/$/u, "") === canonical,
+    );
+    if (exists) return;
+    const created = await rpc("workspace.create", { path: root });
+    if (created?.result?.ok === true) {
+      console.log(
+        `Seeded default web workspace at ${canonical} (AGENT_DSH_WEB_DEFAULT_WORKSPACE)`,
+      );
+    } else {
+      console.warn(
+        `Could not seed default web workspace at ${canonical}: ${JSON.stringify(created).slice(0, 300)}`,
+      );
+    }
+  } catch (error) {
+    console.warn(
+      `Could not seed default web workspace (${error instanceof Error ? error.message : String(error)})`,
+    );
+  }
 }
 
 function startDshWebChild(
