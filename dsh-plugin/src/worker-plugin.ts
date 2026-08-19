@@ -335,6 +335,21 @@ class WorkerLoop {
         runtime: 'dsh',
         workspace_root: this.options.workspaceRoot,
         tool_policy: this.options.toolPolicy,
+        // The Hub overwrites node metadata on registration, so the dsh_web
+        // capability block must ride along here — otherwise a worker boot
+        // wipes the block that `agent web` advertised and the web bridge
+        // starts answering "node web access denied".
+        ...(process.env.AGENT_HUB_DSH_WEB === '1'
+          ? {
+              dsh_web: {
+                enabled: true,
+                protocol_version: '1',
+                profile:
+                  process.env.AGENT_SOCIETY_WEB_PROFILE ?? 'agent-society-web',
+                capabilities: ['session.read'],
+              },
+            }
+          : {}),
       },
     })
   }
