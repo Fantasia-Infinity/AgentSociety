@@ -130,7 +130,9 @@ export function buildLocalUrl(target: string, path: string): URL {
     rawPath === "/api" ||
     rawPath.startsWith("/api/") ||
     rawPath.startsWith("/assets/") ||
-    rawPath.startsWith("/plugins/");
+    rawPath.startsWith("/plugins/") ||
+    rawPath === "/manifest.webmanifest" ||
+    rawPath === "/favicon.svg";
   if (!allowlist) {
     throw new Error("request path not allowed");
   }

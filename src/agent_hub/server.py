@@ -7,11 +7,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
 import queue
+import re
 import secrets
 import threading
 import time
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from .auth import AuthenticatedContext, OIDCIdentityProvider
 from .api import AgentHubApi
@@ -24,6 +25,7 @@ from .store import AgentHubStore
 from .object_store import build_object_store
 from .tunnel import TunnelRegistry
 from .web import WebSession
+from .websocket import WebSocket, WebSocketProtocolError, accept_key
 from .web.handlers import WebHandlersMixin
 from .web_proxy import (
     FORWARDED_REQUEST_HEADERS,
@@ -37,7 +39,74 @@ from .web_proxy import (
     validate_proxy_path,
     validate_ws_path,
 )
-from .websocket import WebSocket, WebSocketProtocolError, accept_key
+
+
+_DEVICE_WEB_HTML_PATH_RE = re.compile(
+    rb'(?P<prefix>(?:src|href)=["\'])(?P<path>/(?:assets/|plugins/|api/|manifest\.webmanifest|favicon\.svg))'
+)
+
+
+def _device_web_mount(node_id: str) -> str:
+    return f"/v1/web/{quote(node_id, safe='')}"
+
+
+def _rewrite_device_web_url_script(mount: str) -> bytes:
+    mount_json = json.dumps(mount + "/", ensure_ascii=True).replace("<", "\\u003c")
+    return f"""<script>
+(() => {{
+  const mount = {mount_json};
+  const prefixes = ['/api', '/plugins', '/assets'];
+  const isSurfacePath = (path) => path === '/manifest.webmanifest' || path === '/favicon.svg'
+    || prefixes.some((prefix) => path === prefix || path.startsWith(prefix + '/'));
+  const rewrite = (input, websocket = false) => {{
+    const value = input instanceof URL ? input : new URL(String(input), location.href);
+    if (value.origin !== location.origin) return value;
+    if (websocket && (value.pathname === '/api/events.mux' || value.pathname === '/api/events.host')) {{
+      const kind = value.pathname.endsWith('.mux') ? 'mux' : 'host';
+      value.pathname = mount + 'ws/events/' + kind;
+      return value;
+    }}
+    if (!value.pathname.startsWith(mount) && isSurfacePath(value.pathname)) {{
+      value.pathname = mount + value.pathname.slice(1);
+    }}
+    return value;
+  }};
+  const nativeFetch = globalThis.fetch.bind(globalThis);
+  globalThis.fetch = (input, init) => nativeFetch(
+    input instanceof Request ? new Request(rewrite(input.url), input) : rewrite(input), init);
+  const NativeWebSocket = globalThis.WebSocket;
+  if (NativeWebSocket) {{
+    class HubWebSocket extends NativeWebSocket {{
+      constructor(url, protocols) {{ super(rewrite(url, true), protocols); }}
+    }}
+    for (const key of ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED']) HubWebSocket[key] = NativeWebSocket[key];
+    globalThis.WebSocket = HubWebSocket;
+  }}
+  const NativeEventSource = globalThis.EventSource;
+  if (NativeEventSource) {{
+    class HubEventSource extends NativeEventSource {{
+      constructor(url, init) {{ super(rewrite(url), init); }}
+    }}
+    for (const key of ['CONNECTING', 'OPEN', 'CLOSED']) HubEventSource[key] = NativeEventSource[key];
+    globalThis.EventSource = HubEventSource;
+  }}
+  globalThis.__DSH_HUB_WEB_MOUNT__ = mount;
+}})();
+</script>""".encode("utf-8")
+
+
+def rewrite_device_web_html(body: bytes, node_id: str) -> bytes:
+    """Make the origin-rooted dsh Web frontend work below a Hub node mount."""
+    mount = _device_web_mount(node_id).encode("ascii")
+
+    def replace(match: re.Match[bytes]) -> bytes:
+        return match.group("prefix") + mount + b"/" + match.group("path").lstrip(b"/")
+
+    rewritten = _DEVICE_WEB_HTML_PATH_RE.sub(replace, body)
+    marker = b"</head>"
+    if marker in rewritten and b"__DSH_HUB_WEB_MOUNT__" not in rewritten:
+        rewritten = rewritten.replace(marker, _rewrite_device_web_url_script(_device_web_mount(node_id)) + marker, 1)
+    return rewritten
 
 
 logger = logging.getLogger(__name__)
@@ -626,6 +695,8 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
         for key, value in response_headers.items():
             if key.lower() in FORWARDED_RESPONSE_HEADERS:
                 self.send_header(key, str(value))
+        if status == HTTPStatus.OK and str(response_headers.get("content-type", "")).lower().startswith("text/html"):
+            body_bytes = rewrite_device_web_html(body_bytes, self.path)
         self.send_header("Content-Length", str(len(body_bytes)))
         self._send_security_headers()
         self.end_headers()

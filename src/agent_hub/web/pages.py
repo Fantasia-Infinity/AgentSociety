@@ -171,6 +171,9 @@ button.secondary { background: #64748b; }
                     text-align: center; font-size: 0.85rem; line-height: 1.5rem; }
 """
 
+_CSS += '\n.cta-link { color: var(--accent); font-weight: 600; white-space: nowrap; }\n'
+
+
 
 def _layout(
     title: str,
@@ -986,6 +989,15 @@ def nodes_page(
         f"<td>{_esc(a['kind'])}</td><td>{_esc(', '.join(a['capabilities']))}</td></tr>"
         for a in actors
     )
+    def dsh_web_cell(node: dict[str, Any]) -> str:
+        web = node.get("web") or {}
+        if web.get("enabled") is not True:
+            return '<span class="muted">Not enabled</span>'
+        if node.get("status") != "online":
+            return '<span class="muted">Offline</span>'
+        node_id = quote(str(node.get("node_id") or ""), safe="")
+        return f'<a class="cta-link" href="/v1/web/{node_id}/" target="_blank" rel="noopener">Open DSH Web</a>'
+
     node_rows = "".join(
         f'<tr><td class="short-id">{_esc(n["node_id"])}</td>'
         f'<td class="short-id">{_esc(n["actor_id"])}</td>'
@@ -993,18 +1005,19 @@ def nodes_page(
         f"<td><span class=\"pill status-{_esc(n['status'])}\">"
         f"{_esc(n['status'])}</span></td>"
         f'<td class="time" title="{_fmt(n["last_seen_at"])}">'
-        f"{_fmt_relative(n['last_seen_at'])}</td></tr>"
+        f"{_fmt_relative(n['last_seen_at'])}</td>"
+        f"<td>{dsh_web_cell(n)}</td></tr>"
         for n in nodes
     )
     if not node_rows:
         node_rows = (
-            '<tr><td colspan="5" class="muted">No devices connected yet. '
+            '<tr><td colspan="6" class="muted">No devices connected yet. '
             'Run <code>agent connect</code> on a machine to add one.</td></tr>'
         )
     body = (
         "<h1>Devices</h1>"
         '<div class="table-wrap"><table><tr><th>Node</th><th>Actor</th>'
-        "<th>Name</th><th>Status</th><th>Last seen</th></tr>"
+        "<th>Name</th><th>Status</th><th>Last seen</th><th>DSH Web</th></tr>"
         f"{node_rows}</table></div>"
         "<details><summary>Identities (advanced)</summary>"
         "<h2>Principals</h2>"

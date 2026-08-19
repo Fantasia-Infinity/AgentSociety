@@ -239,10 +239,17 @@ class WebTunnelIntegrationTests(unittest.TestCase):
         self.store.close()
         self._temporary.cleanup()
 
+    def test_proxy_path_allowlist_accepts_frontend_metadata_assets(self) -> None:
+        self.assertTrue(validate_proxy_path("/manifest.webmanifest"))
+        self.assertTrue(validate_proxy_path("/favicon.svg"))
+        self.assertTrue(validate_proxy_path("/plugins/events"))
+
     def test_proxy_path_allowlist_rejects_dot_segments(self) -> None:
         self.assertFalse(validate_proxy_path("/api/../../etc/passwd"))
+        self.assertFalse(validate_proxy_path("/assets/../api/session.list"))
+
         self.assertFalse(validate_proxy_path("/api/%2e%2e/etc/passwd"))
-        self.assertFalse(validate_proxy_path("/api/%252e%252e/etc/passwd"))
+        self.assertFalse(validate_proxy_path("/api/%252e%2e/etc/passwd"))
         self.assertTrue(validate_proxy_path("/api/session.list?x=1"))
         self.assertTrue(validate_proxy_path("/?x=1"))
         self.assertTrue(validate_proxy_path("/plugins/@deepseek-ai/dsh-base/client.js?rev=1"))

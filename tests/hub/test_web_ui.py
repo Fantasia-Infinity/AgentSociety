@@ -102,6 +102,25 @@ class WebPageTests(unittest.TestCase):
         self.assertIn('name="csrf_token"', html)
 
 
+    def test_nodes_page_shows_online_dsh_web_link(self) -> None:
+        from agent_hub.web.pages import nodes_page
+
+        html = nodes_page(
+            [],
+            [],
+            [{
+                "node_id": "node/mac.local",
+                "actor_id": "actor",
+                "display_name": "Mac",
+                "status": "online",
+                "last_seen_at": time.time(),
+                "web": {"enabled": True},
+            }],
+        )
+        self.assertIn("Open DSH Web", html)
+        self.assertIn("/v1/web/node%2Fmac.local/", html)
+
+
 class WebUiIntegrationTests(unittest.TestCase):
     def test_login_dashboard_create_task_and_csrf(self) -> None:
         try:

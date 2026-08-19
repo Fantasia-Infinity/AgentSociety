@@ -42,7 +42,15 @@ FORWARDED_RESPONSE_HEADERS = frozenset(
     {"content-type", "cache-control", "content-encoding", "etag", "last-modified"}
 )
 
-ALLOWED_PROXY_PATHS = ("/api", "/api/", "/assets/", "/plugins/", "/")
+ALLOWED_PROXY_PATHS = (
+    "/api",
+    "/api/",
+    "/assets/",
+    "/plugins/",
+    "/manifest.webmanifest",
+    "/favicon.svg",
+    "/",
+)
 
 
 class WebTunnelCoordinator:
