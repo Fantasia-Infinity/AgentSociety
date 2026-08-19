@@ -20,8 +20,9 @@
 - 把设备本地 `.dsh/sessions` 文件或 live session 序列化后交给 Hub。
 - 向浏览器下发节点令牌 / DeepSeek 模型凭据。
 - Hub `/web` 直接反向代理远端 dsh UI（当前用受控隧道协议，见下）。
-- 原版 dsh Web UI 的原样承载：UI 写死同源路径（`/api/*`、`/api/events.mux`），
-  在 Hub 根路径多节点复用需要前端适配层或子域路由，属于后续阶段。
+- DSH Web 前端通过相对 URL 原生支持挂载：API、插件、静态资源、manifest、favicon、
+  HMR 与事件 WebSocket 都相对当前 `/v1/web/<node_id>/` 文档目录生成；Hub 不改写 HTML，
+  也不向浏览器注入运行时补丁。
 
 ## 隧道协议（P1，已实现）
 
@@ -37,7 +38,7 @@
    （`agent-host/src/web-bridge.ts`，`agent web-bridge` 命令）fetch 本地
    `dsh web`（仅回环地址，默认 `http://127.0.0.1:3080`，可用
    `AGENT_DSH_WEB_TARGET` 覆盖），把响应原样回传。
-4. 浏览器 DSH 事件流：`GET /v1/web/<node_id>/ws/events/{mux|host}`
+4. 浏览器 DSH 事件流：`GET /v1/web/<node_id>/api/events.{mux|host}`
    （WebSocket 升级）。Hub 先让设备打开本地
    `ws://127.0.0.1:<target>/api/events.{mux|host}`（ws-open/ws-open-ack），
    确认成功后升级浏览器连接，再把设备帧经隧道转发给浏览器
@@ -72,7 +73,7 @@
 
 - `GET /v1/web/<node_id>/api/...`（HTTP）：普通代理调用，业务错误保持
   dsh 契约（200 + ServerResponse）。
-- `GET /v1/web/<node_id>/ws/events/{mux|host}`（WS 升级）：事件 downlink，
+- `GET /v1/web/<node_id>/api/events.{mux|host}`（WS 升级）：事件 downlink，
   帧内容为 dsh `ServerRequest` JSON（`{"type":"server-request",...}`），
   与本地 dsh 的 `MUX_EVENTS_PATH`/`HOST_EVENTS_PATH` 帧完全一致。
 

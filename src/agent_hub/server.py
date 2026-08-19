@@ -7,12 +7,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
 import queue
-import re
 import secrets
 import threading
 import time
 from typing import Any
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, urlparse
 
 from .auth import AuthenticatedContext, OIDCIdentityProvider
 from .api import AgentHubApi
@@ -40,83 +39,6 @@ from .web_proxy import (
     validate_ws_path,
 )
 
-
-_DEVICE_WEB_HTML_PATH_RE = re.compile(
-    rb'(?P<prefix>(?:src|href)=["\'])(?P<path>/(?:assets/|plugins/|api/|manifest\.webmanifest|favicon\.svg))'
-)
-
-
-def _device_web_mount(node_id: str) -> str:
-    return f"/v1/web/{quote(node_id, safe='')}"
-
-
-_DEVICE_WEB_QUOTED_PATH_RE = re.compile(
-    rb'(?P<quote>["\'])(?P<path>/(?:assets/|plugins/|api/)[^"\']*|/manifest\.webmanifest(?:\?[^"\']*)?|/favicon\.svg(?:\?[^"\']*)?)(?P=quote)'
-)
-
-
-def _rewrite_device_web_url_script(mount: str) -> bytes:
-    mount_json = json.dumps(mount + "/", ensure_ascii=True).replace("<", "\\u003c")
-    return f"""<script>
-(() => {{
-  const mount = {mount_json};
-  const prefixes = ['/api', '/plugins', '/assets'];
-  const isSurfacePath = (path) => path === '/manifest.webmanifest' || path === '/favicon.svg'
-    || prefixes.some((prefix) => path === prefix || path.startsWith(prefix + '/'));
-  const rewrite = (input, websocket = false) => {{
-    const value = input instanceof URL ? input : new URL(String(input), location.href);
-    if (value.origin !== location.origin) return value;
-    if (websocket && (value.pathname === '/api/events.mux' || value.pathname === '/api/events.host')) {{
-      const kind = value.pathname.endsWith('.mux') ? 'mux' : 'host';
-      value.pathname = mount + 'ws/events/' + kind;
-      return value;
-    }}
-    if (!value.pathname.startsWith(mount) && isSurfacePath(value.pathname)) {{
-      value.pathname = mount + value.pathname.slice(1);
-    }}
-    return value;
-  }};
-  const nativeFetch = globalThis.fetch.bind(globalThis);
-  globalThis.fetch = (input, init) => nativeFetch(
-    input instanceof Request ? new Request(rewrite(input.url), input) : rewrite(input), init);
-  const NativeWebSocket = globalThis.WebSocket;
-  if (NativeWebSocket) {{
-    class HubWebSocket extends NativeWebSocket {{
-      constructor(url, protocols) {{ super(rewrite(url, true), protocols); }}
-    }}
-    for (const key of ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED']) HubWebSocket[key] = NativeWebSocket[key];
-    globalThis.WebSocket = HubWebSocket;
-  }}
-  const NativeEventSource = globalThis.EventSource;
-  if (NativeEventSource) {{
-    class HubEventSource extends NativeEventSource {{
-      constructor(url, init) {{ super(rewrite(url), init); }}
-    }}
-    for (const key of ['CONNECTING', 'OPEN', 'CLOSED']) HubEventSource[key] = NativeEventSource[key];
-    globalThis.EventSource = HubEventSource;
-  }}
-  globalThis.__DSH_HUB_WEB_MOUNT__ = mount;
-}})();
-</script>""".encode("utf-8")
-
-
-def rewrite_device_web_html(body: bytes, node_id: str) -> bytes:
-    """Make the origin-rooted DSH Web frontend work below a Hub node mount."""
-    mount = _device_web_mount(node_id).encode("ascii") + b"/"
-
-    def replace(match: re.Match[bytes]) -> bytes:
-        path = match.group("path")
-        return match.group("quote") + mount + path.lstrip(b"/") + match.group("quote")
-
-    rewritten = _DEVICE_WEB_QUOTED_PATH_RE.sub(replace, body)
-    marker = b"</head>"
-    if marker in rewritten and b"__DSH_HUB_WEB_MOUNT__" not in rewritten:
-        rewritten = rewritten.replace(
-            marker,
-            _rewrite_device_web_url_script(_device_web_mount(node_id)) + marker,
-            1,
-        )
-    return rewritten
 
 
 logger = logging.getLogger(__name__)
@@ -262,14 +184,16 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
             return
         segments = [part for part in parsed.path.split("/") if part]
         if (
-            len(segments) >= 6
+            len(segments) == 5
             and segments[0] == "v1"
             and segments[1] == "web"
-            and segments[3] == "ws"
-            and segments[4] == "events"
-            and segments[5] in ("mux", "host")
+            and segments[3] == "api"
+            and segments[4] in ("events.mux", "events.host")
         ):
-            self._browser_event_ws(segments[2], segments[5])
+            # Native DSH Web clients keep their original /api/events.* WS
+            # path. The Hub only supplies the node mount; it does not rewrite
+            # the page or monkey-patch browser globals.
+            self._browser_event_ws(segments[2], segments[4].removeprefix("events."))
             return
         if parsed.path.startswith("/v1/web/"):
             self._web_proxy("GET")
@@ -522,7 +446,7 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
         return isinstance(raw, dict) and raw.get("enabled") is True
 
     def _browser_event_ws(self, node_id: str, kind: str) -> None:
-        """Browser DSH event downlink: /v1/web/{node}/ws/events/{mux|host}.
+        """Browser DSH event downlink: /v1/web/{node}/api/events.{mux|host}.
 
         Upgrades the browser socket only after the device confirms its local
         event stream opened, then pumps device frames to the browser
@@ -705,8 +629,6 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
         for key, value in response_headers.items():
             if key.lower() in FORWARDED_RESPONSE_HEADERS:
                 self.send_header(key, str(value))
-        if status == HTTPStatus.OK and str(response_headers.get("content-type", "")).lower().startswith("text/html"):
-            body_bytes = rewrite_device_web_html(body_bytes, node_id)
         self.send_header("Content-Length", str(len(body_bytes)))
         self._send_security_headers()
         self.end_headers()

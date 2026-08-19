@@ -16,7 +16,7 @@ import time
 import unittest
 
 from agent_hub.api import AgentHubApi
-from agent_hub.server import HubHttpServer, rewrite_device_web_html
+from agent_hub.server import HubHttpServer
 from agent_hub.store import AgentHubStore
 from agent_hub.websocket import WebSocket, accept_key
 from agent_hub.web_proxy import validate_proxy_path
@@ -256,20 +256,36 @@ class WebTunnelIntegrationTests(unittest.TestCase):
         self.assertFalse(validate_proxy_path("/plugin/escape.js"))
 
 
-    def test_frontend_html_is_rewritten_to_node_mount(self) -> None:
-        html = rewrite_device_web_html(
-            b'<head><script src="/assets/app.js"></script>'
-            b'<link rel="manifest" href="/manifest.webmanifest">'
-            b'<link href="/favicon.svg"></head>'
-            b'<script>window.__DSH_BOOT__={"url":"/plugins/pkg/client.js"}</script>',
-            "node/device",
-        )
-        self.assertIn(b'/v1/web/node%2Fdevice/assets/app.js', html)
-        self.assertIn(b'/v1/web/node%2Fdevice/manifest.webmanifest', html)
-        self.assertIn(b'/v1/web/node%2Fdevice/plugins/pkg/client.js', html)
-        self.assertIn(b'__DSH_HUB_WEB_MOUNT__', html)
-        self.assertIn(b'/api/events.mux', html)
-        self.assertIn(b'ws/events/', html)
+    def test_native_http_paths_are_forwarded_without_html_rewriting(self) -> None:
+        """The native frontend owns its mount-relative URLs; Hub relays bytes."""
+        ws = self._open_tunnel()
+
+        def device_loop() -> None:
+            message = json.loads(ws.recv_text())
+            self.assertEqual(message["type"], "http")
+            self.assertEqual(message["path"], "/")
+            body = b'<head><script src="./assets/app.js"></script></head>'
+            ws.send_text(json.dumps({
+                "type": "http-response",
+                "id": message["id"],
+                "status": 200,
+                "headers": {"Content-Type": "text/html; charset=utf-8"},
+                "body_b64": base64.b64encode(body).decode("ascii"),
+            }))
+
+        thread = threading.Thread(target=device_loop, daemon=True)
+        thread.start()
+        try:
+            request = Request(
+                f"{self.base}/v1/web/node-device/",
+                headers={"Authorization": f"Bearer {self.token}"},
+            )
+            with urlopen(request, timeout=15) as response:
+                body = response.read()
+            self.assertEqual(body, b'<head><script src="./assets/app.js"></script></head>')
+        finally:
+            ws.close()
+
 
     def _open_tunnel(self) -> MiniWebSocketClient:
         request = Request(
@@ -342,7 +358,7 @@ class WebTunnelIntegrationTests(unittest.TestCase):
         thread.start()
         try:
             browser = MiniWebSocketClient(
-                f"ws://127.0.0.1:{self.port}/v1/web/node-device/ws/events/mux",
+                f"ws://127.0.0.1:{self.port}/v1/web/node-device/api/events.mux",
                 headers={"Authorization": f"Bearer {self.token}"},
             )
             try:
@@ -488,7 +504,7 @@ class WebTunnelIntegrationTests(unittest.TestCase):
         thread.start()
         try:
             browser = MiniWebSocketClient(
-                f"ws://127.0.0.1:{self.port}/v1/web/node-device/ws/events/mux",
+                f"ws://127.0.0.1:{self.port}/v1/web/node-device/api/events.mux",
                 headers={"Authorization": f"Bearer {self.token}"},
             )
             received = []
@@ -517,7 +533,7 @@ class WebTunnelIntegrationTests(unittest.TestCase):
         )
         try:
             browser = MiniWebSocketClient(
-                f"ws://127.0.0.1:{self.port}/v1/web/node-plain/ws/events/mux",
+                f"ws://127.0.0.1:{self.port}/v1/web/node-plain/api/events.mux",
                 headers={"Authorization": f"Bearer {self.token}"},
             )
             browser.close()
