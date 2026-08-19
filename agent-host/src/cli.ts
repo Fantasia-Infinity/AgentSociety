@@ -946,6 +946,20 @@ async function resolveNodeCredential(
           remote_tool_policy: config.remoteToolPolicy,
           builtin_capabilities: config.builtinCapabilitiesEnabled,
           worker_session_mode: config.workerSessionMode,
+          // The Hub upserts node metadata verbatim on registration; carry the
+          // dsh_web capability block so a worker boot cannot wipe what
+          // `agent web` advertised (which would break the web bridge).
+          ...(config.dshWebEnabled
+            ? {
+                dsh_web: {
+                  enabled: true,
+                  protocol_version: "1",
+                  profile:
+                    config.dshWebProfile ?? "agent-society-web",
+                  capabilities: ["session.read"],
+                },
+              }
+            : {}),
         },
       });
     } catch (error) {

@@ -195,6 +195,18 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
             # the page or monkey-patch browser globals.
             self._browser_event_ws(segments[2], segments[4].removeprefix("events."))
             return
+        # Alias for the rewritten client bundle: API_PATH is rewritten to
+        # /v1/web/<node>/api, so the browser opens the event stream at
+        # /v1/web/<node>/api/events.{mux|host}.
+        if (
+            len(segments) == 5
+            and segments[0] == "v1"
+            and segments[1] == "web"
+            and segments[3] == "api"
+            and segments[4] in ("events.mux", "events.host")
+        ):
+            self._browser_event_ws(segments[2], segments[4].split(".")[1])
+            return
         if parsed.path.startswith("/v1/web/"):
             self._web_proxy("GET")
             return
@@ -624,7 +636,6 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             self._send_json(HTTPStatus.BAD_GATEWAY, {"error": "bad tunnel response"})
             return
-        self.protocol_version = "HTTP/1.1"
         self.send_response(status)
         for key, value in response_headers.items():
             if key.lower() in FORWARDED_RESPONSE_HEADERS:

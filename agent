@@ -77,8 +77,8 @@ case "$command" in
     worker)
         exec npm --prefix "$agent_host" run worker
         ;;
-    web)
-        exec npm --prefix "$agent_host" run start -- web "$@"
+    web|web-bridge)
+        exec npm --prefix "$agent_host" run start -- "$command" "$@"
         ;;
     web-bridge)
         exec npm --prefix "$agent_host" run web-bridge -- "$@"
