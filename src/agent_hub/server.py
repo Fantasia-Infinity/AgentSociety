@@ -50,6 +50,11 @@ def _device_web_mount(node_id: str) -> str:
     return f"/v1/web/{quote(node_id, safe='')}"
 
 
+_DEVICE_WEB_QUOTED_PATH_RE = re.compile(
+    rb'(?P<quote>["\'])(?P<path>/(?:assets/|plugins/|api/)[^"\']*|/manifest\.webmanifest(?:\?[^"\']*)?|/favicon\.svg(?:\?[^"\']*)?)(?P=quote)'
+)
+
+
 def _rewrite_device_web_url_script(mount: str) -> bytes:
     mount_json = json.dumps(mount + "/", ensure_ascii=True).replace("<", "\\u003c")
     return f"""<script>
@@ -96,16 +101,21 @@ def _rewrite_device_web_url_script(mount: str) -> bytes:
 
 
 def rewrite_device_web_html(body: bytes, node_id: str) -> bytes:
-    """Make the origin-rooted dsh Web frontend work below a Hub node mount."""
-    mount = _device_web_mount(node_id).encode("ascii")
+    """Make the origin-rooted DSH Web frontend work below a Hub node mount."""
+    mount = _device_web_mount(node_id).encode("ascii") + b"/"
 
     def replace(match: re.Match[bytes]) -> bytes:
-        return match.group("prefix") + mount + b"/" + match.group("path").lstrip(b"/")
+        path = match.group("path")
+        return match.group("quote") + mount + path.lstrip(b"/") + match.group("quote")
 
-    rewritten = _DEVICE_WEB_HTML_PATH_RE.sub(replace, body)
+    rewritten = _DEVICE_WEB_QUOTED_PATH_RE.sub(replace, body)
     marker = b"</head>"
     if marker in rewritten and b"__DSH_HUB_WEB_MOUNT__" not in rewritten:
-        rewritten = rewritten.replace(marker, _rewrite_device_web_url_script(_device_web_mount(node_id)) + marker, 1)
+        rewritten = rewritten.replace(
+            marker,
+            _rewrite_device_web_url_script(_device_web_mount(node_id)) + marker,
+            1,
+        )
     return rewritten
 
 
@@ -696,7 +706,7 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
             if key.lower() in FORWARDED_RESPONSE_HEADERS:
                 self.send_header(key, str(value))
         if status == HTTPStatus.OK and str(response_headers.get("content-type", "")).lower().startswith("text/html"):
-            body_bytes = rewrite_device_web_html(body_bytes, self.path)
+            body_bytes = rewrite_device_web_html(body_bytes, node_id)
         self.send_header("Content-Length", str(len(body_bytes)))
         self._send_security_headers()
         self.end_headers()

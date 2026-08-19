@@ -16,7 +16,7 @@ import time
 import unittest
 
 from agent_hub.api import AgentHubApi
-from agent_hub.server import HubHttpServer
+from agent_hub.server import HubHttpServer, rewrite_device_web_html
 from agent_hub.store import AgentHubStore
 from agent_hub.websocket import WebSocket, accept_key
 from agent_hub.web_proxy import validate_proxy_path
@@ -255,6 +255,22 @@ class WebTunnelIntegrationTests(unittest.TestCase):
         self.assertTrue(validate_proxy_path("/plugins/@deepseek-ai/dsh-base/client.js?rev=1"))
         self.assertFalse(validate_proxy_path("/plugin/escape.js"))
 
+
+    def test_frontend_html_is_rewritten_to_node_mount(self) -> None:
+        html = rewrite_device_web_html(
+            b'<head><script src="/assets/app.js"></script>'
+            b'<link rel="manifest" href="/manifest.webmanifest">'
+            b'<link href="/favicon.svg"></head>'
+            b'<script>window.__DSH_BOOT__={"url":"/plugins/pkg/client.js"}</script>',
+            "node/device",
+        )
+        self.assertIn(b'/v1/web/node%2Fdevice/assets/app.js', html)
+        self.assertIn(b'/v1/web/node%2Fdevice/manifest.webmanifest', html)
+        self.assertIn(b'/v1/web/node%2Fdevice/plugins/pkg/client.js', html)
+        self.assertIn(b'__DSH_HUB_WEB_MOUNT__', html)
+        self.assertIn(b'/api/events.mux', html)
+        self.assertIn(b'ws/events/', html)
+
     def _open_tunnel(self) -> MiniWebSocketClient:
         request = Request(
             f"{self.base}/v1/hub/nodes/web/tunnel",
@@ -397,6 +413,10 @@ class WebTunnelIntegrationTests(unittest.TestCase):
             )
         finally:
             ws.close()
+
+    def test_frontend_metadata_paths_are_allowlisted(self) -> None:
+        self.assertTrue(validate_proxy_path("/manifest.webmanifest"))
+        self.assertTrue(validate_proxy_path("/favicon.svg"))
 
     def test_proxy_rejects_disallowed_path(self) -> None:
         request = Request(
