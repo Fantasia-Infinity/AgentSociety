@@ -129,7 +129,8 @@ export function buildLocalUrl(target: string, path: string): URL {
     rawPath === "/" ||
     rawPath === "/api" ||
     rawPath.startsWith("/api/") ||
-    rawPath.startsWith("/assets/");
+    rawPath.startsWith("/assets/") ||
+    rawPath.startsWith("/plugins/");
   if (!allowlist) {
     throw new Error("request path not allowed");
   }
