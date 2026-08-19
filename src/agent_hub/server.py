@@ -33,6 +33,7 @@ from .web_proxy import (
     WS_OPEN_TIMEOUT_SECONDS,
     WebTunnelCoordinator,
     decode_proxy_body,
+    rewrite_device_response,
     validate_proxy_path,
     validate_ws_path,
 )
@@ -190,6 +191,18 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
             and segments[5] in ("mux", "host")
         ):
             self._browser_event_ws(segments[2], segments[5])
+            return
+        # Alias for the rewritten client bundle: API_PATH is rewritten to
+        # /v1/web/<node>/api, so the browser opens the event stream at
+        # /v1/web/<node>/api/events.{mux|host}.
+        if (
+            len(segments) == 5
+            and segments[0] == "v1"
+            and segments[1] == "web"
+            and segments[3] == "api"
+            and segments[4] in ("events.mux", "events.host")
+        ):
+            self._browser_event_ws(segments[2], segments[4].split(".")[1])
             return
         if parsed.path.startswith("/v1/web/"):
             self._web_proxy("GET")
@@ -586,10 +599,16 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
         try:
             status = int(response.get("status", 502))
             response_headers = response.get("headers") or {}
-            body_bytes = decode_proxy_body(response.get("body_b64")) or b""
+            raw_body = decode_proxy_body(response.get("body_b64")) or b""
         except (TypeError, ValueError):
             self._send_json(HTTPStatus.BAD_GATEWAY, {"error": "bad tunnel response"})
             return
+        body_bytes = rewrite_device_response(
+            node_id,
+            raw_body,
+            str(response_headers.get("content-type", "")),
+            str(response_headers.get("content-encoding", "") or None),
+        )
         self.protocol_version = "HTTP/1.1"
         self.send_response(status)
         for key, value in response_headers.items():

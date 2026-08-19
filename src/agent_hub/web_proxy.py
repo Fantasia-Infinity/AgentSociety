@@ -37,7 +37,7 @@ FORWARDED_RESPONSE_HEADERS = frozenset(
     {"content-type", "cache-control", "content-encoding", "etag", "last-modified"}
 )
 
-ALLOWED_PROXY_PATHS = ("/api", "/api/", "/assets/", "/")
+ALLOWED_PROXY_PATHS = ("/api", "/api/", "/assets/", "/plugins/", "/")
 
 
 class WebTunnelCoordinator:
@@ -213,7 +213,11 @@ def validate_proxy_path(path: str) -> bool:
     """Allowlist for the device-side dsh web surface."""
     if path in ALLOWED_PROXY_PATHS:
         return True
-    return path.startswith("/api/") or path.startswith("/assets/")
+    return (
+        path.startswith("/api/")
+        or path.startswith("/assets/")
+        or path.startswith("/plugins/")
+    )
 
 
 def validate_ws_path(path: str) -> bool:
@@ -228,3 +232,36 @@ def decode_proxy_body(body_b64: str | None) -> bytes | None:
     if len(raw) > MAX_PROXY_RESPONSE_BODY:
         raise ValueError("response body too large")
     return raw
+
+
+def rewrite_device_response(
+    node_id: str, body: bytes, content_type: str, encoding: str | None
+) -> bytes:
+    """Frontend adaptation for tunneled dsh web surfaces.
+
+    The dsh web UI hardcodes absolute same-origin paths (the boot config's
+    ``/plugins/...`` client bundles, and ``/api`` in the client bundles). When
+    served through the Hub at ``/v1/web/<node>/...`` those resolve against the
+    Hub origin and 404, leaving a blank page. Rewrite them to the
+    node-scoped prefix in HTML and JavaScript responses.
+    """
+    if not body or encoding not in (None, "", "identity"):
+        # Compressed payloads would need decompress/rewrite/recompress; leave
+        # them untouched rather than corrupt the stream.
+        return body
+    ctype = (content_type or "").lower()
+    if "text/html" not in ctype and "javascript" not in ctype:
+        return body
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        return body
+    prefix = f"/v1/web/{node_id}"
+    rewritten = text
+    rewritten = rewritten.replace('"/plugins/', f'"{prefix}/plugins/')
+    rewritten = rewritten.replace('"/api/', f'"{prefix}/api/')
+    # Minified client bundles pin the RPC base as API_PATH="/api".
+    rewritten = rewritten.replace('="/api"', f'="{prefix}/api"')
+    if rewritten == text:
+        return body
+    return rewritten.encode("utf-8")
