@@ -44,6 +44,7 @@ export function buildDshCommonEnv(
     AGENT_SOCIETY_WORKER: options.worker ? "1" : "0",
     AGENT_SOCIETY_WEB_SEARCH: pluginWebSearchEnabled(config) ? "1" : "0",
     AGENT_SOCIETY_SESSION_COMPRESSION: config.dshSessionCompression,
+    AGENT_SOCIETY_TOOL_POLICY: config.remoteToolPolicy,
     AGENT_SOCIETY_ACTOR_ID: config.actorId,
     AGENT_SOCIETY_NODE_ID: config.nodeId,
     AGENT_SOCIETY_PRINCIPAL_ID: config.principalId,
