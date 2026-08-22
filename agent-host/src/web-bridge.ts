@@ -141,48 +141,6 @@ export function buildLocalUrl(target: string, path: string): URL {
 }
 
 /**
- * Frontend adaptation for the tunneled dsh web surface.
- *
- * The dsh web UI hardcodes absolute same-origin paths: the boot config's
- * /plugins/… client bundles and the client bundles' API_PATH="/api"
- * (including /api/events.{mux,host}). Served through the Hub at
- * /v1/web/<node>/ those resolve against the Hub origin and fail. Prefix
- * them with the node mount in HTML and JavaScript responses so the page
- * works behind the bridge. Compressed payloads and non-text responses are
- * left untouched.
- */
-export function rewriteMountPaths(
-  nodeId: string,
-  body: Buffer,
-  response: Pick<Response, "headers">,
-): Buffer {
-  if (body.byteLength === 0) return body;
-  const encoding = (response.headers.get("content-encoding") ?? "").trim();
-  if (encoding !== "" && encoding !== "identity") return body;
-  const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
-  if (
-    !contentType.includes("text/html") &&
-    !contentType.includes("javascript")
-  ) {
-    return body;
-  }
-  const mount = `/v1/web/${nodeId}`;
-  const text = body.toString("utf8");
-  let rewritten = text
-    .replaceAll('"/plugins/', `"${mount}/plugins/`)
-    .replaceAll('"/api/', `"${mount}/api/`)
-    // The RPC base in the client bundles is a template literal (`/api/...`),
-    // while other "/api" literals (rpc.call channel names, gateway channel
-    // comparisons) are identifiers and must stay untouched.
-    .replaceAll("`/api/", `\`${mount}/api/`)
-    // The RPC base constant in the client bundles.
-    .replaceAll('API_PATH = "/api"', `API_PATH = "${mount}/api"`)
-    .replaceAll('API_PATH="/api"', `API_PATH="${mount}/api"`);
-  if (rewritten === text) return body;
-  return Buffer.from(rewritten, "utf8");
-}
-
-/**
  * Auto-enter a default workspace in the browser.
  *
  * The dsh web shell always lands on the workspace list after login and has
@@ -500,24 +458,17 @@ export class WebBridge {
       });
       return;
     }
-    const forwarded = rewriteMountPaths(this.options.nodeId, responseBody, response);
-    const responseHeaders = Object.fromEntries(response.headers.entries());
-    const adapted = injectDefaultWorkspaceAutoEnter(path, forwarded);
-    if (adapted !== responseBody) {
-      // The rewritten body differs from the device's original bytes while
-      // the ?rev= cache key stays the same, so a previously cached copy
-      // would stay stale forever. Force revalidation-free refetching for
-      // adapted responses (and drop any stale validators).
-      responseHeaders["cache-control"] = "no-store";
-      delete responseHeaders["etag"];
-      delete responseHeaders["last-modified"];
-    }
+    // Relay the device response verbatim: the native-web frontend builds
+    // its own node-mount-aware paths (vite base/patch), so rewriting paths
+    // here would double-prefix them. Only the index page gets the
+    // default-workspace auto-enter script injected.
+    const forwarded = injectDefaultWorkspaceAutoEnter(path, responseBody);
     this.sendTunnel(ws, {
       type: "http-response",
       id: requestId,
       status: response.status,
-      headers: responseHeaders,
-      body_b64: adapted.toString("base64"),
+      headers: Object.fromEntries(response.headers.entries()),
+      body_b64: forwarded.toString("base64"),
     });
   }
 
