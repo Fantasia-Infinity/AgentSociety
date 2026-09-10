@@ -20,17 +20,6 @@ export interface WebBridgeOptions {
   nodeId: string;
   /** Local dsh web origin, e.g. http://127.0.0.1:3080. Must be loopback. */
   target: string;
-  /**
-   * DSH Web launch URL printed by the local `dsh web` process. When provided,
-   * the bridge exchanges it for the DSH browser-session cookie and uses that
-   * cookie for all local HTTP and WebSocket requests.
-   */
-  dshAuthUrl?: string;
-  /**
-   * Pre-authenticated DSH session cookie (name=value only). Overrides
-   * dshAuthUrl for deployments that already have a cookie.
-   */
-  dshCookie?: string;
   /** Log line callback, defaults to console.log. */
   log?: (message: string) => void;
   /** Injectable WebSocket constructor, primarily for deterministic tests. */
@@ -44,13 +33,6 @@ export interface WebBridgeOptions {
 const RECONNECT_DELAY_MS = 5_000;
 /** Cap for device-side response bodies, matching the Hub's proxy limit. */
 export const MAX_RESPONSE_BODY = 32 * 1024 * 1024;
-
-/** WebSocket constructor with an optional Node/undici headers option. */
-type LocalWebSocketCtor = new (
-  url: string,
-  protocols?: string | string[],
-  options?: { headers?: Record<string, string> },
-) => WebSocket;
 
 export function assertLoopbackTarget(target: string): string {
   const url = new URL(target);
@@ -216,7 +198,6 @@ export class WebBridge {
   private readonly WebSocketImpl: typeof WebSocket;
   private readonly fetchImpl: typeof fetch;
   private readonly delayImpl: WebBridgeDelay;
-  private dshCookie: string | undefined;
   /** Hub-issued event stream id -> local device WebSocket. */
   private readonly eventStreams = new Map<string, WebSocket>();
   /** Tunnel socket which owns each local event stream. */
@@ -253,12 +234,10 @@ export class WebBridge {
     this.WebSocketImpl = options.webSocketImpl ?? WebSocket;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.delayImpl = options.delayImpl ?? delay;
-    this.dshCookie = options.dshCookie;
   }
 
   /** Run until stop() is called, reconnecting with backoff on failure. */
   async run(): Promise<void> {
-    await this.authenticate();
     while (!this.stopped) {
       try {
         await this.connectOnce();
@@ -434,30 +413,6 @@ export class WebBridge {
       }
       return;
     }
-    if (message.type === "ws-client-frame") {
-      const streamId = String(message.id ?? "");
-      const local = this.eventStreams.get(streamId);
-      if (
-        local === undefined ||
-        this.eventStreamOwners.get(streamId) !== ws
-      ) {
-        return;
-      }
-      try {
-        const payload = Buffer.from(
-          String(message.payload_b64 ?? ""),
-          "base64",
-        );
-        if (Number(message.opcode ?? 1) === 0x2) {
-          local.send(payload);
-        } else {
-          local.send(payload.toString("utf8"));
-        }
-      } catch {
-        // The local socket is already closing.
-      }
-      return;
-    }
     if (message.type !== "http") return;
     const requestId = String(message.id ?? "");
     if (!requestId) return;
@@ -475,7 +430,7 @@ export class WebBridge {
         // Ask the local server for an identity body: Node's fetch transparently
         // decompresses gzip while keeping the content-encoding header, which
         // would make the Hub/browser try to decode plaintext.
-        headers: this.localHeaders({ ...headers, "accept-encoding": "identity" }),
+        headers: { ...headers, "accept-encoding": "identity" },
         ...(body !== undefined ? { body } : {}),
         signal: this.abortController.signal,
       });
@@ -527,12 +482,12 @@ export class WebBridge {
     });
   }
 
-  /** Open one device-local DSH remote.mux and relay frames in both directions. */
+  /** Open one device-local DSH event downlink and relay its frames to the Hub. */
   private openEventStream(ws: WebSocket, message: Record<string, unknown>): void {
     const streamId = String(message.id ?? "");
     if (!streamId) return;
     const path = String(message.path ?? "/");
-    if (path !== "/api/remote.mux") {
+    if (!/^\/api\/events\.(mux|host)$/u.test(path)) {
       this.sendTunnel(ws, {
         type: "ws-open-ack",
         id: streamId,
@@ -543,13 +498,7 @@ export class WebBridge {
     }
     let local: WebSocket;
     try {
-      local = new (this.WebSocketImpl as LocalWebSocketCtor)(
-          `${this.target}${path}`,
-          undefined,
-          this.dshCookie === undefined
-            ? undefined
-            : { headers: { cookie: this.dshCookie } },
-        );
+      local = new this.WebSocketImpl(`${this.target}${path}`);
     } catch (error) {
       this.sendTunnel(ws, {
         type: "ws-open-ack",
@@ -643,35 +592,6 @@ export class WebBridge {
       this.eventStreamOwners.delete(streamId);
       this.sendTunnel(ws, { type: "ws-close", id: streamId, code: 1000 });
     }, { once: true });
-  }
-
-  async authenticate(): Promise<string | undefined> {
-    if (this.dshCookie !== undefined) return this.dshCookie;
-    if (this.options.dshAuthUrl === undefined) {
-      this.log("web-bridge no DSH auth URL; continuing without a local session cookie");
-      return undefined;
-    }
-    const response = await this.fetchImpl(this.options.dshAuthUrl, {
-      method: "GET",
-      redirect: "manual",
-      signal: this.abortController.signal,
-    });
-    const headers = response.headers as unknown as {
-      getSetCookie?: () => string[];
-    };
-    const raw = headers.getSetCookie?.()[0] ?? response.headers.get("set-cookie");
-    if (!raw) {
-      this.log("web-bridge DSH auth exchange did not set a session cookie");
-      return undefined;
-    }
-    this.dshCookie = raw.split(";", 1)[0]!.trim();
-    this.log("web-bridge authenticated local dsh web");
-    return this.dshCookie;
-  }
-
-  private localHeaders(headers: Record<string, string>): Record<string, string> {
-    if (this.dshCookie === undefined) return headers;
-    return { ...headers, cookie: this.dshCookie };
   }
 
   private async fetchTicket(signal: AbortSignal): Promise<string> {
