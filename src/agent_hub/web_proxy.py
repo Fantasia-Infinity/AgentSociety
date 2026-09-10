@@ -29,7 +29,7 @@ WS_OPEN_TIMEOUT_SECONDS = 10.0
 # Keep upgraded WebSocket connections active without removing the ordinary
 # HTTP socket timeout used for non-upgraded requests.
 TUNNEL_KEEPALIVE_SECONDS = 25.0
-ALLOWED_WS_PATHS = frozenset({"/api/events.mux", "/api/events.host"})
+ALLOWED_WS_PATHS = frozenset({"/api/remote.mux"})
 
 # Headers allowed to pass from the browser to the device. Never forward
 # Authorization, Cookie, Host, Connection, Upgrade, or Content-Length: Hub
@@ -58,10 +58,10 @@ class WebTunnelCoordinator:
 
     def __init__(self, registry: TunnelRegistry) -> None:
         self.registry = registry
-        self._pending: dict[str, queue.Queue[dict[str, Any]]] = {}
+        self._pending: dict[str, tuple[str, queue.Queue[dict[str, Any]]]] = {}
         self._pending_lock = threading.Lock()
         self._ws_lock = threading.Lock()
-        self._ws_channels: dict[str, queue.Queue[dict[str, Any]]] = {}
+        self._ws_channels: dict[str, tuple[str, queue.Queue[dict[str, Any]]]] = {}
 
     # -- device side ------------------------------------------------------
 
@@ -87,8 +87,8 @@ class WebTunnelCoordinator:
         except (WebSocketProtocolError, OSError, ValueError) as exc:
             logger.info("tunnel_offline node=%s reason=%s", node_id, exc)
         finally:
-            self.registry.detach(node_id, close)
-            self._fail_node(node_id)
+            if self.registry.detach(node_id, close):
+                self._fail_node(node_id)
 
     def _dispatch_device_message(
         self, node_id: str, message: dict[str, Any]
@@ -99,10 +99,10 @@ class WebTunnelCoordinator:
             if not request_id:
                 return
             with self._pending_lock:
-                pending = self._pending.pop(request_id, None)
-            if pending is not None:
+                entry = self._pending.pop(request_id, None)
+            if entry is not None and entry[0] == node_id:
                 try:
-                    pending.put_nowait(message)
+                    entry[1].put_nowait(message)
                 except queue.Full:
                     pass
             return
@@ -113,11 +113,11 @@ class WebTunnelCoordinator:
             if not stream_id:
                 return
             with self._ws_lock:
-                channel = self._ws_channels.get(stream_id)
-                if channel is None:
+                entry = self._ws_channels.get(stream_id)
+                if entry is None or entry[0] != node_id:
                     return
             try:
-                channel.put_nowait(message)
+                entry[1].put_nowait(message)
             except queue.Full:
                 pass
             return
@@ -125,9 +125,14 @@ class WebTunnelCoordinator:
 
     def _fail_node(self, node_id: str) -> None:
         with self._pending_lock:
-            pending = list(self._pending.values())
-            self._pending.clear()
-        for item in pending:
+            pending = [
+                item for item_node, item in self._pending.items()
+                if item[0] == node_id
+            ]
+            for request_id, item in list(self._pending.items()):
+                if item[0] == node_id:
+                    self._pending.pop(request_id, None)
+        for _request_id, item in pending:
             try:
                 item.put_nowait(
                     {"type": "http-response", "status": 502, "headers": {}, "body_b64": None}
@@ -135,9 +140,14 @@ class WebTunnelCoordinator:
             except queue.Full:
                 pass
         with self._ws_lock:
-            channels = list(self._ws_channels.values())
-            self._ws_channels.clear()
-        for channel in channels:
+            channels = [
+                item for stream_id, item in self._ws_channels.items()
+                if item[0] == node_id
+            ]
+            for stream_id, item in list(self._ws_channels.items()):
+                if item[0] == node_id:
+                    self._ws_channels.pop(stream_id, None)
+        for _stream_id, channel in channels:
             try:
                 channel.put_nowait({"type": "ws-close", "id": "", "code": 1006})
             except queue.Full:
@@ -157,7 +167,7 @@ class WebTunnelCoordinator:
         stream_id = secrets.token_hex(8)
         channel: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=64)
         with self._ws_lock:
-            self._ws_channels[stream_id] = channel
+            self._ws_channels[stream_id] = (node_id, channel)
         forwarded = self.registry.send_to(
             node_id,
             {"type": "ws-open", "id": stream_id, "path": path},
@@ -173,6 +183,24 @@ class WebTunnelCoordinator:
             self._ws_channels.pop(stream_id, None)
         self.registry.send_to(
             node_id, {"type": "ws-close", "id": stream_id, "code": 1000}
+        )
+
+    def send_ws_client_frame(
+        self,
+        node_id: str,
+        stream_id: str,
+        opcode: int,
+        payload: bytes,
+    ) -> bool:
+        """Forward one browser WebSocket frame to the device-local DSH stream."""
+        return self.registry.send_to(
+            node_id,
+            {
+                "type": "ws-client-frame",
+                "id": stream_id,
+                "opcode": opcode,
+                "payload_b64": base64.b64encode(payload).decode("ascii"),
+            },
         )
 
     # -- browser side -----------------------------------------------------
@@ -195,7 +223,7 @@ class WebTunnelCoordinator:
         request_id = secrets.token_hex(8)
         pending: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1)
         with self._pending_lock:
-            self._pending[request_id] = pending
+            self._pending[request_id] = (node_id, pending)
         forwarded = self.registry.send_to(
             node_id,
             {

@@ -64,11 +64,19 @@ class TunnelRegistry:
             except Exception:
                 pass
 
-    def detach(self, node_id: str, close: CloseFn) -> None:
+    def detach(self, node_id: str, close: CloseFn) -> bool:
+        """Detach only *close* if it is still the active tunnel.
+
+        Returns true when this call removed the current connection. An old
+        connection may finish after a replacement has already been attached;
+        its teardown must not be allowed to tear down the replacement.
+        """
         with self._lock:
             current = self._tunnels.get(node_id)
-            if current is not None and current["close"] is close:
-                self._tunnels.pop(node_id, None)
+            if current is None or current["close"] is not close:
+                return False
+            self._tunnels.pop(node_id, None)
+            return True
 
     def send_to(self, node_id: str, message: dict[str, Any]) -> bool:
         """Send one JSON message to the node's tunnel; False if offline."""

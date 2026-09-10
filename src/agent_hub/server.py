@@ -188,24 +188,12 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
             and segments[0] == "v1"
             and segments[1] == "web"
             and segments[3] == "api"
-            and segments[4] in ("events.mux", "events.host")
+            and segments[4] == "remote.mux"
         ):
-            # Native DSH Web clients keep their original /api/events.* WS
-            # path. The Hub only supplies the node mount; it does not rewrite
-            # the page or monkey-patch browser globals.
-            self._browser_event_ws(segments[2], segments[4].removeprefix("events."))
-            return
-        # Alias for the rewritten client bundle: API_PATH is rewritten to
-        # /v1/web/<node>/api, so the browser opens the event stream at
-        # /v1/web/<node>/api/events.{mux|host}.
-        if (
-            len(segments) == 5
-            and segments[0] == "v1"
-            and segments[1] == "web"
-            and segments[3] == "api"
-            and segments[4] in ("events.mux", "events.host")
-        ):
-            self._browser_event_ws(segments[2], segments[4].split(".")[1])
+            # Native DSH Web clients keep the original /api/remote.mux WS path,
+            # mounted below the per-node web prefix. The Hub only supplies the
+            # node mount; it does not rewrite the page or monkey-patch globals.
+            self._browser_remote_ws(segments[2])
             return
         if parsed.path.startswith("/v1/web/"):
             self._web_proxy("GET")
@@ -457,17 +445,17 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
         raw = (node.get("metadata") or {}).get("dsh_web")
         return isinstance(raw, dict) and raw.get("enabled") is True
 
-    def _browser_event_ws(self, node_id: str, kind: str) -> None:
-        """Browser DSH event downlink: /v1/web/{node}/api/events.{mux|host}.
+    def _browser_remote_ws(self, node_id: str) -> None:
+        """Browser DSH remote.mux: /v1/web/{node}/api/remote.mux.
 
-        Upgrades the browser socket only after the device confirms its local
-        event stream opened, then pumps device frames to the browser
-        (downlink-only: browser frames close 1008, matching dsh semantics).
+        Authenticates the browser with Hub credentials or the Hub web session,
+        asks the device to open its local `/api/remote.mux`, and then relays
+        text/binary WebSocket frames in both directions.
         """
         context = self._authorize_browser(node_id)
         if context is None:
             return
-        path = f"/api/events.{kind}"
+        path = "/api/remote.mux"
         if not validate_ws_path(path):
             self._send_json(
                 HTTPStatus.FORBIDDEN, {"error": "event stream not allowed"}
@@ -519,7 +507,7 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
         node_id: str,
         stream_id: str,
     ) -> None:
-        """Relay device frames to the browser until either side closes."""
+        """Relay a bidirectional DSH remote.mux stream through the tunnel."""
         def pump() -> None:
             last_ping = time.monotonic()
             try:
@@ -564,12 +552,15 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
         thread.start()
         try:
             while True:
-                opcode, _payload = browser_ws.recv_message()
+                opcode, payload = browser_ws.recv_message()
                 if opcode == 0x8:
                     return
-                # DSH event streams are server-to-browser only.
-                browser_ws.close(1008, b"downlink only")
-                return
+                if len(payload or b"") > MAX_WS_FRAME:
+                    continue
+                if not self.server.web_tunnel.send_ws_client_frame(
+                    node_id, stream_id, opcode, payload or b""
+                ):
+                    return
         except (WebSocketProtocolError, OSError, ValueError):
             return
         finally:
