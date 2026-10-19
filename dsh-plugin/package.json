@@ -3,6 +3,14 @@
   "version": "0.2.0",
   "description": "AgentSociety Hub worker and dispatch tools as a DeepSeek Harness bundle",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Fantasia-Infinity/AgentSociety.git",
+    "directory": "dsh-plugin"
+  },
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -18,6 +26,10 @@
     "./worker": {
       "types": "./lib/worker-plugin.d.ts",
       "default": "./lib/worker-plugin.js"
+    },
+    "./config": {
+      "types": "./lib/config-plugin.d.ts",
+      "default": "./lib/config-plugin.js"
     },
     "./hub-tool-guard": {
       "types": "./lib/hub-tool-guard.d.ts",
@@ -56,20 +68,31 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test test/*.test.mjs"
+    "test": "npm run build && node --test test/*.test.mjs",
+    "prepack": "npm run build"
   },
   "peerDependencies": {
+    "@agent-society/agent-config": "^0.1.0",
+    "@deepseek-ai/dsh": "0.1.2-alpha.2",
     "@deepseek-ai/cordis": "^4.0.2",
     "@deepseek-ai/cordis-plugin-timer": "^1.1.4",
     "@deepseek-ai/dsh-agent": "^0.1.2-alpha.2",
     "@deepseek-ai/dsh-llm": "^0.1.2-alpha.2",
     "@deepseek-ai/dsh-sandbox-policy": "^0.1.2-alpha.2",
     "@deepseek-ai/dsh-session": "^0.1.2-alpha.2",
+    "@deepseek-ai/dsh-mcp-client": "^0.1.2-alpha.2",
     "@deepseek-ai/dsh-session-persistence": "^0.1.2-alpha.2",
     "@deepseek-ai/dsh-system-prompt": "^0.1.2-alpha.2",
-    "@deepseek-ai/dsh-mcp-client": "^0.1.2-alpha.2",
     "@deepseek-ai/dsh-scope": "^0.1.2-alpha.2",
     "@deepseek-ai/schemastery": "^3.18.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "@agent-society/agent-config": "^0.1.0"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.2",

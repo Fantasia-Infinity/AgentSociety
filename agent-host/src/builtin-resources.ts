@@ -65,6 +65,12 @@ function ensureChannelMcpDefaults(diagnostics: string[]): void {
   if (isRecord(current) && !isManagedChannelEntry(current)) return;
 
   const repositoryRoot = findRepositoryRoot();
+  if (!repositoryRoot) {
+    diagnostics.push(
+      "Skipped managed Channel MCP defaults: published agent-host has no source checkout",
+    );
+    return;
+  }
   const srcRoot = join(repositoryRoot, "src");
   const httpUrl = (
     process.env.AGENT_CHANNEL_HTTP_URL?.trim() || "http://127.0.0.1:8742"
@@ -161,7 +167,7 @@ function isManagedChannelEntry(value: Record<string, unknown>): boolean {
   return value.env.AGENT_SOCIETY_MANAGED_MCP === MANAGED_CHANNEL_MARKER;
 }
 
-function findRepositoryRoot(): string {
+function findRepositoryRoot(): string | undefined {
   let cursor = dirname(fileURLToPath(import.meta.url));
   for (let depth = 0; depth < 8; depth += 1) {
     if (
@@ -174,7 +180,7 @@ function findRepositoryRoot(): string {
     if (parent === cursor) break;
     cursor = parent;
   }
-  throw new Error("Could not locate the AgentSociety repository root");
+  return undefined;
 }
 
 function writePrivateJson(path: string, value: unknown): void {

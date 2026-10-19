@@ -3,6 +3,13 @@ import { homedir, hostname, userInfo } from "node:os";
 import { join, resolve } from "node:path";
 
 import {
+  canonicalConfigPath,
+  defaultDshHome,
+  legacyConfigPaths,
+  loadAgentConfig,
+  resolveCredential as resolveSharedCredential,
+} from "@agent-society/agent-config";
+import {
   readCredentialEnv,
   readLegacyMacKeychainCredential,
   readSystemCredential,
@@ -97,15 +104,19 @@ export interface AgentHostConfig {
   dshSessionCompression?: "none" | "zstd";
   /** Advertise an opt-in DSH Web capability to the Hub. Default off; set AGENT_HUB_DSH_WEB=1 to enable. */
   dshWebEnabled?: boolean;
-  /** dsh profile name advertised for the web bridge, default "agent-society-web". */
+  /** dsh profile name advertised for the web bridge, default "web". */
   dshWebProfile?: string;
 }
 
 export function loadProjectEnv(path?: string): string | undefined {
-  const envPath = path ? resolve(path) : discoverProjectEnv();
-  if (envPath && existsSync(envPath)) {
-    loadEnvFile(envPath);
+  const loaded = loadAgentConfig({
+    ...(path ? { configPath: path } : {}),
+    cwd: process.cwd(),
+  });
+  for (const [key, value] of Object.entries(loaded.values)) {
+    if (process.env[key] === undefined) process.env[key] = value;
   }
+  const envPath = loaded.path;
   const credentialFile = process.env.AGENT_CREDENTIAL_FILE?.trim();
   if (credentialFile) {
     try {
@@ -123,29 +134,33 @@ export function loadProjectEnv(path?: string): string | undefined {
 }
 
 export function discoverProjectEnv(cwd = process.cwd()): string | undefined {
-  return firstExisting([
-    defaultAgentConfigPath(),
-    resolve(cwd, ".private/env/agent.env"),
+  // This compatibility helper answers the historical question "which file
+  // belongs to this checkout?". Keep project-local legacy files ahead of the
+  // user's canonical $DSH_HOME/.env; the latter still wins when composing
+  // effective values through loadAgentConfig(), but must not hide a checkout's
+  // .env.agent from callers that need to identify its migration source.
+  const projectCandidates = [
+    resolve(cwd, ".private", "env", "agent.env"),
     resolve(cwd, ".env.agent"),
-    resolve(cwd, "../.private/env/agent.env"),
-    resolve(cwd, "../.env.agent"),
+    resolve(cwd, "..", ".private", "env", "agent.env"),
+    resolve(cwd, "..", ".env.agent"),
     resolve(cwd, ".env"),
-    resolve(cwd, "../.env"),
-  ]);
+    resolve(cwd, "..", ".env"),
+  ];
+  return firstExisting(projectCandidates) ?? loadAgentConfig({ cwd }).path;
 }
 
 /** User-level configuration path shared by setup, connect, worker and doctor. */
 export function defaultAgentConfigPath(): string {
-  const configHome =
-    process.platform === "win32"
-      ? process.env.APPDATA?.trim() || join(homedir(), "AppData", "Roaming")
-      : process.env.XDG_CONFIG_HOME?.trim() || join(homedir(), ".config");
-  return resolve(configHome, "agentsociety", "agent.env");
+  return canonicalConfigPath(defaultDshHome());
 }
 
 /** Legacy project paths are still readable and are never removed automatically. */
 export function legacyAgentConfigPaths(root: string): string[] {
-  return [resolve(root, ".private/env/agent.env"), resolve(root, ".env.agent")];
+  return [
+    ...legacyConfigPaths(root),
+    resolve(root, ".env"),
+  ];
 }
 
 /**
@@ -549,7 +564,7 @@ export function loadConfig(
     dshWebSearch: process.env.AGENT_DSH_WEB_SEARCH !== "0",
     dshWebEnabled: process.env.AGENT_HUB_DSH_WEB === "1",
     dshWebProfile:
-      process.env.AGENT_HUB_DSH_WEB_PROFILE?.trim() || "agent-society-web",
+      process.env.AGENT_HUB_DSH_WEB_PROFILE?.trim() || "web",
   };
 }
 
@@ -563,6 +578,26 @@ function configuredCredential(
 ): string | undefined {
   const backend = process.env.AGENT_CREDENTIAL_BACKEND?.trim();
   if (backend === "env" || backend === "file") return undefined;
+  const sharedName =
+    label === "Hub"
+      ? "AGENT_HUB_TOKEN"
+      : label === "Hub password"
+        ? "AGENT_HUB_PASSWORD"
+        : label === "Hub node credential"
+          ? "AGENT_HUB_NODE_TOKEN"
+          : label === "remote model"
+            ? "AGENT_REMOTE_API_KEY"
+            : undefined;
+  if (sharedName) {
+    const serviceName = service || legacyService;
+    const accountName = account || legacyAccount;
+    const shared = resolveSharedCredential(sharedName, {
+      ...(serviceName ? { service: serviceName } : {}),
+      ...(accountName ? { account: accountName } : {}),
+      allowKeychain: !allowUnavailable,
+    });
+    if (shared.value) return shared.value;
+  }
   try {
     if (service || account) return readSystemCredential(service, account, label);
     return readLegacyMacKeychainCredential(legacyService, legacyAccount, label);

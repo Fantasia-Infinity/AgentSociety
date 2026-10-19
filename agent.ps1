@@ -1,5 +1,8 @@
 $ErrorActionPreference = "Stop"
 
+# This wrapper is the explicit Combo source-mode entrypoint.
+$env:AGENT_RUNTIME_MODE = "source"
+
 $RepositoryRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $AgentHost = Join-Path $RepositoryRoot "agent-host"
 $Command = if ($args.Count -gt 0) { $args[0] } else { "tui" }
@@ -22,9 +25,8 @@ $Entrypoint = Join-Path $AgentHost "dist/src/cli.js"
 
 function Get-AgentConfigPath {
     if ($env:AGENT_ENV_FILE) { return $env:AGENT_ENV_FILE }
-    if ($env:XDG_CONFIG_HOME) { return Join-Path $env:XDG_CONFIG_HOME "agentsociety\agent.env" }
-    if ($env:APPDATA) { return Join-Path $env:APPDATA "AgentSociety\agent.env" }
-    return Join-Path $HOME ".config\agentsociety\agent.env"
+    $DshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $HOME ".dsh" }
+    return Join-Path $DshHome ".env"
 }
 
 function Test-AgentConfig {
@@ -69,12 +71,13 @@ switch ($Command) {
     { $_ -in "web", "web-bridge" } { & $NpmCommand --prefix $AgentHost run start -- $Command @Rest; break }
     "doctor" { & node $Entrypoint "doctor" @Rest; break }
     { $_ -in "sessions", "dsh-doctor" } { & $NpmCommand --prefix $AgentHost run start -- $Command @Rest; break }
+    "update" { & $NpmCommand --prefix $AgentHost run start -- $Command @Rest; break }
     { $_ -in "register", "once", "observe", "attach", "bridge", "connect", "dsh-worker", "dsh-once", "dsh-dispatch" } {
         & $NpmCommand --prefix $AgentHost run start -- $Command @Rest
         break
     }
     default {
-        throw "Usage: .\agent.ps1 [setup|configure|bootstrap|repair|tui|web|web-bridge|local|worker|connect|bridge --adapter ID|doctor [--live] [--json]|dsh-doctor|sessions|register|once|observe ID|attach ID|steer|follow-up|cancel|control|dsh-worker|dsh-once|dsh-dispatch]"
+        throw "Usage: .\agent.ps1 [setup|configure|bootstrap|repair|update|tui|web|web-bridge|local|worker|connect|bridge --adapter ID|doctor [--live] [--json]|dsh-doctor|sessions|register|once|observe ID|attach ID|steer|follow-up|cancel|control|dsh-worker|dsh-once|dsh-dispatch]"
     }
 }
 exit $LASTEXITCODE

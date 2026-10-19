@@ -685,19 +685,19 @@ test("agent-specific environment takes precedence over the legacy project env", 
   assert.equal(discoverProjectEnv(host), join(repository, ".env"));
 });
 
-test("central AgentSociety configuration path follows the platform config home", () => {
-  const configHome = temporaryDirectory();
-  const previous = process.env.XDG_CONFIG_HOME;
-  process.env.XDG_CONFIG_HOME = configHome;
+test("central AgentSociety configuration path follows DSH_HOME", () => {
+  const dshHome = temporaryDirectory();
+  const previous = process.env.DSH_HOME;
+  process.env.DSH_HOME = dshHome;
   try {
     assert.equal(
       defaultAgentConfigPath(),
-      join(configHome, "agentsociety", "agent.env"),
+      join(dshHome, ".env"),
     );
     assert.equal(agentEnvPath(temporaryDirectory()), defaultAgentConfigPath());
   } finally {
-    if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
-    else process.env.XDG_CONFIG_HOME = previous;
+    if (previous === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = previous;
   }
 });
 
@@ -993,6 +993,11 @@ test("static doctor does not execute a model request", () => {
         AGENT_ENV_FILE: configPath,
         AGENT_SESSION_DIR: join(workspace, "sessions"),
         DSH_HOME: join(workspace, "dsh"),
+        AGENT_HUB_URL: "https://hub.test.invalid",
+        AGENT_HUB_USERNAME: "doctor-user",
+        AGENT_HUB_PASSWORD: "doctor-password",
+        AGENT_HUB_NODE_TOKEN: "",
+        AGENT_HUB_TOKEN: "",
       },
       encoding: "utf8",
     },

@@ -12,6 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
@@ -64,6 +65,14 @@ async function main(): Promise<void> {
     "..",
     "..",
   );
+  if (["setup", "configure", "bootstrap", "repair"].includes(command)) {
+    runManagementScript(agentHostDir, process.argv.slice(3));
+    return;
+  }
+  if (command === "update") {
+    runPublishedUpdate();
+    return;
+  }
   applyPendingUpdate(agentHostDir);
   if (command === "local") process.env.AGENT_HUB_RUNTIME_DISABLED = "1";
   if (command === "sessions") {
@@ -121,7 +130,12 @@ async function main(): Promise<void> {
     : config;
   let hub: HubClient | undefined;
   let hubResolutionError: unknown;
-  if (config.hubEnabled && !hubRuntimeDisabled) {
+  const doctorNeedsLiveHub = command === "doctor" && doctorOptions?.live === true;
+  if (
+    config.hubEnabled &&
+    !hubRuntimeDisabled &&
+    (command !== "doctor" || doctorNeedsLiveHub)
+  ) {
     try {
       hub = await resolveHubClient(
         workerConfig,
@@ -319,8 +333,8 @@ async function main(): Promise<void> {
       if (started) return;
       console.warn(
         "DeepSeek Harness TUI is unavailable; falling back to the Pi TUI. " +
-          "Run scripts/install-dsh-plugin.sh and keep the dsh-TUI checkout at " +
-          resolve(repositoryRoot, "..", "dsh-TUI") + ".",
+          "Use `dsh web`, or explicitly enable source TUI mode with " +
+          "AGENT_RUNTIME_MODE=source and a dsh-TUI checkout.",
       );
     }
     await runInteractive(config, hub);
@@ -442,9 +456,14 @@ async function runDshTui(
   }
   if (runtime === "pi") return false;
   const forced = runtime === "dsh";
-  // Prefer the combo-managed install when present (sources/dsh-tui sits next
-  // to sources/deepseek-harness, so the sibling DSH_CHECKOUT inference below
-  // resolves correctly); fall back to the standalone sibling checkout.
+  const explicitTuiRoot = process.env.AGENT_DSH_TUI_ROOT?.trim();
+  const explicitDshCheckout = process.env.DSH_CHECKOUT?.trim();
+  const sourceMode =
+    process.env.AGENT_RUNTIME_MODE?.trim() === "source" ||
+    Boolean(explicitTuiRoot || explicitDshCheckout);
+  // Published agent-host must not discover or consume an unrelated combo/TUI
+  // checkout. The source wrapper opts in with AGENT_RUNTIME_MODE;
+  // AGENT_DSH_TUI_ROOT/DSH_CHECKOUT are explicit source-mode overrides.
   const managedTui = resolve(
     homedir(),
     ".local",
@@ -454,14 +473,16 @@ async function runDshTui(
     "dsh-tui",
   );
   const tuiRoot =
-    process.env.AGENT_DSH_TUI_ROOT?.trim() ||
-    (existsSync(resolve(managedTui, "scripts", "run.ts"))
+    explicitTuiRoot ||
+    (sourceMode && existsSync(resolve(managedTui, "scripts", "run.ts"))
       ? managedTui
-      : resolve(repositoryRoot, "..", "dsh-TUI"));
-  const runScript = resolve(tuiRoot, "scripts", "run.ts");
+      : sourceMode
+        ? resolve(repositoryRoot, "..", "dsh-TUI")
+        : "");
+  const runScript = tuiRoot ? resolve(tuiRoot, "scripts", "run.ts") : "";
   const checkout =
-    process.env.DSH_CHECKOUT?.trim() ||
-    resolve(tuiRoot, "..", "deepseek-harness");
+    explicitDshCheckout ||
+    (sourceMode && tuiRoot ? resolve(tuiRoot, "..", "deepseek-harness") : "");
   const dshHome =
     process.env.DSH_HOME?.trim() || resolve(homedir(), ".dsh");
   const pluginPatch = resolve(
@@ -471,6 +492,9 @@ async function runDshTui(
     "cordis.patch.yml",
   );
   const missing: string[] = [];
+  if (!sourceMode) {
+    missing.push("source TUI mode is not enabled");
+  }
   if (!existsSync(runScript)) {
     missing.push(`dsh-TUI source launcher (${runScript})`);
   }
@@ -608,7 +632,7 @@ async function advertiseDshWeb(
     await hub.updateNodeWeb(config.nodeId, {
       enabled: true,
       protocol_version: "1",
-      profile: config.dshWebProfile ?? "agent-society-web",
+      profile: config.dshWebProfile ?? "web",
       capabilities: ["session.read"],
     });
     console.log(
@@ -763,7 +787,11 @@ function startDshWebChild(
 ) {
   const dshHome =
     process.env.DSH_HOME?.trim() || resolve(homedir(), ".dsh");
-  const profile = "agent-society-web";
+  const profile =
+    process.env.AGENT_DSH_WEB_PROFILE?.trim() ||
+    (existsSync(resolve(dshHome, "profiles", "agent-society-web", "package.json"))
+      ? "agent-society-web"
+      : "web");
   const profilePackage = resolve(dshHome, "profiles", profile, "package.json");
   const profileReady = profileIncludesCorePlugin(profilePackage);
   const legacyPatch = resolve(
@@ -773,9 +801,17 @@ function startDshWebChild(
     "dsh",
     "agent-society.dsh.yml",
   );
+  if (!profileReady && !existsSync(legacyPatch)) {
+    throw new Error(
+      `dsh Web profile "${profile}" is not installed. Run ` +
+        `dsh plugin --profile ${profile} add @agent-society/dsh-agent-society`,
+    );
+  }
   const port = new URL(target).port || "3080";
   const command = profileReady
-    ? [...dshCommandForSpawn(config), "--profile", profile, "--port", port]
+    ? profile === "web"
+      ? [...dshCommandForSpawn(config), "web", "--port", port]
+      : [...dshCommandForSpawn(config), "--profile", profile, "--port", port]
     : [
         ...dshCommandForSpawn(config),
         "web",
@@ -816,7 +852,7 @@ async function runDshWeb(
       await hub.updateNodeWeb(config.nodeId, {
         enabled: true,
         protocol_version: "1",
-        profile: config.dshWebProfile ?? "agent-society-web",
+        profile: config.dshWebProfile ?? "web",
         capabilities: ["session.read"],
       });
       console.log(
@@ -830,7 +866,11 @@ async function runDshWeb(
   }
   const dshHome =
     process.env.DSH_HOME?.trim() || resolve(homedir(), ".dsh");
-  const profile = "agent-society-web";
+  const profile =
+    process.env.AGENT_DSH_WEB_PROFILE?.trim() ||
+    (existsSync(resolve(dshHome, "profiles", "agent-society-web", "package.json"))
+      ? "agent-society-web"
+      : "web");
   const profilePackage = resolve(
     dshHome,
     "profiles",
@@ -845,9 +885,17 @@ async function runDshWeb(
     "dsh",
     "agent-society.dsh.yml",
   );
+  if (!profileReady && !existsSync(legacyPatch)) {
+    throw new Error(
+      `dsh Web profile "${profile}" is not installed. Run ` +
+        `dsh plugin --profile ${profile} add @agent-society/dsh-agent-society`,
+    );
+  }
   const webArgs = process.argv.slice(3);
   const command = profileReady
-    ? [...dshCommandForSpawn(config), "--profile", profile, ...webArgs]
+    ? profile === "web"
+      ? [...dshCommandForSpawn(config), "web", ...webArgs]
+      : [...dshCommandForSpawn(config), "--profile", profile, ...webArgs]
     : [...dshCommandForSpawn(config), "web", "--patch", legacyPatch, ...webArgs];
   if (!profileReady) {
     console.warn(
@@ -1013,6 +1061,136 @@ function hostCapabilities(
   ];
 }
 
+function runManagementScript(agentHostDir: string, args: string[]): void {
+  const script = resolve(agentHostDir, "scripts", "setup.mjs");
+  if (!existsSync(script)) {
+    throw new Error("AgentSociety setup script is not present in this package");
+  }
+  const result = spawnSync(process.execPath, [script, ...args], {
+    cwd: agentHostDir,
+    env: process.env,
+    stdio: "inherit",
+    windowsHide: true,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) process.exitCode = result.status ?? 1;
+}
+
+function runPublishedUpdate(): void {
+  const packageManager = process.env.AGENT_PACKAGE_MANAGER?.trim() || "npm";
+  if (!["npm", "pnpm"].includes(packageManager)) {
+    throw new Error("AGENT_PACKAGE_MANAGER must be npm or pnpm");
+  }
+  const dshPackage =
+    process.env.AGENT_DSH_PACKAGE?.trim() || "@deepseek-ai/dsh";
+  const dshSpec =
+    process.env.AGENT_DSH_PACKAGE_SPEC?.trim() ||
+    dshPackage + "@" + (process.env.AGENT_DSH_VERSION?.trim() || "0.1.2-alpha.2");
+  const hostSpec =
+    process.env.AGENT_HOST_PACKAGE?.trim() || "@agent-society/agent-host";
+  const installArgs =
+    packageManager === "pnpm"
+      ? ["add", "--global", dshSpec, hostSpec]
+      : ["install", "--global", dshSpec, hostSpec];
+  runPackageCommand(packageManager, installArgs);
+
+  const dsh = resolveManagementDsh();
+  const plugin =
+    process.env.AGENT_DSH_PLUGIN_PACKAGE?.trim() ||
+    "@agent-society/dsh-agent-society";
+  for (const profile of ["web", "headless", "agent-society-worker"]) {
+    const updated = spawnSync(
+      dsh[0]!,
+      [...dsh.slice(1), "plugin", "--profile", profile, "update", plugin],
+      { cwd: process.cwd(), env: process.env, stdio: "inherit", windowsHide: true },
+    );
+    if (updated.status !== 0) {
+      console.warn(
+        "dsh profile " +
+          profile +
+          " has no existing plugin entry; trying add instead",
+      );
+      runManagementDsh(["plugin", "--profile", profile, "add", plugin]);
+    }
+  }
+  console.log("dsh, agent-host, and installed AgentSociety profiles are up to date.");
+}
+
+function runPackageCommand(command: string, args: string[]): void {
+  const result = spawnSync(command, args, {
+    cwd: process.cwd(),
+    env: process.env,
+    stdio: "inherit",
+    windowsHide: true,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(command + " exited with status " + (result.status ?? "unknown"));
+  }
+}
+
+function runManagementDsh(args: string[]): void {
+  const dsh = resolveManagementDsh();
+  const result = spawnSync(dsh[0]!, [...dsh.slice(1), ...args], {
+    cwd: process.cwd(),
+    env: process.env,
+    stdio: "inherit",
+    windowsHide: true,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error("dsh exited with status " + (result.status ?? "unknown"));
+  }
+}
+
+function resolveManagementDsh(): string[] {
+  const configured = process.env.AGENT_DSH_COMMAND?.trim() || "dsh";
+  const parts = configured.startsWith("[")
+    ? parseCommandArray(configured)
+    : [configured];
+  const executable = parts[0];
+  if (!executable) throw new Error("AGENT_DSH_COMMAND is empty");
+  const found = executable.includes("/")
+    ? executable
+    : (process.env.PATH || "")
+        .split(process.platform === "win32" ? ";" : ":")
+        .map((entry) => (entry ? resolve(entry, executable) : ""))
+        .find((candidate) => candidate && existsSync(candidate)) || executable;
+  if (process.platform === "win32") return [found, ...parts.slice(1)];
+  try {
+    accessSync(found, constants.X_OK);
+    return [found, ...parts.slice(1)];
+  } catch {
+    try {
+      const target = realpathSync(found);
+      if (target.endsWith(".js")) {
+        console.warn(
+          "dsh launcher " + found + " is not executable; using Node fallback",
+        );
+        return [process.execPath, target, ...parts.slice(1)];
+      }
+    } catch {
+      // Keep the original command so the operating system reports the cause.
+    }
+    return [found, ...parts.slice(1)];
+  }
+}
+
+function parseCommandArray(value: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (
+      Array.isArray(parsed) &&
+      parsed.every((item): item is string => typeof item === "string")
+    ) {
+      return parsed;
+    }
+  } catch {
+    // Fall through to the simple command form.
+  }
+  return [value];
+}
+
 function dshCommandForSpawn(config: AgentHostConfig): string[] {
   const command = [...(config.dshCommand ?? ["dsh"])]
   const executable = command[0]
@@ -1091,7 +1269,7 @@ async function resolveNodeCredential(
                   enabled: true,
                   protocol_version: "1",
                   profile:
-                    config.dshWebProfile ?? "agent-society-web",
+                    config.dshWebProfile ?? "web",
                   capabilities: ["session.read"],
                 },
               }

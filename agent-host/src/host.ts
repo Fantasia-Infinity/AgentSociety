@@ -11,7 +11,7 @@ export function nodeWebMetadata(
   return {
     enabled: true,
     protocol_version: "1",
-    profile: config.dshWebProfile ?? "agent-society-web",
+    profile: config.dshWebProfile ?? "web",
     capabilities: ["session.read"],
   };
 }

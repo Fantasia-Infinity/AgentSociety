@@ -1,17 +1,23 @@
 # AgentSociety dsh bundle.
 #
-# Worker row: enabled with AGENT_SOCIETY_WORKER=1. TUI/web profiles without
-# that flag load only the Hub MCP tools below.
+# Worker row: enabled only when the dsh launcher selects the dedicated
+# agent-society-worker profile. The profile fact is launch-scoped; it never
+# requires AGENT_SOCIETY_WORKER=1 in the global $DSH_HOME/.env.
 - insert:
+    # Load the shared $DSH_HOME/.env and resolve credentials before all
+    # AgentSociety rows inspect process.env.
+    - id: agent-society-config
+      name: '@agent-society/dsh-agent-society/config'
+
     - id: agent-society-worker
       name: '@agent-society/dsh-agent-society/worker'
-      disabled: !!js process.env.AGENT_SOCIETY_WORKER !== '1'
+      disabled: !!js process.env.DSH_PROFILE !== 'agent-society-worker'
       config:
         hubUrl: !!js process.env.AGENT_SOCIETY_HUB_URL
         hubTokenEnv: 'AGENT_SOCIETY_HUB_TOKEN'
         pollSeconds: !!js Number(process.env.AGENT_SOCIETY_POLL_SECONDS ?? 20)
         leaseSeconds: !!js Number(process.env.AGENT_SOCIETY_LEASE_SECONDS ?? 300)
-        workspaceRoot: !!js process.env.AGENT_SOCIETY_WORKSPACE_ROOT ?? process.cwd()
+        workspaceRoot: !!js process.env.AGENT_SOCIETY_WORKSPACE_ROOT ?? process.env.AGENT_WORKSPACE_ROOT ?? process.env.HOME ?? process.cwd()
         sessionMode: !!js process.env.AGENT_SOCIETY_SESSION_MODE ?? 'continuous'
         toolPolicy: !!js process.env.AGENT_SOCIETY_TOOL_POLICY ?? 'full'
         selfUpdateEnabled: !!js process.env.AGENT_SELF_UPDATE !== '0'
@@ -21,7 +27,7 @@
         principalId: !!js process.env.AGENT_SOCIETY_PRINCIPAL_ID
         displayName: !!js process.env.AGENT_SOCIETY_DISPLAY_NAME
         provider: !!js process.env.AGENT_SOCIETY_PROVIDER ?? 'deepseek-official'
-        model: !!js process.env.DSH_MODEL ?? process.env.AGENT_SOCIETY_MODEL ?? 'deepseek-v4-flash'
+        model: !!js process.env.AGENT_SOCIETY_MODEL ?? process.env.DSH_MODEL ?? process.env.AGENT_REMOTE_MODEL ?? 'deepseek-v4-flash'
         maxTokens: !!js Number(process.env.AGENT_SOCIETY_MAX_TOKENS ?? 8192)
         # Consensus digests into the Hub shared memory (default off).
         # Consensus digests into the Hub shared memory (AGENT_SOCIETY_CONTEXT=0 disables).

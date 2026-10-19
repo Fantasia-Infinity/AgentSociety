@@ -8,6 +8,8 @@
  */
 
 import { sanitizedChildEnv } from "./child-env.js";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import type { AgentHostConfig } from "./config.js";
 import type { HubClient } from "./hub-client.js";
 
@@ -79,6 +81,9 @@ export function buildDshWorkerEnv(
   repositoryRoot: string,
 ): NodeJS.ProcessEnv {
   const model = config.dshModel ?? config.remoteModel ?? "deepseek-v4-flash";
+  const sourceCheckout =
+    existsSync(join(repositoryRoot, ".git")) &&
+    existsSync(join(repositoryRoot, "agent-host", "package.json"));
   return {
     ...buildDshCommonEnv(config, hub, {
       worker: true,
@@ -89,6 +94,7 @@ export function buildDshWorkerEnv(
     AGENT_SOCIETY_SESSION_MODE: config.workerSessionMode,
     AGENT_SOCIETY_TOOL_POLICY: config.remoteToolPolicy,
     AGENT_SOCIETY_REPOSITORY_ROOT: repositoryRoot,
+    ...(sourceCheckout ? { AGENT_RUNTIME_MODE: "source" } : {}),
     AGENT_SELF_UPDATE: config.selfUpdateEnabled === false ? "0" : "1",
     AGENT_SOCIETY_POLL_SECONDS: String(config.pollSeconds),
     AGENT_SOCIETY_LEASE_SECONDS: String(config.leaseSeconds),

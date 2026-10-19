@@ -11,9 +11,12 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
+  accessSync,
+  constants,
   existsSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   statSync,
 } from 'node:fs'
 import { dirname, resolve } from 'node:path'
@@ -60,8 +63,17 @@ export async function runPluginSelfUpdate(
   const repositoryRoot = options.repositoryRoot
   const pluginDir = resolve(repositoryRoot, 'dsh-plugin')
   const agentHostDir = resolve(repositoryRoot, 'agent-host')
-  if (!existsSync(resolve(repositoryRoot, '.git')) && !existsSync(resolve(repositoryRoot, 'agent-host', 'package.json'))) {
-    throw new Error(`Self-update repository root not found: ${repositoryRoot}`)
+  const sourceCheckout =
+    existsSync(resolve(repositoryRoot, '.git')) &&
+    existsSync(resolve(repositoryRoot, 'agent-host', 'package.json'))
+  const sourceMode = process.env.AGENT_RUNTIME_MODE?.trim() === 'source'
+  if (!sourceMode) {
+    return runPublishedSelfUpdate(options.nodePath, record)
+  }
+  if (!sourceCheckout) {
+    throw new Error(
+      `Source self-update requested, but no AgentSociety checkout was found at ${repositoryRoot}`,
+    )
   }
   const branch = selfUpdateBranch(task)
   const npm = resolveNpm(options.nodePath)
@@ -128,6 +140,137 @@ export async function runPluginSelfUpdate(
     before,
     after,
   }
+}
+
+async function runPublishedSelfUpdate(
+  nodePath: string,
+  record: (label: string, output: string) => void,
+): Promise<PluginSelfUpdateReport> {
+  const npm = resolveNpm(nodePath)
+  const dshPackage =
+    process.env.AGENT_DSH_PACKAGE?.trim() || "@deepseek-ai/dsh"
+  const dshSpec =
+    process.env.AGENT_DSH_PACKAGE_SPEC?.trim() ||
+    dshPackage + "@" + (process.env.AGENT_DSH_VERSION?.trim() || "0.1.2-alpha.2")
+  const hostSpec =
+    process.env.AGENT_HOST_PACKAGE_SPEC?.trim() ||
+    process.env.AGENT_HOST_PACKAGE?.trim() ||
+    "@agent-society/agent-host@latest"
+  const pluginSpec =
+    process.env.AGENT_DSH_PLUGIN_PACKAGE_SPEC?.trim() ||
+    '@agent-society/dsh-agent-society@latest'
+  const updateHost = shouldUpdateHost()
+  const packages = [dshSpec, pluginSpec]
+  if (updateHost) packages.push(hostSpec)
+  await runNpm(
+    npm,
+    process.cwd(),
+    ['install', '--global', ...packages],
+    'npm update',
+    record,
+  )
+  const dsh = resolveDshInvocation(nodePath)
+  const profileSteps: string[] = []
+  for (const profile of ['web', 'headless', 'agent-society-worker']) {
+    try {
+      await run(
+        process.cwd(),
+        dsh.command,
+        [...dsh.args, 'plugin', '--profile', profile, 'update', pluginSpec],
+        `Update dsh ${profile} profile`,
+        record,
+      )
+      profileSteps.push(`${profile}: updated`)
+    } catch (error) {
+      // `update` intentionally fails when an older installation has not yet
+      // created the profile entry. In that case add the same published plugin
+      // so a remote self-update repairs old Combo installs as well.
+      record(
+        `Update dsh ${profile} profile`,
+        error instanceof Error ? error.message : String(error),
+      )
+      await run(
+        process.cwd(),
+        dsh.command,
+        [...dsh.args, 'plugin', '--profile', profile, 'add', pluginSpec],
+        `Add dsh ${profile} profile`,
+        record,
+      )
+      profileSteps.push(`${profile}: added`)
+    }
+  }
+  return {
+    ok: true,
+    updated: true,
+    needsRestart: true,
+    steps: [
+      'Published dsh/AgentSociety packages updated',
+      ...(updateHost ? ['Published agent-host package updated'] : []),
+      ...profileSteps,
+    ],
+  }
+}
+
+function shouldUpdateHost(): boolean {
+  if (process.env.AGENT_UPDATE_HOST?.trim() === '0') return false
+  if (process.env.AGENT_UPDATE_HOST?.trim() === '1') return true
+  const command = process.platform === 'win32' ? 'where.exe' : 'which'
+  const probe = spawnSync(command, ['agent'], { encoding: 'utf8' })
+  return probe.status === 0 && Boolean(probe.stdout?.trim())
+}
+
+interface DshInvocation {
+  command: string
+  args: string[]
+}
+
+function resolveDshInvocation(nodePath: string): DshInvocation {
+  const configured = process.env.AGENT_DSH_COMMAND?.trim() || 'dsh'
+  const parts = configured.startsWith('[')
+    ? parseCommandArray(configured)
+    : [configured]
+  const first = parts[0]
+  if (!first) throw new Error('AGENT_DSH_COMMAND is empty')
+  const found = first.includes('/') || first.includes('\\')
+    ? first
+    : process.platform === 'win32'
+      ? first
+      : (spawnSync('which', [first], { encoding: 'utf8' }).stdout || '').trim() || first
+  if (process.platform === 'win32') {
+    return { command: found, args: parts.slice(1) }
+  }
+  try {
+    accessSync(found, constants.X_OK)
+    return { command: found, args: parts.slice(1) }
+  } catch {
+    try {
+      const target = realpathSync(found)
+      if (target.endsWith('.js')) {
+        return {
+          command: nodePath,
+          args: [target, ...parts.slice(1)],
+        }
+      }
+    } catch {
+      // Preserve the original command so the child error remains actionable.
+    }
+    return { command: found, args: parts.slice(1) }
+  }
+}
+
+function parseCommandArray(value: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(value)
+    if (
+      Array.isArray(parsed) &&
+      parsed.every((item): item is string => typeof item === 'string')
+    ) {
+      return parsed
+    }
+  } catch {
+    // Fall back to the single-command form below.
+  }
+  return [value]
 }
 
 function selfUpdateBranch(task: HubTask): string {

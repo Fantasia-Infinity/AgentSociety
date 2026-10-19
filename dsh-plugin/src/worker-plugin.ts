@@ -203,7 +203,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const repositoryRoot = resolve(
     config.repositoryRoot ??
       process.env.AGENT_SOCIETY_REPOSITORY_ROOT ??
-      resolve(dirname(fileURLToPath(import.meta.url)), '..', '..'),
+      process.cwd(),
   )
   const identity = {
     principalId: config.principalId ?? `human-${owner}`,
@@ -345,7 +345,7 @@ class WorkerLoop {
                 enabled: true,
                 protocol_version: '1',
                 profile:
-                  process.env.AGENT_SOCIETY_WEB_PROFILE ?? 'agent-society-web',
+                  process.env.AGENT_SOCIETY_WEB_PROFILE ?? 'web',
                 capabilities: ['session.read'],
               },
             }

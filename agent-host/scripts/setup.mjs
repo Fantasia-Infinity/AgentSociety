@@ -20,6 +20,9 @@ import { Writable } from "node:stream";
 const agentHostDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(agentHostDir, "..");
 const args = parseArguments(process.argv.slice(2));
+const dshHome = resolve(
+  process.env.DSH_HOME?.trim() || join(homedir(), ".dsh"),
+);
 const configPath = resolve(
   args.config ||
     process.env.AGENT_SETUP_CONFIG_PATH ||
@@ -27,8 +30,11 @@ const configPath = resolve(
     defaultAgentConfigPath(),
 );
 const legacyConfigPaths = [
+  oldCentralConfigPath(),
   resolve(repositoryRoot, ".private", "env", "agent.env"),
   resolve(repositoryRoot, ".env.agent"),
+  resolve(process.cwd(), ".private", "env", "agent.env"),
+  resolve(process.cwd(), ".env.agent"),
 ];
 const completionMarker = resolve(agentHostDir, ".setup-complete");
 
@@ -176,6 +182,10 @@ Options:
 }
 
 function defaultAgentConfigPath() {
+  return join(dshHome, ".env");
+}
+
+function oldCentralConfigPath() {
   const configHome =
     process.platform === "win32"
       ? process.env.APPDATA?.trim() || join(homedir(), "AppData", "Roaming")
@@ -230,12 +240,26 @@ async function collectValues(existingValues, credentials, workspaceRoot) {
       process.env.LLM_BASE_URL?.trim() ||
       existingValues.AGENT_REMOTE_BASE_URL ||
       existingValues.LLM_BASE_URL ||
+      (existingValues.AGENT_DSH_PROVIDER ||
+      existingValues.AGENT_SOCIETY_PROVIDER ||
+      existingValues.AGENT_DSH_MODEL ||
+      existingValues.AGENT_SOCIETY_MODEL ||
+      process.env.AGENT_DSH_PROVIDER?.trim() ||
+      process.env.AGENT_DSH_MODEL?.trim() ||
+      process.env.DSH_PROVIDER?.trim() ||
+      process.env.DSH_MODEL?.trim()
+        ? "https://api.deepseek.com"
+        : "") ||
       "";
     const existingRemoteModel =
       process.env.AGENT_REMOTE_MODEL?.trim() ||
       process.env.LLM_MODEL?.trim() ||
       existingValues.AGENT_REMOTE_MODEL ||
       existingValues.LLM_MODEL ||
+      process.env.AGENT_DSH_MODEL?.trim() ||
+      process.env.DSH_MODEL?.trim() ||
+      existingValues.AGENT_DSH_MODEL ||
+      existingValues.AGENT_SOCIETY_MODEL ||
       "";
     const existingPiProvider =
       process.env.PI_PROVIDER?.trim() || existingValues.PI_PROVIDER || "";
@@ -265,6 +289,8 @@ async function collectValues(existingValues, credentials, workspaceRoot) {
         );
         values.AGENT_REMOTE_BASE_URL = model.baseUrl;
         values.AGENT_REMOTE_MODEL = model.model;
+        values.AGENT_DSH_PROVIDER = model.dshProvider;
+        values.AGENT_DSH_MODEL = model.model;
         values.PI_PROVIDER = null;
         values.PI_MODEL = null;
 
@@ -550,7 +576,11 @@ async function collectModelValues(
         "No complete existing model configuration was found; choose custom or deepseek.",
       );
     }
-    return { baseUrl: existingBase, model: existingModel };
+    return {
+      baseUrl: existingBase,
+      model: existingModel,
+      dshProvider: "deepseek-official",
+    };
   }
   const defaultBase =
     provider === "deepseek" ? "https://api.deepseek.com" : existingBase;
@@ -571,7 +601,11 @@ async function collectModelValues(
   rejectUnsupportedEnvCharacters("Model URL", baseUrl);
   rejectUnsupportedEnvCharacters("Model ID", model);
   validateUrl(baseUrl, "Model URL");
-  return { baseUrl, model };
+  return {
+    baseUrl,
+    model,
+    dshProvider: "deepseek-official",
+  };
 }
 
 async function selectPermission(existingValues, terminal, interactive) {
@@ -999,8 +1033,26 @@ function parseEnv(text) {
 }
 
 function writeConfig(original, values, path) {
-  const lines = original.split(/\r?\n/u);
-  const remaining = new Map(Object.entries(values));
+  const updates = new Map();
+  for (const [key, value] of Object.entries(values)) {
+    if (value === null && isSecretConfigKey(key)) continue;
+    // Do not fill a fresh local config with dozens of empty Hub tombstones.
+    // A tombstone is needed only when the key exists in the file being
+    // rewritten or in a lower-precedence legacy file that the canonical file
+    // must mask.
+    if (value === null && !hasConfigKey(original, key) && !legacyHasConfigKey(key, path)) {
+      continue;
+    }
+    updates.set(key, value);
+  }
+  const lines = original
+    .split(/\r?\n/u)
+    .filter((line) => {
+      const match = line.match(/^\s*([A-Z][A-Z0-9_]*)\s*=/u);
+      if (!match) return true;
+      return !isSecretConfigKey(match[1]);
+    });
+  const remaining = updates;
   const next = lines
     .map((line) => {
       const match = line.match(/^\s*([A-Z][A-Z0-9_]*)\s*=/u);
@@ -1008,13 +1060,16 @@ function writeConfig(original, values, path) {
       const key = match[1];
       const value = remaining.get(key);
       remaining.delete(key);
-      return value === null ? null : `${key}=${dotenvValue(value)}`;
+      // Empty values are intentional tombstones: a new canonical
+      // $DSH_HOME/.env must be able to mask a removed Hub/model setting that
+      // still exists in a readable legacy file below it.
+      return value === null ? `${key}=""` : `${key}=${dotenvValue(value)}`;
     })
     .filter((line) => line !== null);
   if (remaining.size) {
     if (next.at(-1)?.trim()) next.push("");
     for (const [key, value] of remaining) {
-      if (value !== null) next.push(`${key}=${dotenvValue(value)}`);
+      next.push(`${key}=${value === null ? '""' : dotenvValue(value)}`);
     }
   }
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -1027,6 +1082,41 @@ function writeConfig(original, values, path) {
   chmodSync(temporary, 0o600);
   renameSync(temporary, path);
   chmodSync(path, 0o600);
+}
+
+function hasConfigKey(text, key) {
+  return text.split(/\r?\n/u).some((line) =>
+    line.match(/^\s*([A-Z][A-Z0-9_]*)\s*=/u)?.[1] === key,
+  );
+}
+
+function legacyHasConfigKey(key, targetPath) {
+  // An explicitly selected config is an isolated user override. Do not let a
+  // checkout-local legacy file add empty Hub rows to a fresh test/CI config;
+  // callers that want migration should omit --config and let setup discover
+  // the legacy source explicitly.
+  if (args.explicitConfig) return false;
+  const target = resolve(targetPath);
+  return legacyConfigPaths.some((candidate) => {
+    if (resolve(candidate) === target || !existsSync(candidate)) return false;
+    try {
+      return hasConfigKey(readFileSync(candidate, "utf8"), key);
+    } catch {
+      return false;
+    }
+  });
+}
+
+function isSecretConfigKey(key) {
+  return (
+    key === "LLM_API_KEY" ||
+    (key.startsWith("AGENT_") &&
+      /(API_KEY|PASSWORD|TOKEN|SECRET)(?:$|_)/u.test(key) &&
+      !key.endsWith("_CREDENTIAL_SERVICE") &&
+      !key.endsWith("_CREDENTIAL_ACCOUNT") &&
+      !key.endsWith("_KEYCHAIN_SERVICE") &&
+      !key.endsWith("_KEYCHAIN_ACCOUNT"))
+  );
 }
 
 function dotenvValue(value) {
