@@ -92,7 +92,7 @@
     }
   },
   "dependencies": {
-    "@agent-society/agent-config": "^0.1.0"
+    "@agent-society/agent-config": "file:../agent-config"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.5",

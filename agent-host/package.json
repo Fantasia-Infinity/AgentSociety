@@ -51,7 +51,7 @@
     "dsh-doctor": "node dist/src/cli.js dsh-doctor"
   },
   "dependencies": {
-    "@agent-society/agent-config": "^0.1.0",
+    "@agent-society/agent-config": "file:../agent-config",
     "@earendil-works/pi-coding-agent": "0.84.0",
     "@napi-rs/keyring": "1.3.0",
     "brace-expansion": "5.0.9",
