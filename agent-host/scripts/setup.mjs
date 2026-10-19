@@ -194,6 +194,9 @@ function oldCentralConfigPath() {
 }
 
 function bootstrapRuntime() {
+  if (process.env.AGENT_RUNTIME_MODE !== "source" || !existsSync(resolve(repositoryRoot, ".git"))) {
+    throw new Error("Prebuilt installation: reinstall the AgentSociety Host package to repair it. dsh is managed separately; no source bootstrap is required.");
+  }
   run(npmCommand(), ["ci", "--ignore-scripts"]);
   run(process.execPath, ["scripts/patch-pi-brace-expansion.mjs"]);
   run(process.execPath, ["scripts/patch-pi-brace-expansion.mjs", "--check"]);

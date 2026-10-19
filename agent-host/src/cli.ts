@@ -8,6 +8,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   writeFileSync,
 } from "node:fs";
@@ -1081,39 +1082,33 @@ function runPublishedUpdate(): void {
   if (!["npm", "pnpm"].includes(packageManager)) {
     throw new Error("AGENT_PACKAGE_MANAGER must be npm or pnpm");
   }
-  const dshPackage =
-    process.env.AGENT_DSH_PACKAGE?.trim() || "@deepseek-ai/dsh";
-  const dshSpec =
-    process.env.AGENT_DSH_PACKAGE_SPEC?.trim() ||
-    dshPackage + "@" + (process.env.AGENT_DSH_VERSION?.trim() || "0.1.2-alpha.2");
   const hostSpec =
     process.env.AGENT_HOST_PACKAGE?.trim() || "@agent-society/agent-host";
   const installArgs =
     packageManager === "pnpm"
-      ? ["add", "--global", dshSpec, hostSpec]
-      : ["install", "--global", dshSpec, hostSpec];
+      ? ["add", "--global", hostSpec]
+      : ["install", "--global", hostSpec];
   runPackageCommand(packageManager, installArgs);
 
   const dsh = resolveManagementDsh();
   const plugin =
     process.env.AGENT_DSH_PLUGIN_PACKAGE?.trim() ||
     "@agent-society/dsh-agent-society";
-  for (const profile of ["web", "headless", "agent-society-worker"]) {
+  const profilesRoot = resolve(process.env.DSH_HOME || resolve(homedir(), ".dsh"), "profiles");
+  const profiles = existsSync(profilesRoot) ? readdirSync(profilesRoot).filter(profile => {
+    const file = resolve(profilesRoot, profile, "package.json");
+    return existsSync(file) && Object.hasOwn(JSON.parse(readFileSync(file, "utf8")).dependencies || {}, "@agent-society/dsh-agent-society");
+  }) : [];
+  for (const profile of profiles) {
     const updated = spawnSync(
       dsh[0]!,
       [...dsh.slice(1), "plugin", "--profile", profile, "update", plugin],
       { cwd: process.cwd(), env: process.env, stdio: "inherit", windowsHide: true },
     );
-    if (updated.status !== 0) {
-      console.warn(
-        "dsh profile " +
-          profile +
-          " has no existing plugin entry; trying add instead",
-      );
-      runManagementDsh(["plugin", "--profile", profile, "add", plugin]);
-    }
+    if (updated.error) throw updated.error;
+    if (updated.status !== 0) throw new Error("AgentSociety update failed for profile " + profile);
   }
-  console.log("dsh, agent-host, and installed AgentSociety profiles are up to date.");
+  console.log("AgentSociety Host and profiles updated. Upgrade dsh separately.");
 }
 
 function runPackageCommand(command: string, args: string[]): void {

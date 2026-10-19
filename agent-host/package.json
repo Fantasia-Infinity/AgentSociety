@@ -1,6 +1,6 @@
 {
   "name": "@agent-society/agent-host",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "type": "module",
   "description": "Optional thin AgentSociety management host for dsh",
   "license": "MIT",

@@ -1,6 +1,6 @@
 {
   "name": "@agent-society/dsh-agent-society",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "AgentSociety Hub worker and dispatch tools as a DeepSeek Harness bundle",
   "license": "MIT",
   "publishConfig": {

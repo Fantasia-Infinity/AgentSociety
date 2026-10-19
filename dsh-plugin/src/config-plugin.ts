@@ -7,7 +7,6 @@ import {
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { recordAgentSocietyMetrics } from "./context-metrics.js";
-import { deepSeekMessagesEndpoint } from "./deepseek-endpoint.js";
 
 export const name = "agent-society-config";
 export const inject: string[] = [];
@@ -75,16 +74,8 @@ export function apply(ctx: Context): void {
       );
     }
   }
-  // The native dsh DeepSeek adapter owns these names. The shared AgentSociety
-  // credential/config namespace is resolved first so direct `dsh web` and
-  // Host-launched dsh children receive the same model configuration without
-  // persisting a secret in `$DSH_HOME/.env`.
-  if (!process.env.DEEPSEEK_API_KEY && process.env.AGENT_REMOTE_API_KEY) {
-    process.env.DEEPSEEK_API_KEY = process.env.AGENT_REMOTE_API_KEY;
-  }
-  if (!process.env.DEEPSEEK_BASE_URL && process.env.AGENT_REMOTE_BASE_URL) {
-    process.env.DEEPSEEK_BASE_URL = deepSeekMessagesEndpoint(process.env.AGENT_REMOTE_BASE_URL);
-  }
+  // Host model settings and credentials remain owned by dsh. AgentSociety
+  // credentials configure only this plugin's Hub and delegated operations.
   copy("AGENT_HUB_URL", "AGENT_SOCIETY_HUB_URL");
   copy("AGENT_WORKSPACE_ROOT", "AGENT_SOCIETY_WORKSPACE_ROOT");
   copy("AGENT_ACTOR_ID", "AGENT_SOCIETY_ACTOR_ID");

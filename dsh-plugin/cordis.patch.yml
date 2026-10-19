@@ -1,8 +1,6 @@
 # AgentSociety dsh bundle.
 #
-# Worker row: enabled only when the dsh launcher selects the dedicated
-# agent-society-worker profile. The profile fact is launch-scoped; it never
-# requires AGENT_SOCIETY_WORKER=1 in the global $DSH_HOME/.env.
+# Worker activation uses the official launcher's profileContext service.
 - insert:
     # Load the shared $DSH_HOME/.env and resolve credentials before all
     # AgentSociety rows inspect process.env.
@@ -11,7 +9,7 @@
 
     - id: agent-society-worker
       name: '@agent-society/dsh-agent-society/worker'
-      disabled: !!js process.env.DSH_PROFILE !== 'agent-society-worker'
+      disabled: !!js "ctx.get('profileContext')?.name !== 'agent-society-worker'"
       config:
         hubUrl: !!js process.env.AGENT_SOCIETY_HUB_URL
         hubTokenEnv: 'AGENT_SOCIETY_HUB_TOKEN'
@@ -54,12 +52,6 @@
         failOnStartupError: false
         reconnect:
           enabled: true
-
-    # Keep web_search visible even when a preset filters the assembled
-    # catalog. With AGENT_SOCIETY_WEB_SEARCH=0 the same guard removes it
-    # from every assembled catalog.
-    - id: agent-society-web-tool-guard
-      name: '@agent-society/dsh-agent-society/web-tool-guard'
 
     # Interactive-session consensus digests: detect the end of a manual
     # TUI/Web interaction round and append an LLM-summarized digest.
@@ -135,24 +127,3 @@
         nodeId: !!js process.env.AGENT_SOCIETY_NODE_ID
         workspaceRoot: !!js process.env.AGENT_SOCIETY_WORKSPACE_ROOT ?? process.cwd()
         pollSeconds: !!js Number(process.env.AGENT_SOCIETY_TASK_POLL_SECONDS ?? 10)
-
-# Host-level DeepSeek web tool. The provider services stay mounted because
-# presets may register their own tool-web row; disabling the host tool plus
-# the assembly guard is enough to keep web_search out of the model catalog.
-- id: tool-web
-  disabled: !!js process.env.AGENT_SOCIETY_WEB_SEARCH === '0'
-
-# Readable transcripts: the worker attaches these to Hub runs and `agent
-# observe` reads them locally. zstd remains available by setting
-# AGENT_SOCIETY_SESSION_COMPRESSION=zstd.
-- id: session-persistence-jsonl
-  config:
-    root: !!js dshHomePath('sessions')
-    compression: !!js process.env.AGENT_SOCIETY_SESSION_COMPRESSION || 'none'
-
-# Process-wide default matches the worker policy. Per-task `input.tool_policy`
-# overrides are appended as `sandbox/mode` events on the session itself.
-- id: sandbox-policy
-  config:
-    mode: !!js "(process.env.AGENT_SOCIETY_TOOL_POLICY === 'full' ? 'workspace-write' : 'read-only')"
-    workspaceRoot: !!js process.env.AGENT_SOCIETY_WORKSPACE_ROOT ?? process.cwd()

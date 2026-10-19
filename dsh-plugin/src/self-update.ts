@@ -20,6 +20,7 @@ import {
   statSync,
 } from 'node:fs'
 import { dirname, resolve } from 'node:path'
+import { homedir } from 'node:os'
 
 import type { HubTask } from './hub-client.js'
 
@@ -147,11 +148,6 @@ async function runPublishedSelfUpdate(
   record: (label: string, output: string) => void,
 ): Promise<PluginSelfUpdateReport> {
   const npm = resolveNpm(nodePath)
-  const dshPackage =
-    process.env.AGENT_DSH_PACKAGE?.trim() || "@deepseek-ai/dsh"
-  const dshSpec =
-    process.env.AGENT_DSH_PACKAGE_SPEC?.trim() ||
-    dshPackage + "@" + (process.env.AGENT_DSH_VERSION?.trim() || "0.1.2-alpha.2")
   const hostSpec =
     process.env.AGENT_HOST_PACKAGE_SPEC?.trim() ||
     process.env.AGENT_HOST_PACKAGE?.trim() ||
@@ -160,19 +156,17 @@ async function runPublishedSelfUpdate(
     process.env.AGENT_DSH_PLUGIN_PACKAGE_SPEC?.trim() ||
     '@agent-society/dsh-agent-society@latest'
   const updateHost = shouldUpdateHost()
-  const packages = [dshSpec, pluginSpec]
-  if (updateHost) packages.push(hostSpec)
-  await runNpm(
-    npm,
-    process.cwd(),
-    ['install', '--global', ...packages],
-    'npm update',
-    record,
-  )
+  if (updateHost) {
+    await runNpm(npm, process.cwd(), ['install', '--global', hostSpec], 'Update AgentSociety Host', record)
+  }
   const dsh = resolveDshInvocation(nodePath)
   const profileSteps: string[] = []
-  for (const profile of ['web', 'headless', 'agent-society-worker']) {
-    try {
+  const profilesRoot = resolve(process.env.DSH_HOME || resolve(homedir(), '.dsh'), 'profiles')
+  const profiles = existsSync(profilesRoot) ? readdirSync(profilesRoot).filter(profile => {
+    const file = resolve(profilesRoot, profile, 'package.json')
+    return existsSync(file) && Object.hasOwn(JSON.parse(readFileSync(file, 'utf8')).dependencies || {}, '@agent-society/dsh-agent-society')
+  }) : []
+  for (const profile of profiles) {
       await run(
         process.cwd(),
         dsh.command,
@@ -181,30 +175,13 @@ async function runPublishedSelfUpdate(
         record,
       )
       profileSteps.push(`${profile}: updated`)
-    } catch (error) {
-      // `update` intentionally fails when an older installation has not yet
-      // created the profile entry. In that case add the same published plugin
-      // so a remote self-update repairs old Combo installs as well.
-      record(
-        `Update dsh ${profile} profile`,
-        error instanceof Error ? error.message : String(error),
-      )
-      await run(
-        process.cwd(),
-        dsh.command,
-        [...dsh.args, 'plugin', '--profile', profile, 'add', pluginSpec],
-        `Add dsh ${profile} profile`,
-        record,
-      )
-      profileSteps.push(`${profile}: added`)
-    }
   }
   return {
     ok: true,
     updated: true,
     needsRestart: true,
     steps: [
-      'Published dsh/AgentSociety packages updated',
+      'AgentSociety plugins updated; dsh remains independently managed',
       ...(updateHost ? ['Published agent-host package updated'] : []),
       ...profileSteps,
     ],

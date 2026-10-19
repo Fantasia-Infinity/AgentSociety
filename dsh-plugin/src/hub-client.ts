@@ -439,7 +439,7 @@ export class HubClient {
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
       throw new HubError(
-        `Hub request ${path} failed (${response.status})${detail ? `: ${detail.slice(0, 500)}` : ""}`,
+        `Hub request ${path} failed (${response.status})${detail ? `: ${detail.slice(0, 500)}` : ""}${response.status === 401 ? "; Hub credential rejected. Run agent connect to sign in again." : ""}`,
         response.status,
       );
     }
