@@ -123,21 +123,31 @@ sh scripts/install-dsh-plugin.sh
 ./agent web           # dsh Web UI（同一 ~/.dsh session）
 ```
 
-首次运行会引导你填写模型连接信息（OpenAI-compatible URL、Model ID、API Key），
-然后自动安装依赖、构建、生成本机身份并打开 TUI。Hub 连接是可选的，之后随时
-补充：
+首次运行用 `agent setup` 完成配置，不需要先进入 AgentSociety 源码目录。向导会
+先选择使用模式：
 
 ```bash
-./agent setup         # 重新配置，可补填 Hub URL / 用户名 / 密码
-./agent connect       # 用 Hub 账号密码换本机节点凭据
-./agent web           # 浏览器 UI（--port 可改端口）
-./agent worker        # 作为常驻 worker 开始领取 Hub 任务
-./agent doctor        # 体检：Hub 连接、workspace、模型、session
+agent setup --mode local          # 本机使用
+agent setup --mode hub-worker     # 配置 Hub 并注册本机 worker
+agent setup --mode dispatch-only  # 可派发任务，但不接收远程任务
+agent configure                   # setup 的同义别名
+agent bootstrap                   # 明确修复/重建 AgentSociety runtime
+agent connect                     # 需要时重新注册节点凭据
+agent web                         # 浏览器 UI
+agent worker                      # 作为常驻 worker 领取 Hub 任务
+agent doctor                      # 静态检查；agent doctor --live 才访问网络/模型
 ```
 
-非敏感配置保存在被 Git 忽略的 `.private/env/agent.env`（权限 0600）；API Key 和
-Hub 凭据只存入系统凭据库（macOS Keychain / Windows Credential Manager / Linux
-Secret Service），配置文件里没有明文密钥。
+非敏感配置默认保存在用户级 `~/.config/agentsociety/agent.env`（Windows 为
+`%APPDATA%\\AgentSociety\\agent.env`），也可以用 `--config` 或
+`AGENT_ENV_FILE` 指定。旧的 `.private/env/agent.env` / `.env.agent` 会自动发现，
+迁移时不删除旧文件。workspace 默认是当前用户 home，不会指向受管源码 checkout。
+
+凭据优先使用 macOS Keychain、Windows Credential Manager 或 Linux Secret Service。
+无头环境没有可用凭据库时默认只读取环境变量；只有显式
+`agent setup --credentials file` 才会创建权限为 `0600` 的凭据文件，doctor 会
+持续显示风险提示。非交互模式请使用环境变量或显式凭据文件，不要把 API key 或密码
+放进命令行参数。
 
 ### 3. 派发你的第一个任务
 

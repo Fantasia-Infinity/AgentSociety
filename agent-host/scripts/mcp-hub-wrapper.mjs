@@ -19,16 +19,26 @@
 //   AGENT_HUB_MCP_KEYCHAIN_SERVICE keychain service override
 //   AGENT_HUB_MCP_KEYCHAIN_ACCOUNT keychain account override
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 function loadProjectEnv() {
   const candidates = [
+    process.env.AGENT_ENV_FILE,
+    process.env.XDG_CONFIG_HOME
+      ? join(process.env.XDG_CONFIG_HOME, "agentsociety", "agent.env")
+      : join(homedir(), ".config", "agentsociety", "agent.env"),
+    process.env.APPDATA
+      ? join(process.env.APPDATA, "AgentSociety", "agent.env")
+      : undefined,
     fileURLToPath(new URL("../../.private/env/agent.env", import.meta.url)),
     fileURLToPath(new URL("../../.env.agent", import.meta.url)),
   ];
   const values = {};
   for (const path of candidates) {
+    if (!path) continue;
     try {
       for (const raw of readFileSync(path, "utf8").split(/\r?\n/)) {
         const line = raw.trim();
@@ -54,6 +64,11 @@ function loadProjectEnv() {
 }
 
 const projectEnv = loadProjectEnv();
+const credentialBackend =
+  process.env.AGENT_CREDENTIAL_BACKEND || projectEnv.AGENT_CREDENTIAL_BACKEND || "keychain";
+const credentialEnv = projectEnv.AGENT_CREDENTIAL_FILE
+  ? loadCredentialEnv(resolve(projectEnv.AGENT_CREDENTIAL_FILE))
+  : {};
 
 const service =
   process.env.AGENT_HUB_MCP_KEYCHAIN_SERVICE ||
@@ -71,7 +86,7 @@ const hubUrl = (
 
 if (!hubUrl) {
   console.error(
-    "AGENT_HUB_MCP_URL is required (or AGENT_HUB_URL in .private/env/agent.env); " +
+    "AGENT_HUB_MCP_URL is required (or AGENT_HUB_URL in the AgentSociety config); " +
       "run `agent connect` first.",
   );
   process.exit(1);
@@ -89,20 +104,68 @@ if (url.protocol !== "https:") {
   process.exit(1);
 }
 
-let token = "";
-try {
-  const args = ["find-generic-password", "-s", service, "-w"];
-  if (account) args.push("-a", account);
-  token = execFileSync("/usr/bin/security", args, { encoding: "utf8" }).trim();
-} catch {
+const token = await readNodeCredential();
+if (!token) {
   console.error(
-    "Hub node credential not found in the keychain; run `agent connect` first.",
+    "Hub node credential not found in the configured backend; run `agent connect` first.",
   );
   process.exit(1);
 }
-if (!token) {
-  console.error("Hub node credential is empty.");
-  process.exit(1);
+
+function loadCredentialEnv(path) {
+  if (!existsSync(path)) return {};
+  if (process.platform !== "win32" && (statSync(path).mode & 0o777) !== 0o600) {
+    console.error(`Credential file must have permissions 0600: ${path}`);
+    process.exit(1);
+  }
+  return parseEnv(readFileSync(path, "utf8"));
+}
+
+async function readNodeCredential() {
+  const configured =
+    process.env.AGENT_HUB_NODE_TOKEN?.trim() ||
+    process.env.AGENT_HUB_TOKEN?.trim() ||
+    credentialEnv.AGENT_HUB_NODE_TOKEN?.trim() ||
+    credentialEnv.AGENT_HUB_TOKEN?.trim();
+  if (configured) return configured;
+  if (credentialBackend === "env" || credentialBackend === "file") return "";
+  return readSystemCredential();
+}
+
+async function readSystemCredential() {
+  try {
+    const { Entry } = await import("@napi-rs/keyring");
+    return new Entry(service, account).getPassword()?.trim() || "";
+  } catch {
+    if (process.platform !== "darwin") return "";
+    try {
+      const args = ["find-generic-password", "-s", service, "-w"];
+      if (account) args.push("-a", account);
+      return execFileSync("/usr/bin/security", args, { encoding: "utf8" }).trim();
+    } catch {
+      return "";
+    }
+  }
+}
+
+function parseEnv(text) {
+  const values = {};
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq <= 0) continue;
+    const key = line.slice(0, eq).trim();
+    let value = line.slice(eq + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    values[key] = value;
+  }
+  return values;
 }
 
 process.stdin.setEncoding("utf8");

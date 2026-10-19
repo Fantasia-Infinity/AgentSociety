@@ -131,22 +131,35 @@ sh scripts/install-dsh-plugin.sh
 ./agent web           # dsh Web UI (same ~/.dsh sessions)
 ```
 
-The first run guides you through model connection settings (OpenAI-compatible
-URL, Model ID, API Key), then installs dependencies, builds, generates a local
-identity, and opens the TUI. Hub connection is optional and can be added later:
+The first run uses `agent setup` for configuration and does not require
+changing into the AgentSociety checkout. Choose one of local, Hub worker, or
+dispatch-only mode:
 
 ```bash
-./agent setup         # reconfigure; add Hub URL / username / password
-./agent connect       # exchange Hub credentials for a node-scoped credential
-./agent web           # browser UI; pass --port to change the port
-./agent worker        # run as a resident worker claiming Hub tasks
-./agent doctor        # health check: Hub, workspace, model, sessions
+agent setup --mode local          # local use
+agent setup --mode hub-worker     # configure Hub and register this worker
+agent setup --mode dispatch-only  # dispatch tasks without receiving them
+agent configure                   # alias for setup
+agent bootstrap                   # explicitly repair/rebuild the AgentSociety runtime
+agent connect                     # re-register/rotate the node credential
+agent web                         # browser UI
+agent worker                      # resident Hub worker
+agent doctor                      # static checks; --live enables network tests
 ```
 
-Non-secret configuration lives in the Git-ignored `.private/env/agent.env`
-(mode 0600); API keys and Hub credentials are stored only in the system
-credential store (macOS Keychain / Windows Credential Manager / Linux Secret
-Service), never as plaintext in config files.
+Non-secret configuration defaults to `~/.config/agentsociety/agent.env`
+(Windows: `%APPDATA%\\AgentSociety\\agent.env`). Use `--config` or
+`AGENT_ENV_FILE` to override it. Legacy `.private/env/agent.env` and
+`.env.agent` files remain readable and are migrated without deletion.
+New workspaces default to the user's home directory, never the managed checkout.
+
+API keys and Hub credentials prefer the system credential store (macOS Keychain,
+Windows Credential Manager, or Linux Secret Service). On a headless host without
+one, setup reads environment variables only and does not write secrets. Explicit
+`agent setup --credentials file` enables a 0600 file fallback, which doctor
+continues to report as a security warning. Non-interactive setup accepts secrets
+through environment variables or that explicit file mode, never command-line
+arguments.
 
 ### 3. Dispatch your first task
 

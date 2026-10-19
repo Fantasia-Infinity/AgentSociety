@@ -1,7 +1,16 @@
 #!/usr/bin/env node
 
 import { dirname, resolve } from "node:path";
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  accessSync,
+  chmodSync,
+  constants,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
@@ -21,6 +30,7 @@ import { controlTask } from "./controller.js";
 import {
   deleteSystemCredential,
   writeSystemCredential,
+  writeCredentialFile,
 } from "./credential-store.js";
 import { DshAgentEngine } from "./dsh-engine.js";
 import { runDshDoctor } from "./dsh-doctor.js";
@@ -43,6 +53,8 @@ import { TaskWorker } from "./worker.js";
 
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "interactive";
+  const doctorOptions =
+    command === "doctor" ? parseDoctorOptions(process.argv.slice(3)) : undefined;
   // A self-update that deferred npm ci (because the previous worker process
   // held Windows DLL locks on node_modules) is applied here, before any
   // credentials load: the keyring native addon is not loaded yet, so npm ci
@@ -83,6 +95,7 @@ async function main(): Promise<void> {
   const config = loadConfig({
     allowDshPlugin: pluginWorkerDefault,
     allowDshTui: dshTuiDefault,
+    allowIncomplete: command === "doctor",
   });
   const hubRuntimeDisabled = process.env.AGENT_HUB_RUNTIME_DISABLED === "1";
   if (
@@ -106,10 +119,19 @@ async function main(): Promise<void> {
   const workerConfig = dshReceivingCommand
     ? resolveDshIdentity(config)
     : config;
-  const hub =
-    config.hubEnabled && !hubRuntimeDisabled
-      ? await resolveHubClient(workerConfig, dshReceivingCommand ? "dsh" : "pi")
-      : undefined;
+  let hub: HubClient | undefined;
+  let hubResolutionError: unknown;
+  if (config.hubEnabled && !hubRuntimeDisabled) {
+    try {
+      hub = await resolveHubClient(
+        workerConfig,
+        dshReceivingCommand ? "dsh" : "pi",
+      );
+    } catch (error) {
+      if (command !== "doctor") throw error;
+      hubResolutionError = error;
+    }
+  }
   if (command === "__tui-child") {
     const runId = process.argv[3]?.trim();
     if (!runId) throw new Error("Internal TUI child requires a run_id");
@@ -178,7 +200,7 @@ async function main(): Promise<void> {
     if (adapter.id === "dsh" && process.env.AGENT_DSH_COMMAND?.trim()) {
       adapter = {
         ...adapter,
-        command: [...(config.dshCommand ?? ["dsh"]), "--profile", "headless"],
+        command: [...dshCommandForSpawn(config), "--profile", "headless"],
       };
     }
     let bridgeConfig = resolveAdapterIdentity(config, adapter);
@@ -228,7 +250,10 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "doctor") {
-    await runDoctor(config, hub);
+    await runDoctor(config, hub, {
+      ...(doctorOptions ?? { live: false, json: false }),
+      ...(hubResolutionError ? { hubError: hubResolutionError } : {}),
+    });
     return;
   }
   if (command === "dsh-doctor") {
@@ -604,13 +629,23 @@ async function runWebBridge(
     process.env.AGENT_DSH_WEB_TARGET?.trim() || "http://127.0.0.1:3080";
   const dshWeb = await ensureDshWeb(config, hub, target);
   await advertiseDshWeb(config, hub);
-  await ensureDefaultWorkspace(config, target);
+  const dshAuthUrl =
+    process.env.AGENT_DSH_WEB_AUTH_URL?.trim() ||
+    (await dshWeb?.authUrl);
   const bridge = new WebBridge({
     hubUrl: config.hubUrl!,
     nodeToken: hub.nodeToken,
     nodeId: config.nodeId,
     target,
+    ...(dshAuthUrl ? { dshAuthUrl } : {}),
+    ...(process.env.AGENT_DSH_WEB_COOKIE?.trim()
+      ? { dshCookie: process.env.AGENT_DSH_WEB_COOKIE.trim() }
+      : {}),
   });
+  const dshCookie =
+    process.env.AGENT_DSH_WEB_COOKIE?.trim() ||
+    (await bridge.authenticate());
+  await ensureDefaultWorkspace(config, target, dshCookie);
   let stopping = false;
   const stop = () => {
     if (stopping) return;
@@ -676,6 +711,7 @@ async function ensureDshWeb(
 async function ensureDefaultWorkspace(
   config: AgentHostConfig,
   target: string,
+  dshCookie?: string,
 ): Promise<void> {
   const root = (
     process.env.AGENT_DSH_WEB_DEFAULT_WORKSPACE?.trim() || homedir()
@@ -687,7 +723,7 @@ async function ensureDefaultWorkspace(
     const rpc = (method: string, payload: unknown) =>
       fetch(`${base}${method}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...(dshCookie ? { cookie: dshCookie } : {}) },
         body: JSON.stringify({
           type: "client-request",
           rpcId: `ws-default-${Date.now()}`,
@@ -739,9 +775,9 @@ function startDshWebChild(
   );
   const port = new URL(target).port || "3080";
   const command = profileReady
-    ? [...(config.dshCommand ?? ["dsh"]), "--profile", profile, "--port", port]
+    ? [...dshCommandForSpawn(config), "--profile", profile, "--port", port]
     : [
-        ...(config.dshCommand ?? ["dsh"]),
+        ...dshCommandForSpawn(config),
         "web",
         "--patch",
         legacyPatch,
@@ -754,6 +790,7 @@ function startDshWebChild(
   });
   console.log(`Starting local dsh web for bridge: ${command.join(" ")}`);
   return startDshChild(command, env, {
+    captureWebAuth: true,
     onError: (error) => {
       console.error(`Could not start dsh web for bridge: ${error.message}`);
       return false;
@@ -810,8 +847,8 @@ async function runDshWeb(
   );
   const webArgs = process.argv.slice(3);
   const command = profileReady
-    ? [...(config.dshCommand ?? ["dsh"]), "--profile", profile, ...webArgs]
-    : [...(config.dshCommand ?? ["dsh"]), "web", "--patch", legacyPatch, ...webArgs];
+    ? [...dshCommandForSpawn(config), "--profile", profile, ...webArgs]
+    : [...dshCommandForSpawn(config), "web", "--patch", legacyPatch, ...webArgs];
   if (!profileReady) {
     console.warn(
       existsSync(profilePackage)
@@ -856,7 +893,7 @@ async function runDshPluginWorker(
     return false;
   }
   const command = [
-    ...(config.dshCommand ?? ["dsh"]),
+    ...dshCommandForSpawn(config),
     "--profile",
     profile,
   ];
@@ -924,7 +961,7 @@ async function runDshDispatch(
     throw new Error(`DeepSeek Harness dispatch patch not found: ${patchPath}`);
   }
   const command = [
-    ...(config.dshCommand ?? ["dsh"]),
+    ...dshCommandForSpawn(config),
     "web",
     "--patch",
     patchPath,
@@ -976,6 +1013,50 @@ function hostCapabilities(
   ];
 }
 
+function dshCommandForSpawn(config: AgentHostConfig): string[] {
+  const command = [...(config.dshCommand ?? ["dsh"])]
+  const executable = command[0]
+  if (!executable || process.platform === "win32") return command
+  if (executable !== "dsh" && !executable.endsWith("/dsh")) return command
+  const resolved = executable.includes("/")
+    ? executable
+    : (process.env.PATH ?? "")
+        .split(":")
+        .map((entry) => (entry ? resolve(entry, executable) : ""))
+        .find((candidate) => candidate && existsSync(candidate))
+  if (!resolved) return command
+  try {
+    accessSync(resolved, constants.X_OK)
+    return command
+  } catch {
+    try {
+      const target = realpathSync(resolved)
+      if (target.endsWith(".js")) {
+        console.warn(
+          `dsh launcher ${resolved} is not executable; invoking it through ${process.execPath}`,
+        )
+        return [process.execPath, target, ...command.slice(1)]
+      }
+    } catch {
+      // Preserve the original command so the caller can report its spawn error.
+    }
+    return command
+  }
+}
+
+function parseDoctorOptions(args: string[]): { live: boolean; json: boolean } {
+  let live = false;
+  let json = false;
+  for (const arg of args) {
+    if (arg === "--live") live = true;
+    else if (arg === "--json") json = true;
+    else {
+      throw new Error("agent doctor accepts only --live and --json");
+    }
+  }
+  return { live, json };
+}
+
 async function resolveNodeCredential(
   config: AgentHostConfig,
   kind: WorkerRuntimeKind = "pi",
@@ -997,7 +1078,7 @@ async function resolveNodeCredential(
           origin: "worker-boot",
           workspace_root: config.workspaceRoot,
           runtime: kind,
-          runtime_version: kind === "dsh" ? "0.1.0-rc.5" : "0.83.0",
+          runtime_version: kind === "dsh" ? "0.1.2-alpha.2" : "0.83.0",
           remote_tool_policy: config.remoteToolPolicy,
           builtin_capabilities: config.builtinCapabilitiesEnabled,
           worker_session_mode: config.workerSessionMode,
@@ -1037,7 +1118,14 @@ async function resolveNodeCredential(
     let saved = true;
     if (!config.hubNodeTokenCacheDisabled) {
       try {
-        writeSystemCredential(service, account, login.node_token, "Hub node credential");
+        saved = persistConfiguredCredential(
+          config,
+          "AGENT_HUB_NODE_TOKEN",
+          service,
+          account,
+          login.node_token,
+          "Hub node credential",
+        );
       } catch (error) {
         saved = false;
         console.warn(
@@ -1055,6 +1143,29 @@ async function resolveNodeCredential(
   );
 }
 
+function persistConfiguredCredential(
+  config: AgentHostConfig,
+  key: string,
+  service: string,
+  account: string,
+  value: string,
+  label: string,
+): boolean {
+  if (config.credentialBackend === "env") {
+    // Environment-only mode is deliberately non-persistent. Keep the token
+    // available to this process so the current Hub operation can complete,
+    // but never write it to the config file or keychain.
+    process.env[key] = value;
+    return false;
+  }
+  if (config.credentialFile) {
+    writeCredentialFile(config.credentialFile, key, value, label);
+    return true;
+  }
+  writeSystemCredential(service, account, value, label);
+  return true;
+}
+
 async function resolveHubClient(
   config: AgentHostConfig,
   kind: WorkerRuntimeKind = "pi",
@@ -1069,7 +1180,9 @@ async function connectCommand(config: AgentHostConfig): Promise<void> {
   }
   let username = config.hubUsername ?? "";
   let password = config.hubPassword ?? "";
-  const interactive = Boolean(stdin.isTTY && stdout.isTTY);
+  const interactive =
+    Boolean(stdin.isTTY && stdout.isTTY) &&
+    !process.argv.slice(3).includes("--non-interactive");
   if (interactive) {
     const muted = new MutedOutput();
     const rl = createInterface({ input: stdin, output: muted, terminal: true });
@@ -1135,17 +1248,34 @@ async function connectCommand(config: AgentHostConfig): Promise<void> {
   const envPath = agentEnvPath(
     resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", ".."),
   );
-  mkdirSync(dirname(envPath), { recursive: true });
-  ensureEnvLine(
-    envPath,
-    "AGENT_HUB_NODE_TOKEN_CREDENTIAL_SERVICE",
-    nodeService,
-  );
-  ensureEnvLine(envPath, "AGENT_HUB_NODE_TOKEN_CREDENTIAL_ACCOUNT", nodeAccount);
+  if (
+    config.configPath &&
+    resolve(config.configPath) !== resolve(envPath) &&
+    !existsSync(envPath)
+  ) {
+    migrateLegacyConfig(config.configPath, envPath);
+  }
+  if (config.credentialBackend !== "env" && !config.credentialFile) {
+    mkdirSync(dirname(envPath), { recursive: true });
+    if (config.hubUrl) ensureEnvLine(envPath, "AGENT_HUB_URL", config.hubUrl);
+    ensureEnvLine(envPath, "AGENT_HUB_USERNAME", username);
+    ensureEnvLine(
+      envPath,
+      "AGENT_HUB_NODE_TOKEN_CREDENTIAL_SERVICE",
+      nodeService,
+    );
+    ensureEnvLine(envPath, "AGENT_HUB_NODE_TOKEN_CREDENTIAL_ACCOUNT", nodeAccount);
+  }
   let saved = false;
   try {
-    writeSystemCredential(nodeService, nodeAccount, token, "Hub node credential");
-    saved = true;
+    saved = persistConfiguredCredential(
+      config,
+      "AGENT_HUB_NODE_TOKEN",
+      nodeService,
+      nodeAccount,
+      token,
+      "Hub node credential",
+    );
   } catch (error) {
     console.warn(
       `Could not save the node credential to the system store (${error instanceof Error ? error.message : String(error)}); ` +
@@ -1156,7 +1286,14 @@ async function connectCommand(config: AgentHostConfig): Promise<void> {
     const passwordService =
       process.env.AGENT_HUB_PASSWORD_CREDENTIAL_SERVICE?.trim() ||
       "AgentSociety Hub Password";
-    writeSystemCredential(passwordService, username, password, "Hub password");
+    persistConfiguredCredential(
+      config,
+      "AGENT_HUB_PASSWORD",
+      passwordService,
+      username,
+      password,
+      "Hub password",
+    );
   } catch (error) {
     console.warn(
       `Could not save the Hub password to the system store (${error instanceof Error ? error.message : String(error)}); worker restarts may need to run connect again.`,
@@ -1166,7 +1303,16 @@ async function connectCommand(config: AgentHostConfig): Promise<void> {
     `Connected to Hub as ${username} on node ${config.nodeId} (${config.actorId})`,
   );
   if (saved) {
-    console.log("Node credential saved to the system credential store.");
+    console.log(
+      config.credentialFile
+        ? `Node credential saved to ${config.credentialFile} (0600).`
+        : "Node credential saved to the system credential store.",
+    );
+  } else if (config.credentialBackend === "env") {
+    console.warn(
+      "Credential backend is environment-only; the new node credential was not persisted. " +
+        "Export AGENT_HUB_NODE_TOKEN before a future restart or run `agent connect` again.",
+    );
   } else {
     console.warn(
       "The system credential store is unavailable on this machine. " +
@@ -1195,6 +1341,29 @@ function ensureEnvLine(path: string, key: string, value: string): void {
     encoding: "utf8",
     mode: 0o600,
   });
+  chmodSync(path, 0o600);
+}
+
+function migrateLegacyConfig(source: string, target: string): void {
+  const secretKeys = new Set([
+    "AGENT_REMOTE_API_KEY",
+    "LLM_API_KEY",
+    "AGENT_HUB_TOKEN",
+    "AGENT_HUB_PASSWORD",
+    "AGENT_HUB_NODE_TOKEN",
+  ]);
+  const lines = readFileSync(source, "utf8").split(/\r?\n/u);
+  const sanitized = lines.filter((line) => {
+    const key = line.match(/^\s*([A-Z][A-Z0-9_]*)\s*=/u)?.[1];
+    return !key || !secretKeys.has(key);
+  });
+  mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+  writeFileSync(target, `${sanitized.join("\n").replace(/\n+$/u, "")}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  chmodSync(target, 0o600);
+  console.log(`Migrated non-secret settings to ${target}; kept ${source}.`);
 }
 
 class MutedOutput extends Writable {

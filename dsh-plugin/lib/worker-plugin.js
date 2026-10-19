@@ -11,7 +11,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy';
 import { hostname, userInfo } from 'node:os';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -989,7 +989,7 @@ class WorkerLoop {
         return candidate;
     }
     scopeKey(task, cwd) {
-        return [task.principal_id, cwd].join('\u0000');
+        return [task.principal_id, this.options.actorId, this.options.nodeId, cwd].join('\u0000');
     }
     async dispose() {
         this.disposed = true;
@@ -1100,10 +1100,20 @@ function readState(path) {
 }
 function writeState(path, state) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`, {
-        encoding: 'utf8',
-        mode: 0o600,
-    });
+    const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+        writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`, {
+            encoding: 'utf8',
+            mode: 0o600,
+        });
+        renameSync(temporary, path);
+    }
+    finally {
+        try {
+            unlinkSync(temporary);
+        }
+        catch { /* rename completed or temp was never created */ }
+    }
 }
 function stableSlug(value) {
     const slug = value.toLowerCase().replace(/[^a-z0-9._-]+/gu, '-');

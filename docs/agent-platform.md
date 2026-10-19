@@ -194,29 +194,31 @@ override 无法越过该 shrinkwrap。因此 setup 直接锁定安全版 5.0.9�
 Pi 的这一份嵌套包；安全检查会验证实际运行版本。这里刻意禁用第三方安装脚本，补丁也不通过
 隐式 `postinstall` 执行。
 
-setup 把非敏感配置和凭据引用写入 `.private/env/agent.env`（旧的根目录
-`.env.agent` 仍会被兼容读取），Agent Host 会优先自动读取它；
-旧 `.env` 仅作为兼容回退。模型地址必须是远程 HTTP(S) 地址，loopback 会被拒绝。Principal 默认为
-`human-<登录用户名>`，Actor/Node 根据主机名生成；workspace 自动设为 clone 后的仓库根目录。
-可以参照 `.env.agent.example` 覆盖这些高级默认值。
+setup 把非敏感配置和凭据引用写入用户级
+`~/.config/agentsociety/agent.env`（Windows 为 `%APPDATA%\\AgentSociety\\agent.env`）；
+旧项目的 `.private/env/agent.env` 和 `.env.agent` 仍会被自动发现并非破坏性迁移，
+旧 `.env` 仅作为兼容回退。也可以用 `--config` 或 `AGENT_ENV_FILE` 指定中心配置。
+模型地址必须是远程 HTTP(S) 地址，loopback 会被拒绝。Principal 默认为
+`human-<登录用户名>`，Actor/Node 根据主机名生成；新配置的 workspace 默认为用户 home，
+不会指向 AgentSociety checkout。可以参照 `.env.agent.example` 覆盖高级默认值。
 
 没有 `AGENT_HUB_URL`/`AGENT_HUB_TOKEN` 时，本地 TUI、session 和模型完全独立运行，也不会向
 Pi 暴露 Hub 工具。`worker`、`once`、`observe`、`attach`、`register` 是显式协作命令，缺少
-Hub 配置时会给出清晰错误。以后需要协作时重新运行 `./agent setup`，补入 Hub 两项即可；
+Hub 配置时会给出清晰错误。以后需要协作时重新运行 `agent setup --mode hub-worker`；只派发任务则使用
+`agent setup --mode dispatch-only`；
 已经配置 Hub 时仍可用 `./agent local` 临时强制脱离 Hub。
 
-setup 输入的 Model API key 和可选 Hub token 会直接写入操作系统安全凭据库：
+setup 输入的 Model API key 和可选 Hub token 会优先写入操作系统安全凭据库：
 
 - macOS 使用 Login Keychain。
 - Windows 使用 Credential Manager。
 - Linux 使用 Secret Service，需要当前用户会话提供可用且已解锁的 keyring。
 
-`.private/env/agent.env` 只记录 credential service/account，不记录秘密本身；
-凭据不会进入 Hub、日志或
-SQLite。系统凭据库不可用或锁定时 setup 会失败，不提供明文文件回退。重新运行 setup 会把
-旧 `.env.agent` 中的 `AGENT_REMOTE_API_KEY` / `AGENT_HUB_TOKEN` 迁移到系统凭据库，并从配置
-文件中删除。CI 或外部 secret manager 仍可在进程环境中临时注入这些变量，但 setup 永远不会
-把它们写入本地文本文件。
+`agent.env` 只记录 credential service/account，不记录秘密本身；凭据不会进入 Hub、日志或
+SQLite。系统凭据库不可用或锁定时，setup 默认退回只读环境变量，不自动创建明文文件；
+用户显式运行 `agent setup --credentials file` 才会写入权限 0600 的用户级凭据文件，
+并由 doctor 持续提示风险。重新运行 setup 会把旧配置中的明文密钥迁移到所选后端，
+从当前生效配置删除。CI 或外部 secret manager 仍可在进程环境中临时注入这些变量。
 
 ```bash
 # 本地用户使用 Pi 原生完整 TUI 直接操作

@@ -105,7 +105,7 @@ export async function registerDshHost(
     ],
     metadata: {
       runtime: "dsh",
-      runtime_version: "0.1.0-rc.5",
+      runtime_version: "0.1.2-alpha.2",
       remote_tool_policy: config.remoteToolPolicy,
       worker_session_mode: config.workerSessionMode,
     },

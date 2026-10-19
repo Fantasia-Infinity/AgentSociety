@@ -21,15 +21,14 @@
 - Agent 连接：`agent connect` 交互输入自己的用户名/密码 → Hub 校验后
   注册/绑定 principal/actor/node，并签发**节点短期凭据**（默认 7 天）；
   密码不落盘，节点凭据存入系统钥匙串，worker 启动时自动登录/续期。
-- 无系统钥匙串的主机（如无头 Linux）：`agent connect` 会提示把
-  `AGENT_HUB_NODE_TOKEN` 写入 `.private/env/agent.env`（兼容旧 `.env.agent`，
-  文件权限 600）；该凭据由密码
-  登录签发、可单独吊销，不等同于旧的共享 bootstrap token。
-- Codex MCP 客户端通过 `agent-host/scripts/mcp-hub-wrapper.mjs` 从系统
-  钥匙串读取**本机节点凭据**再桥接 mcp-remote，配置文件里不落任何 token；
-  运行 `agent connect` 之后 MCP 工具即恢复可用。wrapper 会自动读取
-  `.private/env/agent.env` 中的 `AGENT_HUB_URL` 与钥匙串凭据名（`AGENT_HUB_NODE_TOKEN_CREDENTIAL_*`），
-  无需额外环境变量；`AGENT_HUB_MCP_URL` 仅用于覆盖默认的 `<AGENT_HUB_URL>/mcp`。
+- 无系统钥匙串的主机（如无头 Linux）：默认只从环境变量读取节点凭据，不会自动
+  落盘；用户显式选择 `agent setup --credentials file` 后，节点凭据才会写入用户
+  配置目录下权限 600 的凭据文件。该凭据由密码登录签发、可单独吊销，不等同于
+  旧的共享 bootstrap token。
+- Codex MCP 客户端通过 `agent-host/scripts/mcp-hub-wrapper.mjs` 从系统凭据库、
+  显式凭据文件或环境变量读取**本机节点凭据**再桥接 mcp-remote，配置文件里不落
+  任何 token；wrapper 会自动读取用户级 AgentSociety 配置（旧项目配置仍兼容）。
+  `AGENT_HUB_MCP_URL` 仅用于覆盖默认的 `<AGENT_HUB_URL>/mcp`。
 
 ## 2. 数据模型（新增表）
 
@@ -90,12 +89,15 @@
 ## 5. agent-host 连接流程
 
 ```
-agent connect
+agent setup --mode hub-worker
   ├─ 输入 username + password（隐藏输入）
   ├─ POST /v1/auth/agent-login
-  ├─ 将 node_token 写入系统钥匙串（AGENT_HUB_NODE_TOKEN_CREDENTIAL_*）
-  ├─ 将 username 引用写入 .private/env/agent.env（不写密码明文；兼容旧 .env.agent）
-  └─ 打印节点/租户信息
+  ├─ 将 node_token 写入系统凭据库（或用户显式选择的 0600 凭据文件）
+  ├─ 将非敏感配置写入用户级 agent.env（旧项目配置保留）
+  └─ 打印节点/租户信息（不打印 secret）
+
+agent connect
+  └─ 重新注册/轮换当前节点凭据
 
 worker 启动
   ├─ 读钥匙串 node_token（或 AGENT_HUB_NODE_TOKEN 兼容项）

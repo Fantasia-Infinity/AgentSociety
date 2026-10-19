@@ -29,7 +29,7 @@ class TunnelRegistryTests(unittest.TestCase):
         self.assertTrue(self.registry.is_online("node-a"))
         self.assertTrue(self.registry.send_to("node-a", {"type": "ping"}))
         self.assertEqual(received, [{"type": "ping"}])
-        self.registry.detach("node-a", close)
+        self.assertTrue(self.registry.detach("node-a", close))
         self.assertFalse(self.registry.is_online("node-a"))
 
     def test_send_to_offline_node_fails(self) -> None:
@@ -40,6 +40,16 @@ class TunnelRegistryTests(unittest.TestCase):
         self.registry.attach("node-a", lambda message: None, lambda: closed.append(True))
         self.registry.attach("node-a", lambda message: None, lambda: None)
         self.assertEqual(closed, [True])
+
+    def test_stale_detach_cannot_remove_replacement(self) -> None:
+        old_close = lambda: None
+        new_close = lambda: None
+        self.registry.attach("node-a", lambda message: None, old_close)
+        self.registry.attach("node-a", lambda message: None, new_close)
+        self.assertFalse(self.registry.detach("node-a", old_close))
+        self.assertTrue(self.registry.is_online("node-a"))
+        self.assertTrue(self.registry.detach("node-a", new_close))
+        self.assertFalse(self.registry.is_online("node-a"))
 
     def test_send_failure_reports_offline(self) -> None:
         def broken(message: dict) -> None:

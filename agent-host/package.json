@@ -9,6 +9,7 @@
   },
   "scripts": {
     "setup": "node scripts/setup.mjs",
+    "bootstrap": "node scripts/setup.mjs --bootstrap",
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "apply-security-patches": "node scripts/patch-pi-brace-expansion.mjs",

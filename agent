@@ -45,30 +45,60 @@ install_global_command() {
         ln -s "$repository_root/agent" "$global_command"
     fi
 
-    echo "Global command available as: $global_command"
+    echo "Global command available as: $global_command" >&2
     case ":${PATH:-}:" in
         *:"$global_bin":*) ;;
         *) echo "Add $global_bin to PATH to run 'agent' from any directory." >&2 ;;
     esac
 }
 
-if [ "$command" = "setup" ]; then
+agent_config_path() {
+    if [ -n "${AGENT_ENV_FILE:-}" ]; then
+        printf '%s\n' "$AGENT_ENV_FILE"
+    elif [ -n "${XDG_CONFIG_HOME:-}" ]; then
+        printf '%s\n' "$XDG_CONFIG_HOME/agentsociety/agent.env"
+    else
+        printf '%s\n' "${HOME}/.config/agentsociety/agent.env"
+    fi
+}
+
+has_agent_config() {
+    config_path=$(agent_config_path)
+    [ -f "$config_path" ] || \
+      [ -f "$repository_root/.private/env/agent.env" ] || \
+      [ -f "$repository_root/.env.agent" ]
+}
+
+bootstrap_if_needed() {
+    if [ ! -d "$agent_host/node_modules" ] || [ ! -f "$agent_host/dist/src/cli.js" ]; then
+        npm --prefix "$agent_host" run bootstrap
+    fi
+}
+
+bootstrap_runtime() {
+    npm --prefix "$agent_host" run bootstrap
+}
+
+if [ "$command" = "bootstrap" ] || [ "$command" = "repair" ]; then
+    bootstrap_runtime
+    install_global_command
+    exit 0
+fi
+
+if [ "$command" = "setup" ] || [ "$command" = "configure" ]; then
+    bootstrap_if_needed
     npm --prefix "$agent_host" run setup -- "$@"
     install_global_command
     exit 0
 fi
 
 did_setup=0
-if [ ! -f "$agent_host/.setup-complete" ] || \
-   { [ ! -f "$repository_root/.env.agent" ] && [ ! -f "$repository_root/.private/env/agent.env" ]; } || \
-   [ ! -d "$agent_host/node_modules" ] || [ ! -f "$agent_host/dist/src/cli.js" ]; then
+bootstrap_if_needed
+if [ "$command" != "doctor" ] && [ "$command" != "sessions" ] && ! has_agent_config; then
     npm --prefix "$agent_host" run setup
     did_setup=1
 fi
 install_global_command
-if [ "$command" = "doctor" ] && [ "$did_setup" -eq 1 ]; then
-    exit 0
-fi
 
 case "$command" in
     tui|interactive|local)
@@ -83,14 +113,17 @@ case "$command" in
     web-bridge)
         exec npm --prefix "$agent_host" run web-bridge -- "$@"
         ;;
-    doctor|sessions|dsh-doctor)
-        exec npm --prefix "$agent_host" run "$command"
+    doctor)
+        exec node "$agent_host/dist/src/cli.js" doctor "$@"
+        ;;
+    dsh-doctor|sessions)
+        exec npm --prefix "$agent_host" run start -- "$command" "$@"
         ;;
     register|once|observe|attach|bridge|connect|steer|follow-up|cancel|control|dsh-worker|dsh-once|dsh-dispatch|dsh-doctor)
         exec npm --prefix "$agent_host" run start -- "$command" "$@"
         ;;
     *)
-        echo "Usage: ./agent [setup|tui|web|web-bridge|local|worker|connect|bridge --adapter ID|doctor|dsh-doctor|sessions|register|once|observe ID|attach ID|steer|follow-up|cancel|control|dsh-worker|dsh-once|dsh-dispatch]" >&2
+        echo "Usage: ./agent [setup|configure|bootstrap|repair|tui|web|web-bridge|local|worker|connect|bridge --adapter ID|doctor [--live] [--json]|dsh-doctor|sessions|register|once|observe ID|attach ID|steer|follow-up|cancel|control|dsh-worker|dsh-once|dsh-dispatch]" >&2
         exit 2
         ;;
 esac

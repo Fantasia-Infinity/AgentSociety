@@ -19,6 +19,11 @@ export interface DshChildOptions {
    * worker self-update path).
    */
   onExit?: (code: number | null, signal: NodeJS.Signals | null) => boolean | void
+  /**
+   * Pipe the child stdout/stderr so the caller can extract the authenticated
+   * DSH Web URL printed by dsh web. The default remains inherit.
+   */
+  captureWebAuth?: boolean
 }
 
 export interface DshChildResult {
@@ -36,6 +41,8 @@ export interface ManagedDshChild {
   child: ChildProcess
   stop: () => void
   exited: Promise<DshChildResult>
+  /** Resolves with the authenticated DSH Web URL when captureWebAuth is enabled. */
+  authUrl?: Promise<string | undefined>
 }
 
 export function startDshChild(
@@ -44,7 +51,7 @@ export function startDshChild(
   options: DshChildOptions = {},
 ): ManagedDshChild {
   const child: ChildProcess = spawn(command[0]!, command.slice(1), {
-    stdio: 'inherit',
+    stdio: options.captureWebAuth === true ? ['ignore', 'pipe', 'pipe'] : 'inherit',
     env,
     ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
   })
@@ -75,6 +82,24 @@ export function startDshChild(
       child.kill('SIGTERM')
     }
   }
+  let resolveAuthUrl!: (url: string | undefined) => void
+  const authUrl = new Promise<string | undefined>((resolve) => { resolveAuthUrl = resolve })
+  if (options.captureWebAuth === true) {
+    child.stdout?.setEncoding('utf8')
+    child.stderr?.setEncoding('utf8')
+    const scan = (chunk: string): void => {
+      const match = /https?:\/\/[^\s?)"']+\?token=[^\s?)"']+/u.exec(chunk)
+      if (match !== null) resolveAuthUrl(match[0])
+    }
+    child.stdout?.on('data', scan)
+    child.stderr?.on('data', scan)
+    child.stdout?.on('data', (chunk: string) => process.stdout.write(chunk))
+    child.stderr?.on('data', (chunk: string) => process.stderr.write(chunk))
+    child.once('exit', () => resolveAuthUrl(undefined))
+    child.once('error', () => resolveAuthUrl(undefined))
+  } else {
+    resolveAuthUrl(undefined)
+  }
   process.once('SIGINT', forwardSignal)
   process.once('SIGTERM', forwardSignal)
   child.once('error', (error: Error) => {
@@ -89,7 +114,7 @@ export function startDshChild(
     }
     finish({ started: true, restart })
   })
-  return { child, stop, exited }
+  return { child, stop, exited, authUrl }
 }
 
 /**

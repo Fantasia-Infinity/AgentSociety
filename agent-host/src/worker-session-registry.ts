@@ -6,6 +6,7 @@ import {
   readFileSync,
   renameSync,
   writeFileSync,
+  unlinkSync,
 } from "node:fs";
 import { join, relative, resolve } from "node:path";
 
@@ -103,12 +104,16 @@ export class WorkerSessionRegistry {
     chmodSync(this.recordsDir, 0o700);
     const target = this.recordPath(record.key);
     const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
-    writeFileSync(temporary, `${JSON.stringify(record, null, 2)}\n`, {
-      encoding: "utf8",
-      mode: 0o600,
-    });
-    chmodSync(temporary, 0o600);
-    renameSync(temporary, target);
+    try {
+      writeFileSync(temporary, `${JSON.stringify(record, null, 2)}\n`, {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+      chmodSync(temporary, 0o600);
+      renameSync(temporary, target);
+    } finally {
+      try { unlinkSync(temporary); } catch { /* rename completed or temp was never created */ }
+    }
   }
 }
 

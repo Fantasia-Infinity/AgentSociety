@@ -147,7 +147,7 @@ Web 会话使用 `HttpOnly + SameSite=Strict` Cookie 和 CSRF 防护；登录 to
 正式域名模式下，直接运行：
 
 ```bash
-./agent setup
+agent setup --mode hub-worker
 ```
 
 Hub URL 填 `https://hub.example.com` 或 Quick Tunnel 的
@@ -156,7 +156,7 @@ token。Cloudflare 两种模式都不需要信任 CA；仅直连 Caddy 自签模
 
 ```bash
 export NODE_EXTRA_CA_CERTS=/path/to/certs/ca.pem
-./agent setup
+agent setup --mode hub-worker
 ```
 
 macOS/Windows/Linux 后台服务也要在启动环境里设置 `NODE_EXTRA_CA_CERTS`。

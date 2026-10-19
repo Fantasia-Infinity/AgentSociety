@@ -7,6 +7,7 @@ import secrets
 import socket
 import struct
 import threading
+import queue
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -19,7 +20,7 @@ from agent_hub.api import AgentHubApi
 from agent_hub.server import HubHttpServer
 from agent_hub.store import AgentHubStore
 from agent_hub.websocket import WebSocket, accept_key
-from agent_hub.web_proxy import validate_proxy_path
+from agent_hub.web_proxy import WebTunnelCoordinator, validate_proxy_path
 
 
 class FakeDshWebServer:
@@ -30,7 +31,7 @@ class FakeDshWebServer:
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802
-                if self.path == "/api/events.mux":
+                if self.path == "/api/remote.mux":
                     self._serve_events()
                     return
                 self._answer()
@@ -65,15 +66,30 @@ class FakeDshWebServer:
                 try:
                     for index in range(3):
                         frame = {
-                            "type": "server-request",
-                            "rpcId": f"fx{index}",
-                            "method": "mux/update",
-                            "payload": {"seq": index},
+                            "type": "item",
+                            "streamId": "fx",
+                            "value": {
+                                "seq": index,
+                                "label": f"frame-{index}",
+                            },
                         }
                         ws.send_text(json.dumps(frame))
                         time.sleep(0.05)
                     while True:
-                        ws.recv_message()
+                        opcode, payload = ws.recv_message()
+                        if opcode != 0x1:
+                            continue
+                        try:
+                            client = json.loads(payload.decode("utf-8"))
+                        except (UnicodeDecodeError, json.JSONDecodeError):
+                            continue
+                        stream_id = client.get("streamId", "echo")
+                        endpoint = client.get("endpoint", "echo")
+                        ws.send_text(json.dumps({
+                            "type": "item",
+                            "streamId": stream_id,
+                            "value": {"echo": endpoint},
+                        }))
                 except Exception:  # noqa: BLE001
                     pass
 
@@ -196,6 +212,57 @@ class MiniWebSocketClient:
             self.sock.close()
         except OSError:
             pass
+
+
+class WebTunnelCoordinatorIsolationTests(unittest.TestCase):
+    def test_fail_node_only_releases_that_nodes_channels(self) -> None:
+        from agent_hub.tunnel import TunnelRegistry
+
+        registry = TunnelRegistry()
+        coordinator = WebTunnelCoordinator(registry)
+        pending_a: queue.Queue[dict] = queue.Queue(maxsize=1)
+        pending_b: queue.Queue[dict] = queue.Queue(maxsize=1)
+        stream_a: queue.Queue[dict] = queue.Queue(maxsize=1)
+        stream_b: queue.Queue[dict] = queue.Queue(maxsize=1)
+        coordinator._pending = {
+            "request-a": ("node-a", pending_a),
+            "request-b": ("node-b", pending_b),
+        }
+        coordinator._ws_channels = {
+            "stream-a": ("node-a", stream_a),
+            "stream-b": ("node-b", stream_b),
+        }
+
+        coordinator._fail_node("node-a")
+
+        self.assertEqual(pending_a.get_nowait()["status"], 502)
+        self.assertTrue(pending_b.empty())
+        self.assertEqual(stream_a.get_nowait()["code"], 1006)
+        self.assertTrue(stream_b.empty())
+        self.assertEqual(set(coordinator._pending), {"request-b"})
+        self.assertEqual(set(coordinator._ws_channels), {"stream-b"})
+
+    def test_old_tunnel_teardown_does_not_fail_replacement(self) -> None:
+        from agent_hub.tunnel import TunnelRegistry
+
+        registry = TunnelRegistry()
+        coordinator = WebTunnelCoordinator(registry)
+        old_close = lambda: None
+        new_close = lambda: None
+        registry.attach("node-a", lambda message: None, old_close)
+        registry.attach("node-a", lambda message: None, new_close)
+        coordinator._pending = {
+            "request-a": ("node-a", queue.Queue(maxsize=1)),
+        }
+
+        # This is the old handler's finally path. It must not call _fail_node
+        # after attach() has installed the replacement tunnel.
+        if registry.detach("node-a", old_close):
+            coordinator._fail_node("node-a")
+
+        self.assertTrue(registry.is_online("node-a"))
+        self.assertIn("request-a", coordinator._pending)
+
 
 
 class WebTunnelIntegrationTests(unittest.TestCase):
@@ -358,7 +425,7 @@ class WebTunnelIntegrationTests(unittest.TestCase):
         thread.start()
         try:
             browser = MiniWebSocketClient(
-                f"ws://127.0.0.1:{self.port}/v1/web/node-device/api/events.mux",
+                f"ws://127.0.0.1:{self.port}/v1/web/node-device/api/remote.mux",
                 headers={"Authorization": f"Bearer {self.token}"},
             )
             try:
@@ -504,7 +571,7 @@ class WebTunnelIntegrationTests(unittest.TestCase):
         thread.start()
         try:
             browser = MiniWebSocketClient(
-                f"ws://127.0.0.1:{self.port}/v1/web/node-device/api/events.mux",
+                f"ws://127.0.0.1:{self.port}/v1/web/node-device/api/remote.mux",
                 headers={"Authorization": f"Bearer {self.token}"},
             )
             received = []
@@ -515,13 +582,84 @@ class WebTunnelIntegrationTests(unittest.TestCase):
             finally:
                 browser.close()
             self.assertEqual(
-                [frame["payload"]["seq"] for frame in received], [0, 1, 2]
+                [frame["value"]["seq"] for frame in received], [0, 1, 2]
             )
-            self.assertEqual(received[0]["rpcId"], "fx0")
-            self.assertEqual(received[0]["method"], "mux/update")
+            self.assertEqual(received[0]["streamId"], "fx")
+            self.assertEqual(received[0]["type"], "item")
         finally:
             ws.close()
         self.assertEqual(relay_error, [])
+
+    def test_browser_remote_mux_forwards_both_directions(self) -> None:
+        """Browser->device frames are relayed and device replies return."""
+        ws = self._open_tunnel()
+        relay_error: list[Exception] = []
+
+        def device_loop() -> None:
+            try:
+                while True:
+                    message = json.loads(ws.recv_text(timeout=5))
+                    if message["type"] == "ws-open":
+                        local = MiniWebSocketClient(
+                            f"ws://127.0.0.1:{self.fake_web.server.server_address[1]}{message['path']}"
+                        )
+                        ws.send_text(json.dumps({
+                            "type": "ws-open-ack",
+                            "id": message["id"],
+                            "ok": True,
+                        }))
+                        # Consume the fake device's initial remote.mux items.
+                        for _ in range(3):
+                            local.recv_text(timeout=5)
+                        while True:
+                            client = json.loads(ws.recv_text(timeout=5))
+                            if client["type"] == "ws-client-frame":
+                                text = base64.b64decode(client["payload_b64"]).decode("utf-8")
+                                local.send_text(text)
+                                reply = local.recv_text(timeout=5)
+                                ws.send_text(json.dumps({
+                                    "type": "ws-frame",
+                                    "id": client["id"],
+                                    "opcode": 1,
+                                    "payload_b64": base64.b64encode(
+                                        reply.encode("utf-8")
+                                    ).decode("ascii"),
+                                }))
+                                local.close()
+                                return
+                            elif client["type"] == "ws-close":
+                                local.close()
+                                return
+                    elif message["type"] == "ws-close":
+                        return
+            except Exception as exc:  # noqa: BLE001
+                relay_error.append(exc)
+
+        thread = threading.Thread(target=device_loop, daemon=True)
+        thread.start()
+        try:
+            browser = MiniWebSocketClient(
+                f"ws://127.0.0.1:{self.port}/v1/web/node-device/api/remote.mux",
+                headers={"Authorization": f"Bearer {self.token}"},
+            )
+            try:
+                browser.send_text(json.dumps({
+                    "type": "open",
+                    "streamId": "s1",
+                    "endpoint": "$events",
+                    "payload": {"args": {}},
+                }))
+                reply = json.loads(browser.recv_text(timeout=10))
+                self.assertEqual(reply["type"], "item")
+                self.assertEqual(reply["streamId"], "s1")
+                self.assertEqual(reply["value"], {"echo": "$events"})
+            finally:
+                browser.close()
+        finally:
+            ws.close()
+            thread.join(timeout=5)
+        self.assertEqual(relay_error, [])
+
 
     def test_event_ws_rejects_disabled_node_web(self) -> None:
         # A second node without the dsh_web capability must be denied.
@@ -533,7 +671,7 @@ class WebTunnelIntegrationTests(unittest.TestCase):
         )
         try:
             browser = MiniWebSocketClient(
-                f"ws://127.0.0.1:{self.port}/v1/web/node-plain/api/events.mux",
+                f"ws://127.0.0.1:{self.port}/v1/web/node-plain/api/remote.mux",
                 headers={"Authorization": f"Bearer {self.token}"},
             )
             browser.close()

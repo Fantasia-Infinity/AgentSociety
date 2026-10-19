@@ -24,6 +24,20 @@ import {
   type WorkerSessionScope,
 } from "./worker-session-registry.js";
 
+function isMissingSessionError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  if (code === "EACCES" || code === "EPERM" || code === "EIO") return false;
+  if (code === "ENOENT") return true;
+  const text = errorMessage(error);
+  if (/(?:corrupt|invalid|malformed|permission|access denied|i\/o|input\/output|writer lock|write conflict)/iu.test(text)) {
+    return false;
+  }
+  return [
+    /(?:session|artifact|file).*?(?:not found|does not exist|no such file)/iu,
+    /(?:not found|does not exist|no such file).*?(?:session|artifact|file)/iu,
+  ].some((pattern) => pattern.test(text));
+}
+
 type WorkerHub = Pick<
   HubClient,
   "claimTask" | "updateTask" | "updateRun" | "heartbeat"
@@ -463,8 +477,9 @@ export class TaskWorker {
           `Resumed continuous ${this.engineProfile.label} session ${conversation.sessionId} for worker ${this.workerSlot + 1}`,
         );
       } catch (error) {
+        if (!isMissingSessionError(error)) throw error;
         this.output(
-          `Continuous ${this.engineProfile.label} session recovery failed; creating a new session: ${errorMessage(error)}`,
+          `Continuous ${this.engineProfile.label} session is unavailable; starting a replacement: ${errorMessage(error)}`,
         );
       }
     }

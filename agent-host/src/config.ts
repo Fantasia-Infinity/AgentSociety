@@ -1,8 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir, hostname, userInfo } from "node:os";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 import {
+  readCredentialEnv,
   readLegacyMacKeychainCredential,
   readSystemCredential,
 } from "./credential-store.js";
@@ -20,12 +21,19 @@ export type DshPermissionMode =
   | "danger-full-access";
 
 export interface AgentHostConfig {
+  /** Effective non-secret configuration file after central/legacy discovery. */
+  configPath?: string;
+  /** Explicit 0600 credential file, when the user selected file storage. */
+  credentialFile?: string;
+  credentialBackend?: "keychain" | "file" | "env";
+  credentialFileError?: string;
   hubEnabled: boolean;
   hubUrl?: string;
   hubToken?: string;
   hubUsername?: string;
   hubPassword?: string;
   hubNodeToken?: string;
+  hubReceiveDisabled?: boolean;
   hubNodeTokenCacheDisabled?: boolean;
   principalId: string;
   principalDisplayName: string;
@@ -93,10 +101,65 @@ export interface AgentHostConfig {
   dshWebProfile?: string;
 }
 
-export function loadProjectEnv(path?: string): void {
+export function loadProjectEnv(path?: string): string | undefined {
   const envPath = path ? resolve(path) : discoverProjectEnv();
-  if (!envPath || !existsSync(envPath)) return;
-  for (const rawLine of readFileSync(envPath, "utf8").split(/\r?\n/u)) {
+  if (envPath && existsSync(envPath)) {
+    loadEnvFile(envPath);
+  }
+  const credentialFile = process.env.AGENT_CREDENTIAL_FILE?.trim();
+  if (credentialFile) {
+    try {
+      for (const [key, value] of Object.entries(
+        readCredentialEnv(resolve(credentialFile)),
+      )) {
+        if (process.env[key] === undefined) process.env[key] = value;
+      }
+    } catch (error) {
+      process.env.AGENT_CREDENTIAL_FILE_ERROR =
+        error instanceof Error ? error.message : String(error);
+    }
+  }
+  return envPath;
+}
+
+export function discoverProjectEnv(cwd = process.cwd()): string | undefined {
+  return firstExisting([
+    defaultAgentConfigPath(),
+    resolve(cwd, ".private/env/agent.env"),
+    resolve(cwd, ".env.agent"),
+    resolve(cwd, "../.private/env/agent.env"),
+    resolve(cwd, "../.env.agent"),
+    resolve(cwd, ".env"),
+    resolve(cwd, "../.env"),
+  ]);
+}
+
+/** User-level configuration path shared by setup, connect, worker and doctor. */
+export function defaultAgentConfigPath(): string {
+  const configHome =
+    process.platform === "win32"
+      ? process.env.APPDATA?.trim() || join(homedir(), "AppData", "Roaming")
+      : process.env.XDG_CONFIG_HOME?.trim() || join(homedir(), ".config");
+  return resolve(configHome, "agentsociety", "agent.env");
+}
+
+/** Legacy project paths are still readable and are never removed automatically. */
+export function legacyAgentConfigPaths(root: string): string[] {
+  return [resolve(root, ".private/env/agent.env"), resolve(root, ".env.agent")];
+}
+
+/**
+ * Canonical user-level AgentSociety env file. The root argument is retained
+ * for callers from the pre-centralized configuration API.
+ */
+export function agentEnvPath(_root: string): string {
+  return process.env.AGENT_ENV_FILE?.trim()
+    ? resolve(process.env.AGENT_ENV_FILE)
+    : defaultAgentConfigPath();
+}
+
+function loadEnvFile(path: string): void {
+  for (const rawLine of readFileSync(path, "utf8").split(/\r?\n/u)) {
     const line = rawLine.trim();
     if (!line || line.startsWith("#") || !line.includes("=")) continue;
     const separator = line.indexOf("=");
@@ -110,31 +173,6 @@ export function loadProjectEnv(path?: string): void {
     }
     if (key && process.env[key] === undefined) process.env[key] = value;
   }
-}
-
-export function discoverProjectEnv(cwd = process.cwd()): string | undefined {
-  return firstExisting([
-    resolve(cwd, ".private/env/agent.env"),
-    resolve(cwd, ".env.agent"),
-    resolve(cwd, "../.private/env/agent.env"),
-    resolve(cwd, "../.env.agent"),
-    resolve(cwd, ".env"),
-    resolve(cwd, "../.env"),
-  ]);
-}
-
-/**
- * Canonical agent env file for a repository root. Prefers the private layout,
- * falls back to the legacy root-level `.env.agent`, and otherwise returns the
- * new canonical path so setup/connect can create it.
- */
-export function agentEnvPath(root: string): string {
-  return (
-    firstExisting([
-      resolve(root, ".private/env/agent.env"),
-      resolve(root, ".env.agent"),
-    ]) ?? resolve(root, ".private/env/agent.env")
-  );
 }
 
 function firstExisting(paths: string[]): string | undefined {
@@ -234,9 +272,13 @@ function isBannedRemoteHost(host: string): boolean {
 }
 
 export function loadConfig(
-  options: { allowDshPlugin?: boolean; allowDshTui?: boolean } = {},
+  options: {
+    allowDshPlugin?: boolean;
+    allowDshTui?: boolean;
+    allowIncomplete?: boolean;
+  } = {},
 ): AgentHostConfig {
-  loadProjectEnv(process.env.AGENT_ENV_FILE);
+  const configPath = loadProjectEnv(process.env.AGENT_ENV_FILE);
   const host = stableSlug(hostname());
   const owner = stableSlug(userInfo().username);
   const rawWorkerRuntime =
@@ -295,6 +337,7 @@ export function loadConfig(
         process.env.AGENT_HUB_TOKEN_KEYCHAIN_SERVICE?.trim(),
         process.env.AGENT_HUB_TOKEN_KEYCHAIN_ACCOUNT?.trim(),
         "Hub",
+        options.allowIncomplete,
       );
   const hubUsername = hubRuntimeDisabled
     ? undefined
@@ -325,6 +368,7 @@ export function loadConfig(
     hubUsername,
     hubPassword,
     hubNodeToken,
+    options.allowIncomplete,
   );
 
   const piProvider = process.env.PI_PROVIDER?.trim() || undefined;
@@ -350,6 +394,7 @@ export function loadConfig(
       process.env.AGENT_REMOTE_API_KEY_KEYCHAIN_SERVICE?.trim(),
       process.env.AGENT_REMOTE_API_KEY_KEYCHAIN_ACCOUNT?.trim(),
       "remote model",
+      options.allowIncomplete,
     );
   const dshConfigured = Boolean(
     process.env.AGENT_DSH_CONFIG?.trim() ||
@@ -362,7 +407,8 @@ export function loadConfig(
     (!remoteBaseUrl || !remoteModel) &&
     !dshConfigured &&
     !dshPluginConfigured &&
-    options.allowDshTui !== true
+    options.allowDshTui !== true &&
+    options.allowIncomplete !== true
   ) {
     throw new Error(
       "Configure PI_PROVIDER/PI_MODEL, a remote LLM_BASE_URL/LLM_MODEL, or the DeepSeek Harness runtime (AGENT_DSH_CONFIG/AGENT_DSH_RUNTIME_BIN)",
@@ -408,11 +454,25 @@ export function loadConfig(
   );
 
   const workspaceRoot = resolve(
-    process.env.AGENT_WORKSPACE_ROOT?.trim() || process.cwd(),
+    process.env.AGENT_WORKSPACE_ROOT?.trim() || homedir(),
   );
+  const credentialFile = process.env.AGENT_CREDENTIAL_FILE?.trim();
   return {
+    ...(configPath ? { configPath } : {}),
+    ...(credentialFile ? { credentialFile: resolve(credentialFile) } : {}),
+    ...(process.env.AGENT_CREDENTIAL_FILE_ERROR
+      ? { credentialFileError: process.env.AGENT_CREDENTIAL_FILE_ERROR }
+      : {}),
+    credentialBackend:
+      process.env.AGENT_CREDENTIAL_BACKEND?.trim() === "file" ||
+      credentialFile
+        ? "file"
+        : process.env.AGENT_CREDENTIAL_BACKEND?.trim() === "env"
+          ? "env"
+          : "keychain",
     ...hubConfig,
     ...(hubNodeToken ? { hubNodeToken } : {}),
+    hubReceiveDisabled: process.env.AGENT_HUB_RECEIVE_DISABLED === "1",
     principalId: required("AGENT_PRINCIPAL_ID", `human-${owner}`),
     principalDisplayName: required(
       "AGENT_PRINCIPAL_NAME",
@@ -499,9 +559,17 @@ function configuredCredential(
   legacyService: string | undefined,
   legacyAccount: string | undefined,
   label: string,
+  allowUnavailable = false,
 ): string | undefined {
-  if (service || account) return readSystemCredential(service, account, label);
-  return readLegacyMacKeychainCredential(legacyService, legacyAccount, label);
+  const backend = process.env.AGENT_CREDENTIAL_BACKEND?.trim();
+  if (backend === "env" || backend === "file") return undefined;
+  try {
+    if (service || account) return readSystemCredential(service, account, label);
+    return readLegacyMacKeychainCredential(legacyService, legacyAccount, label);
+  } catch (error) {
+    if (allowUnavailable) return undefined;
+    throw error;
+  }
 }
 
 function optionalConfiguredCredential(
@@ -530,6 +598,7 @@ export function resolveHubConfig(
   hubUsername?: string,
   hubPassword?: string,
   hubNodeToken?: string,
+  allowIncomplete = false,
 ): { hubEnabled: false } | {
   hubEnabled: true;
   hubUrl: string;
@@ -542,8 +611,16 @@ export function resolveHubConfig(
   const hasPassword = Boolean(hubUsername && hubPassword);
   const hasNodeToken = Boolean(hubNodeToken);
   const hasPartialUsername = Boolean(hubUsername && !hubPassword);
-  if ((hubUrl === undefined && (hasToken || hasPassword || hasNodeToken || hasPartialUsername)) ||
-      (hubUrl !== undefined && !hasToken && !hasPassword && !hasNodeToken && !hasPartialUsername)) {
+  if (
+    !allowIncomplete &&
+    ((hubUrl === undefined &&
+      (hasToken || hasPassword || hasNodeToken || hasPartialUsername)) ||
+      (hubUrl !== undefined &&
+        !hasToken &&
+        !hasPassword &&
+        !hasNodeToken &&
+        !hasPartialUsername))
+  ) {
     throw new Error(
       "AGENT_HUB_URL and Hub credentials must be configured together",
     );
