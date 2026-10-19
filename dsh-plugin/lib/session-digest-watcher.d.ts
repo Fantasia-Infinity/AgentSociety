@@ -44,12 +44,19 @@ export interface Config {
     contextEnabled?: boolean;
 }
 export declare const Config: Schema<Config>;
+interface SessionEventLike {
+    readonly type?: string;
+    readonly time?: number;
+    readonly data?: unknown;
+}
+type SessionEventList = ReadonlyArray<SessionEventLike | undefined>;
 interface SessionLike {
     readonly id: string;
-    readonly events: ReadonlyArray<{
-        time: number;
-    } | undefined>;
+    readonly snapshotEvents?: () => SessionEventList;
+    /** Compatibility face for older dsh releases and test doubles. */
+    readonly events?: SessionEventList;
 }
+export declare const DIGEST_LEASE_SECONDS = 90;
 export declare function apply(ctx: Context, config: Config): void;
 export declare function extractFields(session: SessionLike): SummaryFields;
 export declare function messageCountOf(events: ReadonlyArray<{
@@ -57,4 +64,20 @@ export declare function messageCountOf(events: ReadonlyArray<{
     time?: number;
 } | undefined>): number;
 export declare function digestEventIdForRound(principalId: string, sessionId: string, roundCount: number): string;
+export type DigestLeaseStatus = 'acquired' | 'busy' | 'unavailable';
+export interface DigestLeaseResult {
+    readonly status: DigestLeaseStatus;
+    readonly release?: () => void;
+}
+/**
+ * Use one lease file per round. A single shared file would incorrectly make
+ * an unrelated session wait behind another session's summarization call.
+ */
+export declare function digestLeasePath(dshHome: string, eventId: string): string;
+/**
+ * Acquire one best-effort cross-profile lease for a digest model call. A
+ * filesystem failure returns `unavailable`, which deliberately lets the
+ * caller continue with the existing event-id idempotency fallback.
+ */
+export declare function tryAcquireDigestLease(path: string, eventId: string, now?: number): DigestLeaseResult;
 export {};

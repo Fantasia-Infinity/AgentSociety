@@ -14,7 +14,7 @@ import { hostname, userInfo } from 'node:os';
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import { HubClient, } from './hub-client.js';
 import { buildSessionDigest } from './digest.js';
 import { answerQuestion } from './answer.js';
@@ -109,7 +109,7 @@ export async function apply(ctx, config) {
     const selfUpdateEnabled = config.selfUpdateEnabled ?? process.env.AGENT_SELF_UPDATE !== '0';
     const repositoryRoot = resolve(config.repositoryRoot ??
         process.env.AGENT_SOCIETY_REPOSITORY_ROOT ??
-        resolve(dirname(fileURLToPath(import.meta.url)), '..', '..'));
+        process.cwd());
     const identity = {
         principalId: config.principalId ?? `human-${owner}`,
         actorId: config.actorId ?? `agent-society-${host}`,
@@ -130,7 +130,7 @@ export async function apply(ctx, config) {
         directoryEnabled: config.directoryEnabled ?? process.env.AGENT_SOCIETY_DIRECTORY !== '0',
         questionsEnabled: config.questionsEnabled ?? process.env.AGENT_SOCIETY_QUESTIONS !== '0',
         provider: config.provider ?? 'deepseek-official',
-        model: config.model ?? process.env.DSH_MODEL ?? 'deepseek-v4-flash',
+        model: config.model ?? process.env.DSH_MODEL ?? 'deepseek-flash',
         maxTokens: config.maxTokens,
         statePath: resolve(process.env.DSH_HOME ?? `${process.env.HOME ?? '.'}/.dsh`, 'agent-society-worker-sessions.json'),
     });
@@ -222,7 +222,7 @@ class WorkerLoop {
                         dsh_web: {
                             enabled: true,
                             protocol_version: '1',
-                            profile: process.env.AGENT_SOCIETY_WEB_PROFILE ?? 'agent-society-web',
+                            profile: process.env.AGENT_SOCIETY_WEB_PROFILE ?? 'web',
                             capabilities: ['session.read'],
                         },
                     }
@@ -438,7 +438,7 @@ class WorkerLoop {
         if (!running || this.disposed)
             return;
         try {
-            const events = running.agent.session.events;
+            const events = sessionEvents(running.agent.session);
             const toolCalls = events.filter((event) => event?.type === 'tool/call');
             const lastToolEvent = toolCalls[toolCalls.length - 1];
             let lastTool;
@@ -597,7 +597,7 @@ class WorkerLoop {
                 this.ctx.logger.info(`agent-society-worker cancelled ${task.task_id} in ${active.sessionId}`);
                 return;
             }
-            const text = lastAssistantText(agent.session.events);
+            const text = lastAssistantText(sessionEvents(agent.session));
             const finalTitle = this.currentSessionTitle(agent.session) ?? running.title;
             const transcript = await this.attachTranscript(task, run.run_id, agent.session, finalTitle, toolPolicy);
             await this.hub.updateTask(task.task_id, {
@@ -725,7 +725,17 @@ class WorkerLoop {
     }
     async attachTranscript(task, runId, session, title, toolPolicy) {
         try {
-            const location = this.ctx.sessionPersistence.locate(session.header);
+            // dsh 0.1.5 exposes persistence through logical read handles and no
+            // longer promises a backend file path or raw-artifact reader. Keep the
+            // old physical-artifact path only when an older backend explicitly
+            // provides it; never reconstruct and upload a full transcript through a
+            // new, undocumented API.
+            const persistence = this.ctx.sessionPersistence;
+            if (typeof persistence.locate !== 'function') {
+                this.ctx.logger.debug(`agent-society-worker transcript artifact skipped for ${session.id}: dsh persistence has no raw artifact interface`);
+                return undefined;
+            }
+            const location = persistence.locate(session.header);
             if (!location || !existsSync(location.path))
                 return undefined;
             const name = `dsh-transcript-${runId}-${basename(location.path)}`;
@@ -735,8 +745,8 @@ class WorkerLoop {
                 ...(title === undefined ? {} : { dsh_session_title: title }),
             };
             let raw;
-            if (this.ctx.sessionPersistence.supportsRawArtifacts) {
-                raw = (await this.ctx.sessionPersistence.readRaw(session.id))?.content;
+            if (persistence.supportsRawArtifacts && typeof persistence.readRaw === 'function') {
+                raw = (await persistence.readRaw(session.id))?.content;
             }
             if (raw) {
                 const bytes = Buffer.byteLength(raw, 'utf8');
@@ -778,7 +788,7 @@ class WorkerLoop {
      * event_id makes a later retry a no-op on the Hub.
      */
     queueDigest(options) {
-        const events = options.session.events;
+        const events = sessionEvents(options.session);
         const toolCount = events.filter((event) => event?.type === 'tool/call').length;
         const messageCount = events.filter((event) => event?.type === 'user/message' || event?.type === 'assistant/message').length;
         let resultText = '';
@@ -1063,6 +1073,12 @@ function truncateTitleUtf8(value, maxBytes = 80) {
         bytes += size;
     }
     return result.trim();
+}
+/** Read the canonical event log while keeping old test doubles usable. */
+export function sessionEvents(session) {
+    return typeof session.snapshotEvents === 'function'
+        ? session.snapshotEvents()
+        : session.events ?? [];
 }
 export function lastAssistantText(events) {
     for (let index = events.length - 1; index >= 0; index -= 1) {

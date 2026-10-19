@@ -79,8 +79,11 @@ export async function answerQuestionWithSession(ctx, question, options) {
 }
 /** Last assistant text block of a session (shared by both answer paths). */
 function lastAssistantText(agent) {
-    for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
-        const event = agent.session.events[index];
+    const events = typeof agent.session.snapshotEvents === 'function'
+        ? agent.session.snapshotEvents()
+        : agent.session.events ?? [];
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+        const event = events[index];
         if (!event || event.type !== 'assistant/message')
             continue;
         const content = event.data?.message?.content;

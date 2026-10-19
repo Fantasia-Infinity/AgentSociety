@@ -33,4 +33,9 @@ export interface ToolGuardDefinition {
  * any collected tool that is not already present in the assembly.
  */
 export declare function createToolGuard(ctx: Context, definition: ToolGuardDefinition): void;
+export declare function defaultAppend(assembly: Assembly, found: readonly ToolSchema[]): Assembly | undefined;
+/** Recursively canonicalize JSON-schema object keys before they enter a
+ * request header. Arrays retain their declared order because `required` and
+ * enum arrays can be semantically ordered by an adapter. */
+export declare function stableToolSchemas(tools: readonly ToolSchema[]): ToolSchema[];
 export {};

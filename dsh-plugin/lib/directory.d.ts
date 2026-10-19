@@ -42,6 +42,33 @@ export interface DirectoryMirror {
 }
 export declare const MIRROR_MAX_INVOCATIONS = 10;
 export declare const MIRROR_MAX_CONSENSUS_ENTRIES = 24;
+/** Prompt-facing directory data. Volatile activity timestamps and invocation
+ * history deliberately stay out of this shape so an idle mirror refresh does
+ * not invalidate the shared-context message. */
+export interface SharedDirectoryRow {
+    readonly session_id: string;
+    readonly actor_id?: string;
+    readonly title?: string;
+    readonly workspace: string;
+    readonly status: string;
+    readonly session_mode: string;
+    readonly tool_policy: string;
+}
+/** Stable, semantic state used by the balanced shared-context renderer. */
+export interface SharedContextState {
+    readonly directorySeq: number;
+    readonly consensusSeq: number;
+    readonly consensusEntries: readonly ConsensusEntry[];
+    readonly directoryRows: readonly SharedDirectoryRow[];
+}
+export type SharedContextUpdateKind = 'initial' | 'delta' | 'snapshot';
+export interface SharedContextUpdate {
+    readonly kind: SharedContextUpdateKind;
+    readonly text: string;
+    readonly fingerprint: string;
+}
+export declare const BALANCED_INITIAL_BUDGET_CHARS = 1600;
+export declare const BALANCED_DELTA_BUDGET_CHARS = 800;
 export declare function mirrorPath(dshHome: string): string;
 export declare function loadMirror(path: string): DirectoryMirror;
 export declare function saveMirror(path: string, mirror: DirectoryMirror): void;
@@ -73,6 +100,21 @@ export declare function loadProjectionActivity(dshHome: string): Map<string, {
     title?: string;
     lastPromptAt?: number;
 }>;
+/**
+ * Project a mirror into the semantic fields that may enter a model request.
+ * The projection is intentionally independent of object insertion order and
+ * `last_active_at`; both are cache-hostile sources of otherwise meaningless
+ * prompt churn.
+ */
+export declare function normalizeSharedContextState(mirror: DirectoryMirror, currentSessionId?: string): SharedContextState;
+/** Stable semantic fingerprint; revisions are intentionally excluded. */
+export declare function sharedContextStateFingerprint(state: SharedContextState): string;
+/**
+ * Render one cache-friendly update. A removed row/entry produces a fresh
+ * compact snapshot because a delta cannot safely prove that no other stale
+ * state remains in a model's earlier transcript.
+ */
+export declare function renderSharedContextUpdate(previous: SharedContextState | undefined, current: SharedContextState): SharedContextUpdate | undefined;
 export declare const DIRECTORY_INDEX_SECTION = "agent-society:directory-index";
 export declare const CONSENSUS_SECTION = "agent-society:consensus";
 export declare const PROMPT_BUDGET_CHARS = 4000;

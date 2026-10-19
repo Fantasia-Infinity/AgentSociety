@@ -22,14 +22,16 @@
  *   granularity, without duplicating the LLM summarization).
  */
 import Schema from '@deepseek-ai/schemastery';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { homedir, hostname, userInfo } from 'node:os';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync, writeSync, } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { HubClient } from './hub-client.js';
 import { loadProjectionActivity } from './directory.js';
 import { buildSessionDigest } from './digest.js';
+import { DEFAULT_SUMMARY_MAX_TOKENS, SUMMARY_MAX_TOKENS_HARD_LIMIT, } from './summarizer.js';
 import { deterministicSummary, summarizeLiveSession, summarizeStandalone, } from './summarizer.js';
+import { recordAgentSocietyMetrics } from './context-metrics.js';
 export const name = 'agent-society-session-digest';
 export const inject = ['timer'];
 export const Config = Schema.object({
@@ -48,6 +50,7 @@ export const Config = Schema.object({
     contextEnabled: Schema.boolean().required(false),
 });
 const MAX_ATTEMPTS = 3;
+export const DIGEST_LEASE_SECONDS = 90;
 export function apply(ctx, config) {
     const hubUrl = config.hubUrl ?? process.env.AGENT_SOCIETY_HUB_URL?.trim();
     const tokenEnv = config.hubTokenEnv ?? 'AGENT_SOCIETY_HUB_TOKEN';
@@ -64,27 +67,23 @@ export function apply(ctx, config) {
     const nodeId = config.nodeId ?? host;
     const workspaceRoot = resolve(config.workspaceRoot ?? process.cwd());
     const provider = config.provider ?? process.env.AGENT_SOCIETY_PROVIDER ?? 'deepseek-official';
-    const model = config.model ?? process.env.DSH_MODEL ?? 'deepseek-v4-flash';
-    const maxTokens = Math.min(config.maxTokens ?? 2048, 2048);
+    const model = config.model ??
+        process.env.AGENT_SOCIETY_MODEL ??
+        process.env.AGENT_DSH_MODEL ??
+        process.env.DSH_MODEL ??
+        process.env.AGENT_REMOTE_MODEL ??
+        'deepseek-flash';
+    const maxTokens = Math.min(config.maxTokens ?? DEFAULT_SUMMARY_MAX_TOKENS, SUMMARY_MAX_TOKENS_HARD_LIMIT);
     const pollSeconds = config.pollSeconds ?? 15;
     const idleSeconds = config.idleSeconds ?? 60;
     const summarize = config.summarize ?? process.env.AGENT_SOCIETY_CONTEXT_SUMMARIZE !== '0';
     ctx.logger.warn(`agent-society-session-digest active (hub=${hubUrl}, summarize=${summarize}, poll=${pollSeconds}s, idle=${idleSeconds}s)`);
     const hub = new HubClient(hubUrl, hubToken);
-    const statePath = resolve(process.env.DSH_HOME?.trim() || resolve(homedir(), '.dsh'), 'agent-society-digest-state.json');
+    const dshHome = resolve(process.env.DSH_HOME?.trim() || resolve(homedir(), '.dsh'));
+    const statePath = resolve(dshHome, 'agent-society-digest-state.json');
     const state = loadState(statePath);
     const inFlight = new Set();
     const attempts = new Map();
-    // Capture the latest assembly so live-session summaries can reuse the
-    // exact system prompt (renderPrompt) and tool schemas the session's own
-    // requests used — the summarization request then shares the session's
-    // byte-identical prefix.
-    let assembly;
-    ctx.on('system-prompt/assemble', async (assembledInput, _context, next) => {
-        const assembled = await next();
-        assembly = assembled;
-        return assembled;
-    }, { prepend: true });
     const timer = ctx.setInterval(() => {
         void tick();
     }, pollSeconds * 1_000);
@@ -103,7 +102,7 @@ export function apply(ctx, config) {
                 if (!session || typeof session.id !== 'string')
                     continue;
                 liveIds.add(session.id);
-                await handleRound(session.id, session.events ?? [], { live: true });
+                await handleRound(session.id, sessionEvents(session), { live: true });
             }
         }
         // Path 2: persisted sessions not live here (the web may recreate agent
@@ -118,8 +117,9 @@ export function apply(ctx, config) {
             try {
                 const headers = await persistence.list();
                 const activity = loadProjectionActivity(process.env.DSH_HOME?.trim() || resolve(homedir(), '.dsh'));
-                for (const header of headers) {
-                    if (!header || typeof header.id !== 'string')
+                for (const snapshot of headers) {
+                    const header = persistenceHeader(snapshot);
+                    if (header === undefined)
                         continue;
                     if (liveIds.has(header.id))
                         continue;
@@ -129,8 +129,7 @@ export function apply(ctx, config) {
                     // Read the persisted tail once; it also feeds the summary below.
                     let events;
                     if (lastPromptAt === undefined) {
-                        const inspection = await persistence.inspect(header.id);
-                        events = inspection.events;
+                        events = (await readPersistedEvents(persistence, header.id));
                         const lastTime = lastEventTimeMs(events);
                         if (lastTime === undefined)
                             continue;
@@ -146,10 +145,10 @@ export function apply(ctx, config) {
                     if (attempts.get(header.id) ?? 0 >= MAX_ATTEMPTS)
                         continue;
                     inFlight.add(header.id);
+                    let lease;
                     try {
                         if (events === undefined) {
-                            const inspection = await persistence.inspect(header.id);
-                            events = inspection.events;
+                            events = await readPersistedEvents(persistence, header.id);
                         }
                         const count = messageCountOf(events);
                         // A session with no real conversation messages has nothing to
@@ -158,6 +157,18 @@ export function apply(ctx, config) {
                             state[header.id] = { count: 0, lastPromptAt, digestAt: now };
                             saveState(statePath, state);
                             continue;
+                        }
+                        const roundEventId = digestEventIdForRound(principalId, header.id, count);
+                        if (summarize) {
+                            lease = tryAcquireDigestLease(digestLeasePath(dshHome, roundEventId), roundEventId);
+                            if (lease.status === 'busy') {
+                                recordAgentSocietyMetrics(dshHome, {
+                                    digestDeduplicatedCall: true,
+                                });
+                                ctx.logger.debug(`agent-society-session-digest skipped duplicate round ${count} for ${header.id} (another profile owns the lease)`);
+                                continue;
+                            }
+                            recordAgentSocietyMetrics(dshHome, { digestModelCall: true });
                         }
                         const summary = await summarizeFor({ id: header.id, events }, count, { live: false, ...(info === undefined ? {} : { title: info.title }) });
                         const digest = buildSessionDigest({
@@ -174,7 +185,7 @@ export function apply(ctx, config) {
                             messageCount: summary.messageCount,
                             createdAt: now,
                         }, {
-                            eventId: digestEventIdForRound(principalId, header.id, count),
+                            eventId: roundEventId,
                             summary: summary.summary,
                         });
                         await hub.appendSharedEvent(digest);
@@ -188,6 +199,7 @@ export function apply(ctx, config) {
                         ctx.logger.warn(`agent-society-session-digest failed for ${header.id}: ${error instanceof Error ? error.message : String(error)}`);
                     }
                     finally {
+                        releaseDigestLease(lease);
                         inFlight.delete(header.id);
                     }
                 }
@@ -215,7 +227,20 @@ export function apply(ctx, config) {
         if (attempts.get(sessionId) ?? 0 >= MAX_ATTEMPTS)
             return;
         inFlight.add(sessionId);
+        let lease;
         try {
+            const roundEventId = digestEventIdForRound(principalId, sessionId, count);
+            if (summarize) {
+                lease = tryAcquireDigestLease(digestLeasePath(dshHome, roundEventId), roundEventId);
+                if (lease.status === 'busy') {
+                    recordAgentSocietyMetrics(dshHome, {
+                        digestDeduplicatedCall: true,
+                    });
+                    ctx.logger.debug(`agent-society-session-digest skipped duplicate round ${count} for ${sessionId} (another profile owns the lease)`);
+                    return;
+                }
+                recordAgentSocietyMetrics(dshHome, { digestModelCall: true });
+            }
             const summary = await summarizeFor({ id: sessionId, events }, count, { live: options.live });
             const digest = buildSessionDigest({
                 principalId,
@@ -231,7 +256,7 @@ export function apply(ctx, config) {
                 messageCount: summary.messageCount,
                 createdAt: now,
             }, {
-                eventId: digestEventIdForRound(principalId, sessionId, count),
+                eventId: roundEventId,
                 summary: summary.summary,
             });
             await hub.appendSharedEvent(digest);
@@ -245,6 +270,7 @@ export function apply(ctx, config) {
             ctx.logger.warn(`agent-society-session-digest failed for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
         }
         finally {
+            releaseDigestLease(lease);
             inFlight.delete(sessionId);
         }
     }
@@ -257,13 +283,12 @@ export function apply(ctx, config) {
         try {
             const live = ctx.get('sessions');
             const liveSession = options.live ? live?.get(session.id) : undefined;
-            if (liveSession !== undefined && assembly !== undefined) {
+            const requestHeader = liveSession?.requestHeader();
+            if (liveSession !== undefined && requestHeader !== undefined) {
                 const text = await summarizeLiveSession({
                     ctx,
                     session: liveSession,
-                    assembly,
-                    provider,
-                    model,
+                    requestHeader,
                     maxTokens,
                 });
                 return { ...fields, summary: text };
@@ -287,6 +312,39 @@ export function apply(ctx, config) {
         return service?.get(session)?.title;
     }
 }
+function sessionEvents(session) {
+    return typeof session.snapshotEvents === 'function'
+        ? session.snapshotEvents()
+        : session.events ?? [];
+}
+function persistenceHeader(snapshot) {
+    if (snapshot.header !== undefined && typeof snapshot.header.id === 'string') {
+        return snapshot.header;
+    }
+    if (typeof snapshot.id === 'string') {
+        return {
+            id: snapshot.id,
+            ...(snapshot.createdAt === undefined ? {} : { createdAt: snapshot.createdAt }),
+            ...(snapshot.cwd === undefined ? {} : { cwd: snapshot.cwd }),
+        };
+    }
+    return undefined;
+}
+async function readPersistedEvents(persistence, sessionId) {
+    if (typeof persistence.open === 'function') {
+        const handle = await persistence.open(sessionId, 'read');
+        try {
+            return (await handle.read()).events;
+        }
+        finally {
+            await handle.close();
+        }
+    }
+    if (typeof persistence.inspect === 'function') {
+        return (await persistence.inspect(sessionId)).events;
+    }
+    throw new Error('dsh session persistence does not expose a read API');
+}
 function messageTextOf(event) {
     const data = event.data;
     const content = data?.message?.content ?? data?.content;
@@ -309,7 +367,7 @@ function lastEventTimeMs(events) {
     return undefined;
 }
 export function extractFields(session) {
-    const events = session.events ?? [];
+    const events = sessionEvents(session);
     let objective = '';
     let resultText = '';
     let toolCount = 0;
@@ -356,6 +414,84 @@ export function digestEventIdForRound(principalId, sessionId, roundCount) {
     return createHash('sha256')
         .update([principalId, 'consensus', 'digest', sessionId, String(roundCount)].join('\u0000'))
         .digest('hex');
+}
+/**
+ * Use one lease file per round. A single shared file would incorrectly make
+ * an unrelated session wait behind another session's summarization call.
+ */
+export function digestLeasePath(dshHome, eventId) {
+    const key = createHash('sha256').update(eventId).digest('hex');
+    return resolve(dshHome, 'agent-society-digest-leases', `${key}.lease`);
+}
+function releaseDigestLease(lease) {
+    lease?.release?.();
+}
+/**
+ * Acquire one best-effort cross-profile lease for a digest model call. A
+ * filesystem failure returns `unavailable`, which deliberately lets the
+ * caller continue with the existing event-id idempotency fallback.
+ */
+export function tryAcquireDigestLease(path, eventId, now = Date.now()) {
+    try {
+        mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    }
+    catch {
+        return { status: 'unavailable' };
+    }
+    const owner = randomUUID();
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        let descriptor;
+        try {
+            descriptor = openSync(path, 'wx', 0o600);
+            writeSync(descriptor, JSON.stringify({ owner, eventId, createdAt: now }) + '\n');
+            closeSync(descriptor);
+            descriptor = undefined;
+            let released = false;
+            return {
+                status: 'acquired',
+                release: () => {
+                    if (released)
+                        return;
+                    released = true;
+                    try {
+                        const current = JSON.parse(readFileSync(path, 'utf8'));
+                        if (current.owner === owner)
+                            unlinkSync(path);
+                    }
+                    catch {
+                        // The lease may already have expired or been removed.
+                    }
+                },
+            };
+        }
+        catch (error) {
+            if (descriptor !== undefined) {
+                try {
+                    closeSync(descriptor);
+                }
+                catch {
+                    // Preserve the original acquisition failure.
+                }
+            }
+            const code = error.code;
+            if (code !== 'EEXIST')
+                return { status: 'unavailable' };
+            try {
+                const current = JSON.parse(readFileSync(path, 'utf8'));
+                if (typeof current.createdAt === 'number' &&
+                    now - current.createdAt < DIGEST_LEASE_SECONDS * 1_000) {
+                    return { status: 'busy' };
+                }
+                unlinkSync(path);
+            }
+            catch (readError) {
+                if (readError.code === 'ENOENT')
+                    continue;
+                return { status: 'unavailable' };
+            }
+        }
+    }
+    return { status: 'unavailable' };
 }
 function loadState(path) {
     try {

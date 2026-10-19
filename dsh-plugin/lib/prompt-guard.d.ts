@@ -1,22 +1,27 @@
 /**
  * `agent-society-directory-index`: bounded shared-context injection guard.
  *
- * Runs after the ordinary system-prompt assembly (prepend listener) and
- * appends two bounded sections — the consensus one-liners and the session/
- * agent directory index — read from the local mirror maintained by the
- * directory sync plugin. The combined text stays under 4KB; on any failure
- * the original assembly is returned unchanged (same fail-safe philosophy as
- * the tool guards).
+ * `balanced` (the default) adds one small initial snapshot and then only
+ * semantic deltas as durable user messages through the public `agent/pre-step`
+ * waterfall. `legacy` keeps the old runtime-context snapshot for rollback;
+ * `off` keeps only the static workflow guide. No mode rewrites the dsh
+ * surface or starts a new request series.
  *
- * KV-cache contract: the injection only APPENDS to the assembled sections
- * (the core system prefix is never touched), and the rendered text changes
- * only on semantic events — a new consensus digest or a session status/title
- * change. Idle churn (mirror refreshes, last_active_at) must not alter the
- * bytes; directory rows therefore sort stably by session_id. The section is
- * model-facing only: it is never written into the session log, so no UI
- * surface renders it as a user-visible message.
+ * KV-cache contract: the system prompt stays static and balanced updates are
+ * append-only messages. Idle mirror refreshes and last_active_at changes do
+ * not produce a message; full objective/result data remains available through
+ * Hub MCP on demand.
  */
 import type { Context } from '@deepseek-ai/cordis';
+declare module '@deepseek-ai/dsh-llm' {
+    interface MessageSourceMap {
+        'agent-society-directory-index': {
+            kind: 'agent-society-directory-index';
+        };
+    }
+}
 export declare const name = "agent-society-directory-index";
 export declare const inject: string[];
+export type SharedContextMode = 'balanced' | 'legacy' | 'off';
+export declare function sharedContextMode(env?: NodeJS.ProcessEnv): SharedContextMode;
 export declare function apply(ctx: Context): void;

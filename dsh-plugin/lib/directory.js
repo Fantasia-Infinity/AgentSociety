@@ -11,6 +11,10 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 export const MIRROR_MAX_INVOCATIONS = 10;
 export const MIRROR_MAX_CONSENSUS_ENTRIES = 24;
+export const BALANCED_INITIAL_BUDGET_CHARS = 1_600;
+export const BALANCED_DELTA_BUDGET_CHARS = 800;
+const BALANCED_CONSENSUS_LINE_CHARS = 220;
+const BALANCED_DIRECTORY_LINE_CHARS = 180;
 export function mirrorPath(dshHome) {
     return join(dshHome, 'agent-society-directory.json');
 }
@@ -149,6 +153,218 @@ export function loadProjectionActivity(dshHome) {
     }
     return activity;
 }
+/**
+ * Project a mirror into the semantic fields that may enter a model request.
+ * The projection is intentionally independent of object insertion order and
+ * `last_active_at`; both are cache-hostile sources of otherwise meaningless
+ * prompt churn.
+ */
+export function normalizeSharedContextState(mirror, currentSessionId) {
+    const latestBySession = new Map();
+    const unscoped = [];
+    for (const entry of mirror.consensus.entries) {
+        if (entry === null ||
+            typeof entry !== 'object' ||
+            typeof entry.summary !== 'string' ||
+            typeof entry.kind !== 'string')
+            continue;
+        if (entry.session_id) {
+            if (entry.session_id === currentSessionId)
+                continue;
+            const previous = latestBySession.get(entry.session_id);
+            if (previous === undefined || consensusEntryCompare(entry, previous) < 0) {
+                latestBySession.set(entry.session_id, entry);
+            }
+        }
+        else {
+            unscoped.push(entry);
+        }
+    }
+    const consensusEntries = [...latestBySession.values(), ...unscoped]
+        .sort(consensusEntryCompare)
+        .slice(0, MIRROR_MAX_CONSENSUS_ENTRIES);
+    const directoryRows = Object.values(mirror.rows)
+        .filter((row) => row.session_id !== currentSessionId)
+        .map(toSharedDirectoryRow)
+        .sort((a, b) => stringCompare(a.session_id, b.session_id));
+    return {
+        directorySeq: finiteRevision(mirror.seq),
+        consensusSeq: finiteRevision(mirror.consensus.seq),
+        consensusEntries,
+        directoryRows,
+    };
+}
+/** Stable semantic fingerprint; revisions are intentionally excluded. */
+export function sharedContextStateFingerprint(state) {
+    return JSON.stringify({
+        consensusEntries: state.consensusEntries.map((entry) => ({
+            seq: entry.seq,
+            kind: entry.kind,
+            ...(entry.session_id ? { session_id: entry.session_id } : {}),
+            summary: entry.summary,
+        })),
+        directoryRows: state.directoryRows,
+    });
+}
+/**
+ * Render one cache-friendly update. A removed row/entry produces a fresh
+ * compact snapshot because a delta cannot safely prove that no other stale
+ * state remains in a model's earlier transcript.
+ */
+export function renderSharedContextUpdate(previous, current) {
+    const fingerprint = sharedContextStateFingerprint(current);
+    if (previous === undefined) {
+        if (!hasSharedContext(current))
+            return undefined;
+        return {
+            kind: 'initial',
+            text: renderCompactSnapshot(current, 'initial'),
+            fingerprint,
+        };
+    }
+    if (sharedContextStateFingerprint(previous) === fingerprint)
+        return undefined;
+    const previousConsensus = new Map(previous.consensusEntries.map((entry) => [consensusEntryKey(entry), entry]));
+    const currentConsensus = new Map(current.consensusEntries.map((entry) => [consensusEntryKey(entry), entry]));
+    const previousDirectory = new Map(previous.directoryRows.map((row) => [row.session_id, row]));
+    const currentDirectory = new Map(current.directoryRows.map((row) => [row.session_id, row]));
+    const removed = [...previousConsensus.keys()].some((key) => !currentConsensus.has(key)) ||
+        [...previousDirectory.keys()].some((key) => !currentDirectory.has(key));
+    if (removed) {
+        return {
+            kind: 'snapshot',
+            text: renderCompactSnapshot(current, 'snapshot'),
+            fingerprint,
+        };
+    }
+    const changes = [];
+    for (const entry of current.consensusEntries) {
+        const old = previousConsensus.get(consensusEntryKey(entry));
+        if (old === undefined) {
+            changes.push(`+ 共识 ${renderConsensusEntry(entry)}`);
+        }
+        else if (!sameConsensusEntry(old, entry)) {
+            changes.push(`~ 共识 ${renderConsensusEntry(entry)}`);
+        }
+    }
+    for (const row of current.directoryRows) {
+        const old = previousDirectory.get(row.session_id);
+        if (old === undefined) {
+            changes.push(`+ 目录 ${renderDirectoryRow(row)}`);
+        }
+        else if (!sameDirectoryRow(old, row)) {
+            changes.push(`~ 目录 ${renderDirectoryRow(row)}`);
+        }
+    }
+    if (changes.length === 0)
+        return undefined;
+    const text = renderDelta(current, changes);
+    if (text.length > BALANCED_DELTA_BUDGET_CHARS) {
+        return {
+            kind: 'snapshot',
+            text: renderCompactSnapshot(current, 'snapshot'),
+            fingerprint,
+        };
+    }
+    return { kind: 'delta', text, fingerprint };
+}
+function finiteRevision(value) {
+    return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+function stringCompare(a, b) {
+    return a < b ? -1 : a > b ? 1 : 0;
+}
+/** Oldest-to-newest comparison for latest-per-session selection, then newest
+ * first for rendering. Returning a negative value means `a` is preferred. */
+function consensusEntryCompare(a, b) {
+    if (a.seq !== b.seq)
+        return b.seq - a.seq;
+    return (stringCompare(a.session_id ?? '', b.session_id ?? '') ||
+        stringCompare(a.kind, b.kind) ||
+        stringCompare(a.summary, b.summary));
+}
+function consensusEntryKey(entry) {
+    return entry.session_id
+        ? `session:${entry.session_id}`
+        : `event:${entry.seq}:${entry.kind}:${entry.summary}`;
+}
+function sameConsensusEntry(a, b) {
+    return (a.seq === b.seq &&
+        a.kind === b.kind &&
+        a.session_id === b.session_id &&
+        a.summary === b.summary);
+}
+function toSharedDirectoryRow(row) {
+    const title = typeof row.title === 'string' ? row.title.trim() : '';
+    return {
+        session_id: row.session_id,
+        ...(row.actor_id ? { actor_id: row.actor_id } : {}),
+        ...(title ? { title } : {}),
+        workspace: row.workspace || 'unknown workspace',
+        status: row.status || 'unknown',
+        session_mode: row.session_mode || 'unknown',
+        tool_policy: row.tool_policy || 'unknown',
+    };
+}
+function sameDirectoryRow(a, b) {
+    return (a.session_id === b.session_id &&
+        a.actor_id === b.actor_id &&
+        a.title === b.title &&
+        a.workspace === b.workspace &&
+        a.status === b.status &&
+        a.session_mode === b.session_mode &&
+        a.tool_policy === b.tool_policy);
+}
+function hasSharedContext(state) {
+    return state.consensusEntries.length > 0 || state.directoryRows.length > 0;
+}
+function clipLine(value, max) {
+    const compact = value.replace(/[\r\n]+/gu, ' ').trim();
+    return compact.length <= max ? compact : `${compact.slice(0, max - 1)}…`;
+}
+function renderConsensusEntry(entry) {
+    const where = entry.session_id ? ` ${entry.session_id}` : '';
+    return clipLine(`[${entry.kind}]${where}: ${entry.summary}`, BALANCED_CONSENSUS_LINE_CHARS);
+}
+function renderDirectoryRow(row) {
+    const label = row.title || row.workspace || 'unknown workspace';
+    return clipLine(`${row.session_id} | ${row.actor_id ?? '?'} | ${label} | ${row.status}`, BALANCED_DIRECTORY_LINE_CHARS);
+}
+function renderDelta(state, changes) {
+    return [
+        'AgentSociety 共享上下文增量（仅包含本轮变化）',
+        `revision: directory=${state.directorySeq}; consensus=${state.consensusSeq}`,
+        '未列出的条目保持不变；需要权威完整内容时使用 Hub MCP。',
+        ...changes.map((change) => clipLine(change, BALANCED_DIRECTORY_LINE_CHARS)),
+    ].join('\n');
+}
+function renderCompactSnapshot(state, kind) {
+    const consensus = state.consensusEntries.map((entry) => `- ${renderConsensusEntry(entry)}`);
+    const directory = state.directoryRows.map((row) => `- ${renderDirectoryRow(row)}`);
+    const header = [
+        kind === 'initial'
+            ? 'AgentSociety 共享上下文初始快照（有界提示）'
+            : 'AgentSociety 共享上下文紧凑快照（状态删除或无法增量化）',
+        `revision: directory=${state.directorySeq}; consensus=${state.consensusSeq}`,
+        '完整 objective/result 和目录详情请使用 Hub MCP；当前 session 已排除。',
+    ];
+    const build = (left, right) => [
+        ...header,
+        ...(left.length > 0 ? ['共识（每 session 最新一条）：', ...left] : []),
+        ...(right.length > 0 ? ['目录（按 session_id 排序）：', ...right] : []),
+        ...(left.length === 0 && right.length === 0 ? ['当前没有可用共享条目。'] : []),
+    ].join('\n');
+    let text = build(consensus, directory);
+    while (text.length > BALANCED_INITIAL_BUDGET_CHARS && directory.length > 0) {
+        directory.pop();
+        text = build(consensus, directory);
+    }
+    while (text.length > BALANCED_INITIAL_BUDGET_CHARS && consensus.length > 0) {
+        consensus.pop();
+        text = build(consensus, directory);
+    }
+    return text.slice(0, BALANCED_INITIAL_BUDGET_CHARS);
+}
 // ── Prompt injection (bounded) ────────────────────────────────────────────
 export const DIRECTORY_INDEX_SECTION = 'agent-society:directory-index';
 export const CONSENSUS_SECTION = 'agent-society:consensus';
@@ -188,8 +404,8 @@ export function consensusPromptLines(mirror, currentSessionId) {
  * always knows how to reach shared memory, even on turns where the
  * change-detected snapshot is not re-injected. */
 export const WORKFLOW_GUIDE = '## AgentSociety 共享记忆\n' +
-    '共识与目录快照仅在内容变化时注入（最近一次注入见会话历史）；' +
-    '需要当前或完整内容时用 hub_context_read 读取；' +
+    '默认只追加一次紧凑初始快照，之后只追加结构化变化（最近一次见会话历史）；' +
+    '需要当前或完整内容时用 hub_context_read / hub_directory_list 读取；' +
     '涉及某个会话时 hub_directory_get 下钻（depth 2 看其 digest）判断相关性后，' +
     'hub_ask 携带 target_session_id 在该会话上下文中发问（回答写回该会话）；' +
     '得出可复用结论时 hub_context_append 写回。';

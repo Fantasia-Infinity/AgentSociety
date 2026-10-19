@@ -8,8 +8,9 @@
  * parent restart the dsh worker.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, statSync, } from 'node:fs';
+import { accessSync, constants, existsSync, readFileSync, readdirSync, realpathSync, statSync, } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { homedir } from 'node:os';
 export const SELF_UPDATE_ACTION = 'self_update';
 export const SELF_UPDATE_EXIT_CODE = 75;
 const SELF_UPDATE_BRANCH_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
@@ -28,8 +29,14 @@ export async function runPluginSelfUpdate(task, options) {
     const repositoryRoot = options.repositoryRoot;
     const pluginDir = resolve(repositoryRoot, 'dsh-plugin');
     const agentHostDir = resolve(repositoryRoot, 'agent-host');
-    if (!existsSync(resolve(repositoryRoot, '.git')) && !existsSync(resolve(repositoryRoot, 'agent-host', 'package.json'))) {
-        throw new Error(`Self-update repository root not found: ${repositoryRoot}`);
+    const sourceCheckout = existsSync(resolve(repositoryRoot, '.git')) &&
+        existsSync(resolve(repositoryRoot, 'agent-host', 'package.json'));
+    const sourceMode = process.env.AGENT_RUNTIME_MODE?.trim() === 'source';
+    if (!sourceMode) {
+        return runPublishedSelfUpdate(options.nodePath, record);
+    }
+    if (!sourceCheckout) {
+        throw new Error(`Source self-update requested, but no AgentSociety checkout was found at ${repositoryRoot}`);
     }
     const branch = selfUpdateBranch(task);
     const npm = resolveNpm(options.nodePath);
@@ -62,6 +69,97 @@ export async function runPluginSelfUpdate(task, options) {
         before,
         after,
     };
+}
+async function runPublishedSelfUpdate(nodePath, record) {
+    const npm = resolveNpm(nodePath);
+    const hostSpec = process.env.AGENT_HOST_PACKAGE_SPEC?.trim() ||
+        process.env.AGENT_HOST_PACKAGE?.trim() ||
+        "@agent-society/agent-host@latest";
+    const pluginSpec = process.env.AGENT_DSH_PLUGIN_PACKAGE_SPEC?.trim() ||
+        '@agent-society/dsh-agent-society@latest';
+    const updateHost = shouldUpdateHost();
+    if (updateHost) {
+        await runNpm(npm, process.cwd(), ['install', '--global', hostSpec], 'Update AgentSociety Host', record);
+    }
+    const dsh = resolveDshInvocation(nodePath);
+    const profileSteps = [];
+    const profilesRoot = resolve(process.env.DSH_HOME || resolve(homedir(), '.dsh'), 'profiles');
+    const profiles = existsSync(profilesRoot) ? readdirSync(profilesRoot).filter(profile => {
+        const file = resolve(profilesRoot, profile, 'package.json');
+        return existsSync(file) && Object.hasOwn(JSON.parse(readFileSync(file, 'utf8')).dependencies || {}, '@agent-society/dsh-agent-society');
+    }) : [];
+    for (const profile of profiles) {
+        await run(process.cwd(), dsh.command, [...dsh.args, 'plugin', '--profile', profile, 'update', pluginSpec], `Update dsh ${profile} profile`, record);
+        profileSteps.push(`${profile}: updated`);
+    }
+    return {
+        ok: true,
+        updated: true,
+        needsRestart: true,
+        steps: [
+            'AgentSociety plugins updated; dsh remains independently managed',
+            ...(updateHost ? ['Published agent-host package updated'] : []),
+            ...profileSteps,
+        ],
+    };
+}
+function shouldUpdateHost() {
+    if (process.env.AGENT_UPDATE_HOST?.trim() === '0')
+        return false;
+    if (process.env.AGENT_UPDATE_HOST?.trim() === '1')
+        return true;
+    const command = process.platform === 'win32' ? 'where.exe' : 'which';
+    const probe = spawnSync(command, ['agent'], { encoding: 'utf8' });
+    return probe.status === 0 && Boolean(probe.stdout?.trim());
+}
+function resolveDshInvocation(nodePath) {
+    const configured = process.env.AGENT_DSH_COMMAND?.trim() || 'dsh';
+    const parts = configured.startsWith('[')
+        ? parseCommandArray(configured)
+        : [configured];
+    const first = parts[0];
+    if (!first)
+        throw new Error('AGENT_DSH_COMMAND is empty');
+    const found = first.includes('/') || first.includes('\\')
+        ? first
+        : process.platform === 'win32'
+            ? first
+            : (spawnSync('which', [first], { encoding: 'utf8' }).stdout || '').trim() || first;
+    if (process.platform === 'win32') {
+        return { command: found, args: parts.slice(1) };
+    }
+    try {
+        accessSync(found, constants.X_OK);
+        return { command: found, args: parts.slice(1) };
+    }
+    catch {
+        try {
+            const target = realpathSync(found);
+            if (target.endsWith('.js')) {
+                return {
+                    command: nodePath,
+                    args: [target, ...parts.slice(1)],
+                };
+            }
+        }
+        catch {
+            // Preserve the original command so the child error remains actionable.
+        }
+        return { command: found, args: parts.slice(1) };
+    }
+}
+function parseCommandArray(value) {
+    try {
+        const parsed = JSON.parse(value);
+        if (Array.isArray(parsed) &&
+            parsed.every((item) => typeof item === 'string')) {
+            return parsed;
+        }
+    }
+    catch {
+        // Fall back to the single-command form below.
+    }
+    return [value];
 }
 function selfUpdateBranch(task) {
     const requested = task.input?.branch;

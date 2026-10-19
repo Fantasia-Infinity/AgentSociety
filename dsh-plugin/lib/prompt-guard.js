@@ -1,29 +1,34 @@
 /**
  * `agent-society-directory-index`: bounded shared-context injection guard.
  *
- * Runs after the ordinary system-prompt assembly (prepend listener) and
- * appends two bounded sections — the consensus one-liners and the session/
- * agent directory index — read from the local mirror maintained by the
- * directory sync plugin. The combined text stays under 4KB; on any failure
- * the original assembly is returned unchanged (same fail-safe philosophy as
- * the tool guards).
+ * `balanced` (the default) adds one small initial snapshot and then only
+ * semantic deltas as durable user messages through the public `agent/pre-step`
+ * waterfall. `legacy` keeps the old runtime-context snapshot for rollback;
+ * `off` keeps only the static workflow guide. No mode rewrites the dsh
+ * surface or starts a new request series.
  *
- * KV-cache contract: the injection only APPENDS to the assembled sections
- * (the core system prefix is never touched), and the rendered text changes
- * only on semantic events — a new consensus digest or a session status/title
- * change. Idle churn (mirror refreshes, last_active_at) must not alter the
- * bytes; directory rows therefore sort stably by session_id. The section is
- * model-facing only: it is never written into the session log, so no UI
- * surface renders it as a user-visible message.
+ * KV-cache contract: the system prompt stays static and balanced updates are
+ * append-only messages. Idle mirror refreshes and last_active_at changes do
+ * not produce a message; full objective/result data remains available through
+ * Hub MCP on demand.
  */
+import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { buildSharedContextSections, loadMirror, mirrorPath, WORKFLOW_GUIDE, } from './directory.js';
+import { buildSharedContextSections, loadMirror, mirrorPath, normalizeSharedContextState, renderSharedContextUpdate, WORKFLOW_GUIDE, } from './directory.js';
+import { recordAgentSocietyMetrics } from './context-metrics.js';
 export const name = 'agent-society-directory-index';
 export const inject = [];
+export function sharedContextMode(env = process.env) {
+    if (env.AGENT_SOCIETY_DIRECTORY === '0')
+        return 'off';
+    const value = env.AGENT_SOCIETY_CONTEXT_MODE?.trim().toLowerCase();
+    return value === 'legacy' || value === 'off' ? value : 'balanced';
+}
 export function apply(ctx) {
     const dshHome = resolve(process.env.DSH_HOME?.trim() || join(homedir(), '.dsh'));
     const path = mirrorPath(dshHome);
+    const mode = sharedContextMode();
     // The workflow guide is static and lives in a system section: the model
     // always knows how to reach shared memory, even on turns where the
     // change-detected data snapshot is not re-injected.
@@ -35,10 +40,65 @@ export function apply(ctx) {
             text: WORKFLOW_GUIDE,
         });
     }
-    // Change detection: the snapshot is injected only when its bytes changed
-    // since the last injection for this session (or on first sight). Idle
-    // turns keep the request lean instead of appending an identical runtime
-    // context on every step.
+    if (mode === 'balanced') {
+        // State is process-local because the durable session already owns the
+        // accepted messages. A new process seeing a session starts with one
+        // bounded snapshot, then follows semantic changes in that process.
+        const lastState = new Map();
+        ctx.on('agent/pre-step', async (payload, next) => {
+            const decision = await next();
+            if (decision.kind !== 'enter')
+                return decision;
+            try {
+                const sessionId = String(payload.agent.session.id);
+                const current = normalizeSharedContextState(loadMirror(path), sessionId);
+                const previous = lastState.get(sessionId);
+                const update = renderSharedContextUpdate(previous, current);
+                // Record an already-seen semantic state even when no message is
+                // needed, so sequence-only mirror refreshes never become future
+                // deltas. An empty first sight is not recorded: the first real data
+                // that arrives should be introduced as an initial snapshot.
+                if (previous !== undefined || update !== undefined) {
+                    lastState.set(sessionId, current);
+                }
+                if (lastState.size > 1_024) {
+                    const first = lastState.keys().next().value;
+                    if (typeof first === 'string')
+                        lastState.delete(first);
+                }
+                if (update === undefined)
+                    return decision;
+                recordAgentSocietyMetrics(dshHome, {
+                    context: {
+                        kind: update.kind,
+                        bytes: Buffer.byteLength(update.text, 'utf8'),
+                        sessionId,
+                    },
+                });
+                return {
+                    ...decision,
+                    messages: [
+                        ...decision.messages,
+                        createUserMessage({
+                            content: [{ type: 'text', text: update.text }],
+                            source: {
+                                kind: 'agent-society-directory-index',
+                            },
+                        }),
+                    ],
+                };
+            }
+            catch (error) {
+                ctx.logger.warn(`agent-society-directory-index balanced update failed; keeping the proposed step: ${error instanceof Error ? error.message : String(error)}`);
+                return decision;
+            }
+        });
+        return;
+    }
+    if (mode === 'off')
+        return;
+    // Legacy mode: retain the former bounded runtime-context projection for
+    // rollback and A/B comparison. It is intentionally not used by balanced.
     const lastInjected = new Map();
     ctx.on('system-prompt/assemble', async (assembly, _context, next) => {
         const assembled = await next();

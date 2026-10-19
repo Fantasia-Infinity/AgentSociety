@@ -40,4 +40,10 @@ export interface Config {
 export declare const Config: Schema<Config>;
 export declare const TASK_PROMPT: (task: HubTask, runId: string, cwd: string, toolPolicy: ToolPolicy) => string;
 export declare function apply(ctx: Context, config: Config): Promise<void>;
+/** Read the canonical event log while keeping old test doubles usable. */
+export declare function sessionEvents(session: {
+    snapshotEvents?: () => readonly SessionEvent[];
+    /** Compatibility face for older dsh releases and test doubles. */
+    events?: readonly SessionEvent[];
+}): readonly SessionEvent[];
 export declare function lastAssistantText(events: readonly SessionEvent[]): string;

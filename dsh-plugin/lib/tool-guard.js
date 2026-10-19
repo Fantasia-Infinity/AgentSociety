@@ -29,7 +29,7 @@ export function createToolGuard(ctx, definition) {
                 ? []
                 : await definition.collect(tools, scope);
             const after = definition.after ?? defaultAppend;
-            const result = after(current, found);
+            const result = after(current, stableToolSchemas(found));
             if (result === undefined)
                 return assembled;
             return result;
@@ -40,16 +40,37 @@ export function createToolGuard(ctx, definition) {
         }
     }, { prepend: true });
 }
-function defaultAppend(assembly, found) {
+export function defaultAppend(assembly, found) {
     if (found.length === 0)
         return undefined;
     const existing = new Set(assembly.tools.map((tool) => tool.name));
-    const missing = found.filter((tool) => !existing.has(tool.name));
+    const missing = [...found]
+        .filter((tool) => !existing.has(tool.name))
+        .sort((a, b) => stringCompare(a.name, b.name));
     if (missing.length === 0)
         return undefined;
     return {
         ...assembly,
         tools: [...assembly.tools, ...missing],
     };
+}
+/** Recursively canonicalize JSON-schema object keys before they enter a
+ * request header. Arrays retain their declared order because `required` and
+ * enum arrays can be semantically ordered by an adapter. */
+export function stableToolSchemas(tools) {
+    return tools.map((tool) => stableValue(tool));
+}
+function stableValue(value) {
+    if (Array.isArray(value))
+        return value.map(stableValue);
+    if (value !== null && typeof value === 'object') {
+        return Object.fromEntries(Object.entries(value)
+            .sort(([a], [b]) => stringCompare(a, b))
+            .map(([key, child]) => [key, stableValue(child)]));
+    }
+    return value;
+}
+function stringCompare(a, b) {
+    return a < b ? -1 : a > b ? 1 : 0;
 }
 //# sourceMappingURL=tool-guard.js.map

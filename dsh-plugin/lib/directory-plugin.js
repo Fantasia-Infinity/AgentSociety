@@ -26,6 +26,19 @@ export const Config = Schema.object({
     toolPolicy: Schema.string().required(false),
     pullSeconds: Schema.number().min(2).default(10),
 });
+function persistenceHeader(snapshot) {
+    if (snapshot.header !== undefined && typeof snapshot.header.id === 'string') {
+        return snapshot.header;
+    }
+    if (typeof snapshot.id === 'string') {
+        return {
+            id: snapshot.id,
+            ...(snapshot.createdAt === undefined ? {} : { createdAt: snapshot.createdAt }),
+            ...(snapshot.cwd === undefined ? {} : { cwd: snapshot.cwd }),
+        };
+    }
+    return undefined;
+}
 export function apply(ctx, config) {
     const hubUrl = config.hubUrl ?? process.env.AGENT_SOCIETY_HUB_URL?.trim();
     const tokenEnv = config.hubTokenEnv ?? 'AGENT_SOCIETY_HUB_TOKEN';
@@ -160,7 +173,8 @@ export function apply(ctx, config) {
         // Push only rows whose content changed since the last sync: the Hub
         // directory is deduplicated by latest-seq, and re-pushing unchanged
         // rows on every 10s cycle would grow the shared event log without bound.
-        for (const header of headers) {
+        for (const snapshot of headers) {
+            const header = persistenceHeader(snapshot);
             if (!header || typeof header.id !== 'string')
                 continue;
             const row = buildLocalRow({
