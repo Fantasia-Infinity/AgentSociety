@@ -73,7 +73,7 @@ export function apply(ctx: Context, config: Config): void {
   const nodeId = config.nodeId ?? host
   const workspaceRoot = resolve(config.workspaceRoot ?? process.cwd())
   const provider = config.provider ?? process.env.AGENT_SOCIETY_PROVIDER ?? 'deepseek-official'
-  const model = config.model ?? process.env.DSH_MODEL ?? 'deepseek-v4-flash'
+  const model = config.model ?? process.env.DSH_MODEL ?? 'deepseek-flash'
   const maxTokens = config.maxTokens
   const policy: QuestionPolicy =
     config.policy ??

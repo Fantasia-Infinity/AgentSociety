@@ -86,7 +86,7 @@ export interface AgentHostConfig {
   dshRuntimeArgs?: string[];
   /** Absolute path to the dsh worker cordis.yml, default agent-host/config/dsh-worker.cordis.yml. */
   dshConfigPath?: string;
-  /** Model id requested from the dsh runtime, default remoteModel or deepseek-v4-flash. */
+  /** Model id requested from the dsh runtime, default remoteModel or deepseek-flash. */
   dshModel?: string;
   /** dsh provider route, default deepseek-official. */
   dshProvider?: string;
@@ -449,7 +449,7 @@ export function loadConfig(
   const dshModel =
     process.env.AGENT_DSH_MODEL?.trim() ||
     remoteModel ||
-    "deepseek-v4-flash";
+    "deepseek-flash";
   const dshSessionRoot = resolve(
     process.env.AGENT_DSH_SESSION_ROOT?.trim() ||
       resolve(loadSessionDir(false), "dsh-sessions"),
@@ -537,7 +537,7 @@ export function loadConfig(
     ),
     webSearchMode,
     webSearchModel:
-      process.env.AGENT_WEB_SEARCH_MODEL?.trim() || "deepseek-v4-flash",
+      process.env.AGENT_WEB_SEARCH_MODEL?.trim() || "deepseek-flash",
     ...(piProvider ? { piProvider } : {}),
     ...(piModel ? { piModel } : {}),
     ...(remoteBaseUrl ? { remoteBaseUrl } : {}),

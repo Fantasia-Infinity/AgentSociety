@@ -80,7 +80,7 @@ export function buildDshWorkerEnv(
   hub: HubClient,
   repositoryRoot: string,
 ): NodeJS.ProcessEnv {
-  const model = config.dshModel ?? config.remoteModel ?? "deepseek-v4-flash";
+  const model = config.dshModel ?? config.remoteModel ?? "deepseek-flash";
   const sourceCheckout =
     existsSync(join(repositoryRoot, ".git")) &&
     existsSync(join(repositoryRoot, "agent-host", "package.json"));

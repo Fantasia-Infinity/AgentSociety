@@ -27,7 +27,7 @@
         principalId: !!js process.env.AGENT_SOCIETY_PRINCIPAL_ID
         displayName: !!js process.env.AGENT_SOCIETY_DISPLAY_NAME
         provider: !!js process.env.AGENT_SOCIETY_PROVIDER ?? 'deepseek-official'
-        model: !!js process.env.AGENT_SOCIETY_MODEL ?? process.env.DSH_MODEL ?? process.env.AGENT_REMOTE_MODEL ?? 'deepseek-v4-flash'
+        model: !!js process.env.AGENT_SOCIETY_MODEL ?? process.env.DSH_MODEL ?? process.env.AGENT_REMOTE_MODEL ?? 'deepseek-flash'
         maxTokens: !!js Number(process.env.AGENT_SOCIETY_MAX_TOKENS ?? 8192)
         # Consensus digests into the Hub shared memory (default off).
         # Consensus digests into the Hub shared memory (AGENT_SOCIETY_CONTEXT=0 disables).
@@ -73,7 +73,7 @@
         nodeId: !!js process.env.AGENT_SOCIETY_NODE_ID
         workspaceRoot: !!js process.env.AGENT_SOCIETY_WORKSPACE_ROOT ?? process.cwd()
         provider: !!js process.env.AGENT_SOCIETY_PROVIDER ?? 'deepseek-official'
-        model: !!js process.env.AGENT_SOCIETY_MODEL ?? process.env.AGENT_DSH_MODEL ?? process.env.DSH_MODEL ?? process.env.AGENT_REMOTE_MODEL ?? 'deepseek-v4-flash'
+        model: !!js process.env.AGENT_SOCIETY_MODEL ?? process.env.AGENT_DSH_MODEL ?? process.env.DSH_MODEL ?? process.env.AGENT_REMOTE_MODEL ?? 'deepseek-flash'
         maxTokens: !!js Number(process.env.AGENT_SOCIETY_MAX_TOKENS ?? 768)
         pollSeconds: !!js Number(process.env.AGENT_SOCIETY_DIGEST_POLL_SECONDS ?? 15)
         idleSeconds: !!js Number(process.env.AGENT_SOCIETY_DIGEST_IDLE_SECONDS ?? 60)
@@ -116,7 +116,7 @@
         nodeId: !!js process.env.AGENT_SOCIETY_NODE_ID
         workspaceRoot: !!js process.env.AGENT_SOCIETY_WORKSPACE_ROOT ?? process.cwd()
         provider: !!js process.env.AGENT_SOCIETY_PROVIDER ?? 'deepseek-official'
-        model: !!js process.env.DSH_MODEL ?? process.env.AGENT_SOCIETY_MODEL ?? 'deepseek-v4-flash'
+        model: !!js process.env.DSH_MODEL ?? process.env.AGENT_SOCIETY_MODEL ?? 'deepseek-flash'
         maxTokens: !!js Number(process.env.AGENT_SOCIETY_MAX_TOKENS ?? 8192)
         policy: !!js process.env.AGENT_SOCIETY_QUESTION_POLICY ?? 'auto'
         pollSeconds: !!js Number(process.env.AGENT_SOCIETY_QUESTION_POLL_SECONDS ?? 10)

@@ -760,7 +760,7 @@ export class DshAgentEngine implements AgentEngine {
   }
 
   get modelName(): string {
-    return this.config.dshModel ?? "deepseek-v4-flash";
+    return this.config.dshModel ?? "deepseek-flash";
   }
 
   get sessionCompression(): DshSessionCompression {

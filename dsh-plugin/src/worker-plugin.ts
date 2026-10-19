@@ -225,7 +225,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     directoryEnabled: config.directoryEnabled ?? process.env.AGENT_SOCIETY_DIRECTORY !== '0',
     questionsEnabled: config.questionsEnabled ?? process.env.AGENT_SOCIETY_QUESTIONS !== '0',
     provider: config.provider ?? 'deepseek-official',
-    model: config.model ?? process.env.DSH_MODEL ?? 'deepseek-v4-flash',
+    model: config.model ?? process.env.DSH_MODEL ?? 'deepseek-flash',
     maxTokens: config.maxTokens,
     statePath: resolve(
       process.env.DSH_HOME ?? `${process.env.HOME ?? '.'}/.dsh`,

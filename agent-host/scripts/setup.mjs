@@ -585,7 +585,7 @@ async function collectModelValues(
   const defaultBase =
     provider === "deepseek" ? "https://api.deepseek.com" : existingBase;
   const defaultModel =
-    provider === "deepseek" ? "deepseek-v4-flash" : existingModel;
+    provider === "deepseek" ? "deepseek-flash" : existingModel;
   const baseUrl = interactive
     ? await askVisible(terminal, "OpenAI-compatible model URL", defaultBase)
     : defaultBase;

@@ -37,7 +37,7 @@ export class DeepSeekResponsesWebSearchProvider implements WebSearchProvider {
   constructor(
     private readonly baseUrl: string,
     private readonly apiKey: string,
-    readonly model = "deepseek-v4-flash",
+    readonly model = "deepseek-flash",
     private readonly fetchImpl: FetchLike = fetch,
     private readonly timeoutMs = 90_000,
   ) {}

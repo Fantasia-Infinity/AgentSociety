@@ -174,7 +174,7 @@ export function apply(ctx: Context, config: Config): void {
     process.env.AGENT_DSH_MODEL ??
     process.env.DSH_MODEL ??
     process.env.AGENT_REMOTE_MODEL ??
-    'deepseek-v4-flash'
+    'deepseek-flash'
   const maxTokens = Math.min(
     config.maxTokens ?? DEFAULT_SUMMARY_MAX_TOKENS,
     SUMMARY_MAX_TOKENS_HARD_LIMIT,
