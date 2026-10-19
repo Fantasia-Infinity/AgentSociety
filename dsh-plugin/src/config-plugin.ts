@@ -7,6 +7,7 @@ import {
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { recordAgentSocietyMetrics } from "./context-metrics.js";
+import { deepSeekMessagesEndpoint } from "./deepseek-endpoint.js";
 
 export const name = "agent-society-config";
 export const inject: string[] = [];
@@ -81,7 +82,9 @@ export function apply(ctx: Context): void {
   if (!process.env.DEEPSEEK_API_KEY && process.env.AGENT_REMOTE_API_KEY) {
     process.env.DEEPSEEK_API_KEY = process.env.AGENT_REMOTE_API_KEY;
   }
-  copy("AGENT_REMOTE_BASE_URL", "DEEPSEEK_BASE_URL");
+  if (!process.env.DEEPSEEK_BASE_URL && process.env.AGENT_REMOTE_BASE_URL) {
+    process.env.DEEPSEEK_BASE_URL = deepSeekMessagesEndpoint(process.env.AGENT_REMOTE_BASE_URL);
+  }
   copy("AGENT_HUB_URL", "AGENT_SOCIETY_HUB_URL");
   copy("AGENT_WORKSPACE_ROOT", "AGENT_SOCIETY_WORKSPACE_ROOT");
   copy("AGENT_ACTOR_ID", "AGENT_SOCIETY_ACTOR_ID");
