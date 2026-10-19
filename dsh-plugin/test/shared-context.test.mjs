@@ -293,6 +293,7 @@ test('balanced prompt guard appends initial and delta messages without a series 
     const payload = { agent: { session: { id: 'mine' } }, turn: 1, step: 1, signal: new AbortController().signal }
     const initial = await handler(payload, async () => ({ ...base, messages: [] }))
     assert.equal(initial.messages.length, 1)
+    assert.equal(initial.messages[0].source.kind, 'agent-society-directory-index')
     assert.ok(initial.messages[0].content[0].text.includes('初始快照'))
     assert.equal(initial.startsRequestSeries, undefined)
     const unchanged = await handler(payload, async () => ({ ...base, messages: [] }))

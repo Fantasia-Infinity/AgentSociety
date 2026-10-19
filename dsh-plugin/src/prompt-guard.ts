@@ -15,6 +15,11 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'agent-society-directory-index': { kind: 'agent-society-directory-index' }
+  }
+}
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -100,8 +105,7 @@ export function apply(ctx: Context): void {
             createUserMessage({
               content: [{ type: 'text', text: update.text }],
               source: {
-                kind: 'plugin',
-                plugin: '@agent-society/dsh-agent-society',
+                kind: 'agent-society-directory-index',
               },
             }),
           ],
