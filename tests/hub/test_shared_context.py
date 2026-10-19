@@ -426,6 +426,15 @@ class SharedContextApiTests(unittest.TestCase):
         self.assertEqual(events[0]["event_id"], "evt-mcp-2")
         self.assertEqual(events[1]["event_id"], "evt-mcp-1")
         self.assertEqual(body["latest_seq"], 3)
+        self.assertEqual(body["limit"], 2)
+        self.assertTrue(body["truncated"])
+        bounded = _mcp_call(
+            service,
+            "tools/call",
+            {"name": "hub_context_read", "arguments": {"limit": 1000}},
+        )
+        bounded_body = json.loads(bounded["result"]["content"][0]["text"])
+        self.assertEqual(bounded_body["limit"], 50)
 
 
 if __name__ == "__main__":

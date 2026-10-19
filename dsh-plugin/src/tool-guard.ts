@@ -66,7 +66,7 @@ export function createToolGuard(ctx: Context, definition: ToolGuardDefinition): 
           ? []
           : await definition.collect(tools, scope)
         const after = definition.after ?? defaultAppend
-        const result = after(current, found)
+        const result = after(current, stableToolSchemas(found))
         if (result === undefined) return assembled
         return result
       } catch (error) {
@@ -80,16 +80,43 @@ export function createToolGuard(ctx: Context, definition: ToolGuardDefinition): 
   )
 }
 
-function defaultAppend(
+export function defaultAppend(
   assembly: Assembly,
   found: readonly ToolSchema[],
 ): Assembly | undefined {
   if (found.length === 0) return undefined
   const existing = new Set(assembly.tools.map((tool) => tool.name))
-  const missing = found.filter((tool) => !existing.has(tool.name))
+  const missing = [...found]
+    .filter((tool) => !existing.has(tool.name))
+    .sort((a, b) => stringCompare(a.name, b.name))
   if (missing.length === 0) return undefined
   return {
     ...assembly,
     tools: [...assembly.tools, ...missing],
   }
+}
+
+/** Recursively canonicalize JSON-schema object keys before they enter a
+ * request header. Arrays retain their declared order because `required` and
+ * enum arrays can be semantically ordered by an adapter. */
+export function stableToolSchemas(
+  tools: readonly ToolSchema[],
+): ToolSchema[] {
+  return tools.map((tool) => stableValue(tool) as ToolSchema)
+}
+
+function stableValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableValue)
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([a], [b]) => stringCompare(a, b))
+        .map(([key, child]) => [key, stableValue(child)]),
+    )
+  }
+  return value
+}
+
+function stringCompare(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0
 }

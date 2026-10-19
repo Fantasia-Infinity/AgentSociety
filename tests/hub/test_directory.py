@@ -387,17 +387,23 @@ class DirectoryApiTests(unittest.TestCase):
         listed = _mcp_call(
             service,
             "tools/call",
-            {"name": "hub_directory_list", "arguments": {}},
+            {"name": "hub_directory_list", "arguments": {"limit": 1000}},
         )
-        rows = json.loads(listed["result"]["content"][0]["text"])["rows"]
+        listed_body = json.loads(listed["result"]["content"][0]["text"])
+        rows = listed_body["rows"]
         self.assertEqual(len(rows), 1)
+        self.assertEqual(listed_body["limit"], 100)
+        self.assertFalse(listed_body["truncated"])
         searched = _mcp_call(
             service,
             "tools/call",
-            {"name": "hub_directory_search", "arguments": {"query": "parser"}},
+            {"name": "hub_directory_search", "arguments": {"query": "parser", "limit": 1000}},
         )
-        rows = json.loads(searched["result"]["content"][0]["text"])["rows"]
+        searched_body = json.loads(searched["result"]["content"][0]["text"])
+        rows = searched_body["rows"]
         self.assertEqual(len(rows), 1)
+        self.assertEqual(searched_body["limit"], 50)
+        self.assertFalse(searched_body["truncated"])
         got = _mcp_call(
             service,
             "tools/call",

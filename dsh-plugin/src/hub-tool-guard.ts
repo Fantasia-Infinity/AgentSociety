@@ -12,7 +12,15 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
-import { createToolGuard, type ToolRuntimeLike } from './tool-guard.js'
+import { homedir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { hashToolSchemas, recordAgentSocietyMetrics } from './context-metrics.js'
+import {
+  createToolGuard,
+  defaultAppend,
+  stableToolSchemas,
+  type ToolRuntimeLike,
+} from './tool-guard.js'
 
 export const name = 'agent-society-hub-tool-guard'
 export const inject: string[] = []
@@ -23,8 +31,33 @@ const HUB_TOOL_READY_TIMEOUT_MS = 10_000
 let waitedForHubTools = false
 
 export function apply(ctx: Context): void {
+  const dshHome = resolve(process.env.DSH_HOME?.trim() || join(homedir(), '.dsh'))
+  let lastSchemaHash: string | undefined
   createToolGuard(ctx, {
     name,
+    after: (assembly, found) => {
+      const appended = defaultAppend(assembly, found)
+      const current = appended ?? assembly
+      const hubTools = stableToolSchemas(
+        current.tools
+          .filter((tool) => tool.name.startsWith(HUB_TOOL_PREFIX))
+          .sort((a, b) => stringCompare(a.name, b.name)),
+      )
+      const schemaHash = hashToolSchemas(hubTools)
+      if (schemaHash !== lastSchemaHash) {
+        lastSchemaHash = schemaHash
+        recordAgentSocietyMetrics(dshHome, { hubToolSchemaHash: schemaHash })
+      }
+      if (hubTools.length === 0) return appended
+      let position = 0
+      const tools = current.tools.map((tool) =>
+        tool.name.startsWith(HUB_TOOL_PREFIX)
+          ? hubTools[position++] as ToolSchema
+          : tool,
+      )
+      const sameOrder = tools.every((tool, index) => tool === current.tools[index])
+      return sameOrder ? appended : { ...current, tools }
+    },
     collect: async (tools: ToolRuntimeLike, scope?: object) => {
       let visible = hubToolsIn(tools, scope)
       if (visible.length === 0 && !waitedForHubTools) {
@@ -53,4 +86,8 @@ async function waitForHubTools(
     if (Date.now() >= deadline) return []
     await new Promise((resolve) => setTimeout(resolve, 100))
   }
+}
+
+function stringCompare(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0
 }

@@ -118,6 +118,9 @@ The worker reads the standard `task.input.workspace` field. Optional fields:
 | `AGENT_SOCIETY_WORKSPACE_ROOT` | process cwd | Allowed task workspace root |
 | `AGENT_SOCIETY_SESSION_MODE` | `per_task` | `per_task` or `continuous` |
 | `AGENT_SOCIETY_TOOL_POLICY` | `full` | Default `full` / `read_only` / `no_tools` |
+| `AGENT_SOCIETY_CONTEXT_MODE` | `balanced` | Shared-context `balanced` / `legacy` / `off` |
+| `AGENT_SOCIETY_CONTEXT` | `1` | Digest writes; `0` keeps the historical digest-write disable switch |
+| `AGENT_SOCIETY_DIRECTORY` | enabled | Directory sync/injection; `0` is a hard disable |
 | `AGENT_SOCIETY_SESSION_COMPRESSION` | `none` | Session log encoding; `zstd` opts into compressed logs |
 | `AGENT_SOCIETY_POLL_SECONDS` | `20` | Task claim interval |
 | `AGENT_SOCIETY_LEASE_SECONDS` | `300` | Hub lease duration |
@@ -129,7 +132,13 @@ The worker reads the standard `task.input.workspace` field. Optional fields:
 | `AGENT_SELF_UPDATE` | `1` | Allow Hub `input.action: "self_update"` tasks |
 | `AGENT_SOCIETY_PROVIDER` | `deepseek-official` | dsh provider route |
 | `AGENT_SOCIETY_MODEL` / `DSH_MODEL` | `deepseek-v4-flash` | dsh model id |
-| `AGENT_SOCIETY_MAX_TOKENS` | `8192` | Per-request output cap |
+| `AGENT_SOCIETY_MAX_TOKENS` | `8192` | Worker request output cap; digest calls default to 768 and never exceed 1024 |
+
+Balanced context messages are append-only session user messages: the first is
+at most 1600 characters and later deltas are at most 800. They contain only
+summary fields and revisions; use the Hub MCP tools for full objective/result
+content. Cache diagnostics are written without prompt content to
+`$DSH_HOME/agent-society-context-metrics.json`.
 
 ## Observing runs
 

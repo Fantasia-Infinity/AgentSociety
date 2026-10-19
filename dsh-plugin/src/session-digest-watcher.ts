@@ -23,24 +23,36 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/cordis-plugin-timer'
 import Schema from '@deepseek-ai/schemastery'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { homedir, hostname, userInfo } from 'node:os'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs'
 import { dirname, resolve } from 'node:path'
 
+import type { EpochHeader } from '@deepseek-ai/dsh-session'
 import { HubClient } from './hub-client.js'
 import { loadProjectionActivity } from './directory.js'
 import { buildSessionDigest } from './digest.js'
 import {
+  DEFAULT_SUMMARY_MAX_TOKENS,
+  SUMMARY_MAX_TOKENS_HARD_LIMIT,
+} from './summarizer.js'
+import {
   deterministicSummary,
   summarizeLiveSession,
   summarizeStandalone,
-  type AssemblySnapshot,
   type SummaryFields,
 } from './summarizer.js'
+import { recordAgentSocietyMetrics } from './context-metrics.js'
 
 export const name = 'agent-society-session-digest'
 export const inject = ['timer']
@@ -84,6 +96,11 @@ interface SessionLike {
   readonly events: ReadonlyArray<{ time: number } | undefined>
 }
 
+interface LiveSessionLike extends SessionLike {
+  requestHeader(): EpochHeader | undefined
+  deriveMessages(): unknown[]
+}
+
 interface SessionsLike {
   list(): SessionLike[]
 }
@@ -93,6 +110,7 @@ interface DigestState {
 }
 
 const MAX_ATTEMPTS = 3
+export const DIGEST_LEASE_SECONDS = 90
 
 export function apply(ctx: Context, config: Config): void {
   const hubUrl = config.hubUrl ?? process.env.AGENT_SOCIETY_HUB_URL?.trim()
@@ -113,8 +131,17 @@ export function apply(ctx: Context, config: Config): void {
   const nodeId = config.nodeId ?? host
   const workspaceRoot = resolve(config.workspaceRoot ?? process.cwd())
   const provider = config.provider ?? process.env.AGENT_SOCIETY_PROVIDER ?? 'deepseek-official'
-  const model = config.model ?? process.env.DSH_MODEL ?? 'deepseek-v4-flash'
-  const maxTokens = Math.min(config.maxTokens ?? 2048, 2048)
+  const model =
+    config.model ??
+    process.env.AGENT_SOCIETY_MODEL ??
+    process.env.AGENT_DSH_MODEL ??
+    process.env.DSH_MODEL ??
+    process.env.AGENT_REMOTE_MODEL ??
+    'deepseek-v4-flash'
+  const maxTokens = Math.min(
+    config.maxTokens ?? DEFAULT_SUMMARY_MAX_TOKENS,
+    SUMMARY_MAX_TOKENS_HARD_LIMIT,
+  )
   const pollSeconds = config.pollSeconds ?? 15
   const idleSeconds = config.idleSeconds ?? 60
   const summarize =
@@ -125,28 +152,11 @@ export function apply(ctx: Context, config: Config): void {
   )
 
   const hub = new HubClient(hubUrl, hubToken)
-  const statePath = resolve(
-    process.env.DSH_HOME?.trim() || resolve(homedir(), '.dsh'),
-    'agent-society-digest-state.json',
-  )
+  const dshHome = resolve(process.env.DSH_HOME?.trim() || resolve(homedir(), '.dsh'))
+  const statePath = resolve(dshHome, 'agent-society-digest-state.json')
   const state: DigestState = loadState(statePath)
   const inFlight = new Set<string>()
   const attempts = new Map<string, number>()
-
-  // Capture the latest assembly so live-session summaries can reuse the
-  // exact system prompt (renderPrompt) and tool schemas the session's own
-  // requests used — the summarization request then shares the session's
-  // byte-identical prefix.
-  let assembly: AssemblySnapshot | undefined
-  ctx.on(
-    'system-prompt/assemble',
-    async (assembledInput, _context, next) => {
-      const assembled = await next()
-      assembly = assembled
-      return assembled
-    },
-    { prepend: true },
-  )
 
   const timer = ctx.setInterval(() => {
     void tick()
@@ -213,6 +223,7 @@ export function apply(ctx: Context, config: Config): void {
           if (inFlight.has(header.id)) continue
           if (attempts.get(header.id) ?? 0 >= MAX_ATTEMPTS) continue
           inFlight.add(header.id)
+          let lease: DigestLeaseResult | undefined
           try {
             if (events === undefined) {
               const inspection = await persistence.inspect(header.id)
@@ -225,6 +236,23 @@ export function apply(ctx: Context, config: Config): void {
               state[header.id] = { count: 0, lastPromptAt, digestAt: now }
               saveState(statePath, state)
               continue
+            }
+            const roundEventId = digestEventIdForRound(principalId, header.id, count)
+            if (summarize) {
+              lease = tryAcquireDigestLease(
+                digestLeasePath(dshHome, roundEventId),
+                roundEventId,
+              )
+              if (lease.status === 'busy') {
+                recordAgentSocietyMetrics(dshHome, {
+                  digestDeduplicatedCall: true,
+                })
+                ctx.logger.debug(
+                  `agent-society-session-digest skipped duplicate round ${count} for ${header.id} (another profile owns the lease)`,
+                )
+                continue
+              }
+              recordAgentSocietyMetrics(dshHome, { digestModelCall: true })
             }
             const summary = await summarizeFor(
               { id: header.id, events },
@@ -247,7 +275,7 @@ export function apply(ctx: Context, config: Config): void {
                 createdAt: now,
               },
               {
-                eventId: digestEventIdForRound(principalId, header.id, count),
+                eventId: roundEventId,
                 summary: summary.summary,
               },
             )
@@ -264,6 +292,7 @@ export function apply(ctx: Context, config: Config): void {
               `agent-society-session-digest failed for ${header.id}: ${error instanceof Error ? error.message : String(error)}`,
             )
           } finally {
+            releaseDigestLease(lease)
             inFlight.delete(header.id)
           }
         }
@@ -294,7 +323,25 @@ export function apply(ctx: Context, config: Config): void {
     if (inFlight.has(sessionId)) return
     if (attempts.get(sessionId) ?? 0 >= MAX_ATTEMPTS) return
     inFlight.add(sessionId)
+    let lease: DigestLeaseResult | undefined
     try {
+      const roundEventId = digestEventIdForRound(principalId, sessionId, count)
+      if (summarize) {
+        lease = tryAcquireDigestLease(
+          digestLeasePath(dshHome, roundEventId),
+          roundEventId,
+        )
+        if (lease.status === 'busy') {
+          recordAgentSocietyMetrics(dshHome, {
+            digestDeduplicatedCall: true,
+          })
+          ctx.logger.debug(
+            `agent-society-session-digest skipped duplicate round ${count} for ${sessionId} (another profile owns the lease)`,
+          )
+          return
+        }
+        recordAgentSocietyMetrics(dshHome, { digestModelCall: true })
+      }
       const summary = await summarizeFor(
         { id: sessionId, events },
         count,
@@ -316,7 +363,7 @@ export function apply(ctx: Context, config: Config): void {
           createdAt: now,
         },
         {
-          eventId: digestEventIdForRound(principalId, sessionId, count),
+          eventId: roundEventId,
           summary: summary.summary,
         },
       )
@@ -333,6 +380,7 @@ export function apply(ctx: Context, config: Config): void {
         `agent-society-session-digest failed for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
       )
     } finally {
+      releaseDigestLease(lease)
       inFlight.delete(sessionId)
     }
   }
@@ -349,16 +397,15 @@ export function apply(ctx: Context, config: Config): void {
     }
     try {
       const live = ctx.get('sessions') as
-        | { get(id: string): SessionLike & { deriveMessages(): unknown[] } | undefined }
+        | { get(id: string): LiveSessionLike | undefined }
         | undefined
       const liveSession = options.live ? live?.get(session.id) : undefined
-      if (liveSession !== undefined && assembly !== undefined) {
+      const requestHeader = liveSession?.requestHeader()
+      if (liveSession !== undefined && requestHeader !== undefined) {
         const text = await summarizeLiveSession({
           ctx,
           session: liveSession as never,
-          assembly,
-          provider,
-          model,
+          requestHeader,
           maxTokens,
         })
         return { ...fields, summary: text }
@@ -466,6 +513,99 @@ export function digestEventIdForRound(
   return createHash('sha256')
     .update([principalId, 'consensus', 'digest', sessionId, String(roundCount)].join('\u0000'))
     .digest('hex')
+}
+
+export type DigestLeaseStatus = 'acquired' | 'busy' | 'unavailable'
+
+export interface DigestLeaseResult {
+  readonly status: DigestLeaseStatus
+  readonly release?: () => void
+}
+
+/**
+ * Use one lease file per round. A single shared file would incorrectly make
+ * an unrelated session wait behind another session's summarization call.
+ */
+export function digestLeasePath(dshHome: string, eventId: string): string {
+  const key = createHash('sha256').update(eventId).digest('hex')
+  return resolve(dshHome, 'agent-society-digest-leases', `${key}.lease`)
+}
+
+function releaseDigestLease(lease: DigestLeaseResult | undefined): void {
+  lease?.release?.()
+}
+
+/**
+ * Acquire one best-effort cross-profile lease for a digest model call. A
+ * filesystem failure returns `unavailable`, which deliberately lets the
+ * caller continue with the existing event-id idempotency fallback.
+ */
+export function tryAcquireDigestLease(
+  path: string,
+  eventId: string,
+  now = Date.now(),
+): DigestLeaseResult {
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+  } catch {
+    return { status: 'unavailable' }
+  }
+
+  const owner = randomUUID()
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    let descriptor: number | undefined
+    try {
+      descriptor = openSync(path, 'wx', 0o600)
+      writeSync(
+        descriptor,
+        JSON.stringify({ owner, eventId, createdAt: now }) + '\n',
+      )
+      closeSync(descriptor)
+      descriptor = undefined
+      let released = false
+      return {
+        status: 'acquired',
+        release: () => {
+          if (released) return
+          released = true
+          try {
+            const current = JSON.parse(readFileSync(path, 'utf8')) as {
+              owner?: unknown
+            }
+            if (current.owner === owner) unlinkSync(path)
+          } catch {
+            // The lease may already have expired or been removed.
+          }
+        },
+      }
+    } catch (error) {
+      if (descriptor !== undefined) {
+        try {
+          closeSync(descriptor)
+        } catch {
+          // Preserve the original acquisition failure.
+        }
+      }
+      const code = (error as { code?: string }).code
+      if (code !== 'EEXIST') return { status: 'unavailable' }
+      try {
+        const current = JSON.parse(readFileSync(path, 'utf8')) as {
+          createdAt?: unknown
+        }
+        if (
+          typeof current.createdAt === 'number' &&
+          now - current.createdAt < DIGEST_LEASE_SECONDS * 1_000
+        ) {
+          return { status: 'busy' }
+        }
+        unlinkSync(path)
+      } catch (readError) {
+        if ((readError as { code?: string }).code === 'ENOENT') continue
+        return { status: 'unavailable' }
+      }
+    }
+  }
+  return { status: 'unavailable' }
 }
 
 function loadState(path: string): DigestState {

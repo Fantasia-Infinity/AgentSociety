@@ -1,4 +1,4 @@
-import { accessSync, constants, existsSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -217,6 +217,33 @@ export async function runDoctor(
   }
 
   const dshHome = resolve(process.env.DSH_HOME?.trim() || join(homedir(), ".dsh"));
+  const metricsPath = join(dshHome, "agent-society-context-metrics.json");
+  const metrics = readMetrics(metricsPath);
+  if (metrics) {
+    const sessions =
+      metrics.contextUpdatesPerSession &&
+      typeof metrics.contextUpdatesPerSession === "object"
+        ? Object.keys(metrics.contextUpdatesPerSession).length
+        : 0;
+    add(
+      "context/cache metrics",
+      "ok",
+      `initialBytes=${numberMetric(metrics.contextInitialBytes)}; ` +
+        `deltaBytes=${numberMetric(metrics.contextDeltaBytes)}; ` +
+        `snapshotBytes=${numberMetric(metrics.contextSnapshotBytes)}; ` +
+        `sessions=${sessions}; ` +
+        `digestCalls=${numberMetric(metrics.digestModelCalls)}; ` +
+        `deduplicated=${numberMetric(metrics.digestDeduplicatedCalls)}; ` +
+        `hubSchema=${typeof metrics.hubToolSchemaHash === "string" ? metrics.hubToolSchemaHash : "none"}`,
+    );
+  } else {
+    add(
+      "context/cache metrics",
+      "warn",
+      `not recorded yet: ${metricsPath}`,
+      "start dsh once, then rerun agent doctor --json",
+    );
+  }
   const dshCommand = config.dshCommand?.[0] ?? "dsh";
   add(
     "dsh runtime",
@@ -368,6 +395,21 @@ export async function runDoctor(
     );
   }
   if (checks.some((check) => check.status === "fail")) process.exitCode = 1;
+}
+
+function readMetrics(path: string): Record<string, any> | undefined {
+  try {
+    const value = JSON.parse(readFileSync(path, "utf8"));
+    return value && typeof value === "object" && value.version === 1
+      ? value
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function numberMetric(value: unknown): string {
+  return typeof value === "number" && Number.isFinite(value) ? String(value) : "0";
 }
 
 function fileMode(path: string | undefined): "ok" | "warn" | "missing" {

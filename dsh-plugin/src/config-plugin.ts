@@ -1,8 +1,12 @@
 import type { Context } from "@deepseek-ai/cordis";
+import type { StreamChunk, TokenUsage } from "@deepseek-ai/dsh-llm";
 import {
   loadAgentConfig,
   resolveCredential,
 } from "@agent-society/agent-config";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import { recordAgentSocietyMetrics } from "./context-metrics.js";
 
 export const name = "agent-society-config";
 export const inject: string[] = [];
@@ -29,9 +33,11 @@ const NON_SECRET_KEYS = [
   "AGENT_REMOTE_MODEL",
   "AGENT_SOCIETY_PROVIDER",
   "AGENT_SOCIETY_MODEL",
+  "AGENT_SOCIETY_HUB_MCP",
   "AGENT_SOCIETY_TOOL_POLICY",
   "AGENT_SOCIETY_WEB_PROFILE",
   "AGENT_SOCIETY_DIRECTORY",
+  "AGENT_SOCIETY_CONTEXT_MODE",
   "AGENT_SOCIETY_QUESTIONS",
   "AGENT_SOCIETY_CONTEXT",
   "AGENT_SOCIETY_SESSION_MODE",
@@ -47,6 +53,8 @@ const CREDENTIAL_KEYS = [
 ];
 
 export function apply(ctx: Context): void {
+  const dshHome = resolve(process.env.DSH_HOME?.trim() || join(homedir(), ".dsh"));
+  ctx.on("llm/stream", (_options, next) => observeUsage(dshHome, next));
   const config = loadAgentConfig({ cwd: process.cwd() });
   for (const key of NON_SECRET_KEYS) {
     const value = config.values[key]?.trim();
@@ -102,6 +110,23 @@ export function apply(ctx: Context): void {
   if (!process.env.AGENT_SOCIETY_HUB_URL) {
     process.env.AGENT_SOCIETY_HUB_URL = "";
   }
+}
+
+function observeUsage(
+  dshHome: string,
+  next: () => AsyncIterable<StreamChunk>,
+): AsyncIterable<StreamChunk> {
+  return (async function* (): AsyncIterable<StreamChunk> {
+    let usage: TokenUsage | undefined;
+    try {
+      for await (const chunk of next()) {
+        if (chunk.type === "usage") usage = chunk.usage;
+        yield chunk;
+      }
+    } finally {
+      if (usage !== undefined) recordAgentSocietyMetrics(dshHome, { usage });
+    }
+  })();
 }
 
 function copy(source: string, target: string): void {

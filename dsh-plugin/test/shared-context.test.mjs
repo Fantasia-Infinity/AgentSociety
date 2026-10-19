@@ -7,6 +7,8 @@ import { HubClient } from '../lib/hub-client.js'
 import {
   consensusPromptLines,
   buildSharedContextSections,
+  normalizeSharedContextState,
+  renderSharedContextUpdate,
 } from '../lib/directory.js'
 
 const INPUT = {
@@ -181,6 +183,65 @@ test('consensusPromptLines excludes the current session digests', () => {
   assert.equal(all.length, 4)
 })
 
+test('balanced state is stable across mirror insertion order and idle timestamps', () => {
+  const mirror = {
+    seq: 10,
+    updated_at: 100,
+    rows: {
+      b: { session_id: 'b', actor_id: 'b-a', title: 'B', workspace: '/b', status: 'idle', last_active_at: 99, session_mode: 'per_task', tool_policy: 'full', invocations: [{ objective: 'ignored', status: 'done', at: 99 }] },
+      a: { session_id: 'a', actor_id: 'a-a', title: 'A', workspace: '/a', status: 'working', last_active_at: 1, session_mode: 'continuous', tool_policy: 'read_only', invocations: [] },
+    },
+    consensus: {
+      seq: 8,
+      entries: [
+        { seq: 7, kind: 'digest', session_id: 'b', summary: 'old' },
+        { seq: 8, kind: 'digest', session_id: 'b', summary: 'new' },
+        { seq: 6, kind: 'decision', session_id: 'a', summary: 'A decision' },
+      ],
+    },
+  }
+  const first = normalizeSharedContextState(mirror, 'mine')
+  const second = normalizeSharedContextState({
+    ...mirror,
+    seq: 11,
+    updated_at: 999,
+    rows: {
+      a: { ...mirror.rows.a, last_active_at: 9999 },
+      b: { ...mirror.rows.b, last_active_at: 8888, invocations: [{ objective: 'changed but ignored', status: 'done', at: 8888 }] },
+    },
+    consensus: { ...mirror.consensus, seq: 9, entries: [...mirror.consensus.entries].reverse() },
+  }, 'mine')
+  assert.deepEqual(first.directoryRows.map(row => row.session_id), ['a', 'b'])
+  assert.equal(first.consensusEntries.length, 2)
+  assert.equal(first.consensusEntries[0].summary, 'new')
+  assert.equal(renderSharedContextUpdate(first, second), undefined)
+})
+
+test('balanced updates use a bounded initial snapshot and append-only delta', () => {
+  const empty = normalizeSharedContextState({ seq: 1, updated_at: 1, rows: {}, consensus: { seq: 1, entries: [] } }, 'mine')
+  const initialState = normalizeSharedContextState({
+    seq: 2,
+    updated_at: 2,
+    rows: { other: { session_id: 'other', title: 'Other', workspace: '/other', status: 'idle', last_active_at: 1, session_mode: 'per_task', tool_policy: 'full', invocations: [] } },
+    consensus: { seq: 2, entries: [{ seq: 2, kind: 'digest', session_id: 'other', summary: 'first' }] },
+  }, 'mine')
+  const initial = renderSharedContextUpdate(undefined, initialState)
+  assert.equal(initial.kind, 'initial')
+  assert.ok(initial.text.length <= 1600)
+  const changedState = normalizeSharedContextState({
+    ...initialState,
+    seq: 3,
+    rows: { other: { ...initialState.directoryRows[0], status: 'working', last_active_at: 3, invocations: [] } },
+    consensus: { seq: 3, entries: [{ seq: 3, kind: 'digest', session_id: 'other', summary: 'second' }] },
+  }, 'mine')
+  const delta = renderSharedContextUpdate(initialState, changedState)
+  assert.equal(delta.kind, 'delta')
+  assert.ok(delta.text.length <= 800)
+  assert.ok(delta.text.includes('second'))
+  assert.ok(!delta.text.includes('first'))
+  assert.equal(renderSharedContextUpdate(empty, empty), undefined)
+})
+
 test('buildSharedContextSections excludes the current session row', () => {
   const mirror = {
     seq: 1,
@@ -198,6 +259,64 @@ test('buildSharedContextSections excludes the current session row', () => {
   assert.ok(!dir.text.includes('mine |'))
 })
 
+test('balanced prompt guard appends initial and delta messages without a series reset', async () => {
+  const { apply } = await import('../lib/prompt-guard.js')
+  const { saveMirror } = await import('../lib/directory.js')
+  const { mkdtempSync, rmSync, mkdirSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-balanced-'))
+  const mirrorFile = join(dir, 'agent-society-directory.json')
+  const previousHome = process.env.DSH_HOME
+  const previousMode = process.env.AGENT_SOCIETY_CONTEXT_MODE
+  const previousDirectory = process.env.AGENT_SOCIETY_DIRECTORY
+  let handler
+  const sections = []
+  const ctx = {
+    on: (event, fn) => { if (event === 'agent/pre-step') handler = fn },
+    get: (name) => name === 'systemPrompt'
+      ? { section: (input) => sections.push(input) }
+      : undefined,
+    logger: { warn: () => {} },
+  }
+  try {
+    mkdirSync(dir, { recursive: true })
+    process.env.DSH_HOME = dir
+    process.env.AGENT_SOCIETY_CONTEXT_MODE = 'balanced'
+    process.env.AGENT_SOCIETY_DIRECTORY = '1'
+    saveMirror(mirrorFile, {
+      seq: 1, updated_at: 1, rows: {},
+      consensus: { seq: 1, entries: [{ seq: 1, kind: 'digest', session_id: 'other', summary: 'first' }] },
+    })
+    apply(ctx)
+    assert.ok(sections.some(section => section.name === 'agent-society:workflow'))
+    const base = { kind: 'enter', messages: [] }
+    const payload = { agent: { session: { id: 'mine' } }, turn: 1, step: 1, signal: new AbortController().signal }
+    const initial = await handler(payload, async () => ({ ...base, messages: [] }))
+    assert.equal(initial.messages.length, 1)
+    assert.ok(initial.messages[0].content[0].text.includes('初始快照'))
+    assert.equal(initial.startsRequestSeries, undefined)
+    const unchanged = await handler(payload, async () => ({ ...base, messages: [] }))
+    assert.equal(unchanged.messages.length, 0)
+    saveMirror(mirrorFile, {
+      seq: 2, updated_at: 2, rows: {},
+      consensus: { seq: 2, entries: [{ seq: 2, kind: 'digest', session_id: 'other', summary: 'second' }] },
+    })
+    const delta = await handler(payload, async () => ({ ...base, messages: [] }))
+    assert.equal(delta.messages.length, 1)
+    assert.ok(delta.messages[0].content[0].text.includes('增量'))
+    assert.ok(delta.messages[0].content[0].text.includes('second'))
+    assert.equal(delta.startsRequestSeries, undefined)
+  } finally {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    if (previousMode === undefined) delete process.env.AGENT_SOCIETY_CONTEXT_MODE
+    else process.env.AGENT_SOCIETY_CONTEXT_MODE = previousMode
+    if (previousDirectory === undefined) delete process.env.AGENT_SOCIETY_DIRECTORY
+    else process.env.AGENT_SOCIETY_DIRECTORY = previousDirectory
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('prompt-guard injects once and skips unchanged snapshots', async () => {
   const { apply } = await import('../lib/prompt-guard.js')
   const { saveMirror } = await import('../lib/directory.js')
@@ -206,6 +325,8 @@ test('prompt-guard injects once and skips unchanged snapshots', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-pg2-'))
   const mirrorFile = join(dir, 'agent-society-directory.json')
   const orig = process.env.DSH_HOME
+  const origMode = process.env.AGENT_SOCIETY_CONTEXT_MODE
+  const origDirectory = process.env.AGENT_SOCIETY_DIRECTORY
   const sections = []
   let handler
   const ctx = {
@@ -218,6 +339,8 @@ test('prompt-guard injects once and skips unchanged snapshots', async () => {
   try {
     mkdirSync(dir, { recursive: true })
     process.env.DSH_HOME = dir
+    process.env.AGENT_SOCIETY_CONTEXT_MODE = 'legacy'
+    process.env.AGENT_SOCIETY_DIRECTORY = '1'
     saveMirror(mirrorFile, {
       seq: 1, updated_at: 1, rows: {},
       consensus: { seq: 1, entries: [
@@ -248,6 +371,10 @@ test('prompt-guard injects once and skips unchanged snapshots', async () => {
   } finally {
     if (orig === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = orig
+    if (origMode === undefined) delete process.env.AGENT_SOCIETY_CONTEXT_MODE
+    else process.env.AGENT_SOCIETY_CONTEXT_MODE = origMode
+    if (origDirectory === undefined) delete process.env.AGENT_SOCIETY_DIRECTORY
+    else process.env.AGENT_SOCIETY_DIRECTORY = origDirectory
     rmSync(dir, { recursive: true, force: true })
   }
 })
@@ -260,9 +387,13 @@ test('prompt-guard appends shared context as a runtime context, not a section', 
   const dir = mkdtempSync(join(tmpdir(), 'dsh-pg-'))
   const mirrorFile = join(dir, 'agent-society-directory.json')
   const origMirrorPath = process.env.DSH_HOME
+  const origMode = process.env.AGENT_SOCIETY_CONTEXT_MODE
+  const origDirectory = process.env.AGENT_SOCIETY_DIRECTORY
   try {
     mkdirSync(dir, { recursive: true })
     process.env.DSH_HOME = dir
+    process.env.AGENT_SOCIETY_CONTEXT_MODE = 'legacy'
+    process.env.AGENT_SOCIETY_DIRECTORY = '1'
     saveMirror(mirrorFile, {
       seq: 1, updated_at: 1, rows: {},
       consensus: { seq: 1, entries: [
@@ -289,6 +420,10 @@ test('prompt-guard appends shared context as a runtime context, not a section', 
   } finally {
     if (origMirrorPath === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = origMirrorPath
+    if (origMode === undefined) delete process.env.AGENT_SOCIETY_CONTEXT_MODE
+    else process.env.AGENT_SOCIETY_CONTEXT_MODE = origMode
+    if (origDirectory === undefined) delete process.env.AGENT_SOCIETY_DIRECTORY
+    else process.env.AGENT_SOCIETY_DIRECTORY = origDirectory
     rmSync(dir, { recursive: true, force: true })
   }
 })

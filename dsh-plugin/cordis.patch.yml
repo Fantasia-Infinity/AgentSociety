@@ -73,8 +73,8 @@
         nodeId: !!js process.env.AGENT_SOCIETY_NODE_ID
         workspaceRoot: !!js process.env.AGENT_SOCIETY_WORKSPACE_ROOT ?? process.cwd()
         provider: !!js process.env.AGENT_SOCIETY_PROVIDER ?? 'deepseek-official'
-        model: !!js process.env.DSH_MODEL ?? process.env.AGENT_SOCIETY_MODEL ?? 'deepseek-v4-flash'
-        maxTokens: !!js Number(process.env.AGENT_SOCIETY_MAX_TOKENS ?? 2048)
+        model: !!js process.env.AGENT_SOCIETY_MODEL ?? process.env.AGENT_DSH_MODEL ?? process.env.DSH_MODEL ?? process.env.AGENT_REMOTE_MODEL ?? 'deepseek-v4-flash'
+        maxTokens: !!js Number(process.env.AGENT_SOCIETY_MAX_TOKENS ?? 768)
         pollSeconds: !!js Number(process.env.AGENT_SOCIETY_DIGEST_POLL_SECONDS ?? 15)
         idleSeconds: !!js Number(process.env.AGENT_SOCIETY_DIGEST_IDLE_SECONDS ?? 60)
         summarize: !!js process.env.AGENT_SOCIETY_CONTEXT_SUMMARIZE !== '0'

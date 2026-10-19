@@ -2,31 +2,39 @@
  * LLM summarization for interactive-session consensus digests.
  *
  * KV-cache rules (non-negotiable):
- * - The live-session mode reuses the session's OWN derived messages
- *   (`session.deriveMessages()`, byte-identical to what dsh just sent the
- *   model) plus the cached assembly system/tools, and appends ONLY the
- *   summarization instruction as a trailing user message. The prefix
- *   (system + tools + full history) is unchanged, so provider prefix
- *   caches hit on the hot session prefix.
- * - The standalone mode never copies session context: a fixed template
- *   prefix plus extracted fields. It is the fallback when no live session
- *   (or no assembly cache) is available.
- * - Both modes are bounded: maxTokens 2048, output clipped to
+ * - The live-session mode reuses the target session's OWN derived messages
+ *   and its last persisted request/header system prompt, tools, route, and
+ *   adapter config. It appends ONLY the summarization instruction as a
+ *   trailing user message, so the session's prefix is not borrowed from a
+ *   different session or process-global assembly.
+ * - The standalone mode never copies session context: a fixed system prompt
+ *   plus one structured user payload. It is the fallback when no live session
+ *   header is available.
+ * - Both modes are bounded: default maxTokens 768, hard cap 1024, output clipped to
  *   {@link MAX_SUMMARY_CHARS}; failures fall back to the deterministic
  *   extractor so a consensus digest is still produced.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import { createUserMessage, type Message } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, StreamChunk, ToolSchema } from '@deepseek-ai/dsh-llm'
-import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
-import type { Session } from '@deepseek-ai/dsh-session'
+import type {
+  GenerateOptions,
+  LlmCallConfig,
+  StreamChunk,
+} from '@deepseek-ai/dsh-llm'
+import type { EpochHeader, Session } from '@deepseek-ai/dsh-session'
 
 export const MAX_SUMMARY_CHARS = 600
+export const DEFAULT_SUMMARY_MAX_TOKENS = 768
+export const SUMMARY_MAX_TOKENS_HARD_LIMIT = 1_024
 export const SUMMARY_TIMEOUT_MS = 30_000
 export const SUMMARIZE_PROMPT = (
   'Summarize this session in Chinese, at most 300 tokens: its goal, key ' +
   'actions, and the conclusion reached. Output only the summary text.'
+).replace(/\s+/gu, ' ')
+export const SUMMARIZE_SYSTEM = (
+  'You are the AgentSociety consensus summarizer. Return only a concise, '
+  + 'reusable Chinese summary of the supplied structured session notes.'
 ).replace(/\s+/gu, ' ')
 
 export interface SummaryFields {
@@ -49,35 +57,31 @@ export function deterministicSummary(fields: SummaryFields): string {
   return text.slice(0, MAX_SUMMARY_CHARS)
 }
 
-/** The last assembled prompt, captured by the watcher; the system text
- *  is derived with the same renderPrompt the agent loop uses, so the
- *  summarization request shares the session's exact system slot. */
-export type AssemblySnapshot = import('@deepseek-ai/dsh-system-prompt').PromptAssembly
-
 interface LlmLike {
   prepareCall(
-    config: { provider: string; model: string; maxTokens?: number; reasoningEffort?: unknown },
+    config: LlmCallConfig,
     signal?: AbortSignal,
   ): Promise<{
-    readonly config: Record<string, unknown>
+    readonly config: LlmCallConfig
     stream(options: GenerateOptions): AsyncIterable<StreamChunk>
   }>
 }
 
-/**
- * Live-session mode: session-derived prefix + trailing instruction.
- * The prefix is byte-identical to the session's own requests, so provider
- * prefix caches are reused; only the instruction + output are new tokens.
- */
+function boundedMaxTokens(value: number): number {
+  return Math.min(
+    Math.max(1, Math.floor(Number.isFinite(value) ? value : DEFAULT_SUMMARY_MAX_TOKENS)),
+    SUMMARY_MAX_TOKENS_HARD_LIMIT,
+  )
+}
+
+/** Live-session mode: target session header/history prefix + trailing instruction. */
 export async function summarizeLiveSession(options: {
   ctx: Context
   session: Session
-  assembly: AssemblySnapshot
-  provider: string
-  model: string
+  requestHeader: EpochHeader
   maxTokens: number
 }): Promise<string> {
-  const { ctx, session, assembly, provider, model, maxTokens } = options
+  const { ctx, session, requestHeader, maxTokens } = options
   const llm = ctx.get('llm') as LlmLike | undefined
   if (llm === undefined || typeof llm.prepareCall !== 'function') {
     throw new Error('llm service unavailable')
@@ -87,29 +91,28 @@ export async function summarizeLiveSession(options: {
     content: [{ type: 'text', text: SUMMARIZE_PROMPT }],
     source: { kind: 'user' },
   })
-  const prepared = await llm.prepareCall(
-    { provider, model, maxTokens },
-    undefined,
-  )
+  // Keep the target session's route and adapter-resolved controls. Only the
+  // auxiliary output ceiling is intentionally smaller than the conversation
+  // request; system/tools/history remain the exact session-owned prefix.
+  const prepared = await llm.prepareCall({
+    ...requestHeader.config,
+    maxTokens: boundedMaxTokens(maxTokens),
+  }, undefined)
   // The request's call-config fields must match the materialized prepared
   // config exactly (adapter defaults included), or the dispatch rejects
   // with "prepared LLM call config changed before adapter dispatch".
   const stream = prepared.stream({
     ...prepared.config,
-    provider,
-    model,
     messages: [...history, instruction],
-    system: renderPrompt(assembly),
-    tools: assembly.tools as ToolSchema[],
+    ...(requestHeader.system ? { system: requestHeader.system } : {}),
+    ...(requestHeader.tools && requestHeader.tools.length > 0
+      ? { tools: requestHeader.tools }
+      : {}),
   } as unknown as GenerateOptions)
   return collectText(stream)
 }
 
-/**
- * Standalone mode: fixed template + extracted fields, no session context.
- * Used when the session is not live in this process (or the assembly
- * snapshot is missing). The fixed instruction prefix is itself cacheable.
- */
+/** Standalone mode: fixed system prefix plus a structured dynamic user payload. */
 export async function summarizeStandalone(options: {
   ctx: Context
   fields: SummaryFields
@@ -122,23 +125,29 @@ export async function summarizeStandalone(options: {
   if (llm === undefined || typeof llm.prepareCall !== 'function') {
     throw new Error('llm service unavailable')
   }
-  const prompt = (
-    'Summarize the following session notes in Chinese, at most 300 tokens: ' +
-    'goal, key actions, conclusion. Output only the summary text.\n\n' +
-    `Title: ${fields.title ?? '-'}\n` +
-    `Objective: ${fields.objective.slice(0, 500) || '-'}\n` +
-    `Result: ${fields.resultText.slice(0, 1_500) || '-'}\n` +
-    `Messages: ${fields.messageCount}; Tools: ${fields.toolCount}`
-  ).replace(/\s+/gu, ' ')
+  const prompt = JSON.stringify({
+    title: fields.title?.slice(0, 200) ?? null,
+    objective: fields.objective.slice(0, 500),
+    result: fields.resultText.slice(0, 1_500),
+    messageCount: fields.messageCount,
+    toolCount: fields.toolCount,
+  })
   const prepared = await llm.prepareCall(
-    { provider, model, maxTokens, reasoningEffort: 'off' as never },
+    {
+      provider,
+      model,
+      maxTokens: boundedMaxTokens(maxTokens),
+      reasoningEffort: 'off' as never,
+    },
     undefined,
   )
   const stream = prepared.stream({
     ...prepared.config,
-    provider,
-    model,
-    messages: [createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'user' } })],
+    messages: [createUserMessage({
+      content: [{ type: 'text', text: prompt }],
+      source: { kind: 'user' },
+    })],
+    system: SUMMARIZE_SYSTEM,
   } as unknown as GenerateOptions)
   return collectText(stream)
 }

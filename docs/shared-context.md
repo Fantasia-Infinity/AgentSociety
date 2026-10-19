@@ -42,11 +42,30 @@ scope=`consensus` / `directory` / `qa`）：
   调用记录（去重、最多 10 条）再推送。
 - 陈旧淘汰：idle >30d 的目录行过期隐藏。
 
-## 4. 有界上下文注入（P4）
+## 4. 缓存友好的有界上下文注入（P4）
 
-`agent-society-directory-index` 守卫在 `system-prompt/assemble` 之后追加两个
-有界 section（合计 ≤4KB）：共识上下文一行摘要（≤8 条）+ 会话目录索引（≤20
-行，working 优先）；失败保底返回原组装。只读本地镜像，零 Hub 延迟。
+agent-society-directory-index 默认使用 AGENT_SOCIETY_CONTEXT_MODE=balanced：
+
+- 第一次进入某个 session 时，通过公开 agent/pre-step waterfall 追加最多
+  1600 字符的紧凑初始快照；
+- 后续只追加最多 800 字符的结构化 delta；没有语义变化就不追加消息；
+- 共识按 seq 倒序且每个 session 默认只留最新一条，目录只按
+  session_id 排序；last_active_at、invocations 和对象插入顺序不会触发
+  更新；
+- 目录/共识被删除、过期或 delta 无法容纳时追加一次新的紧凑快照；
+- 每条更新包含 directory/consensus revision。完整 objective/result 与目录
+  详情仍通过 Hub MCP 按需读取；自动注入只使用摘要字段；
+- 更新作为普通 AgentSociety user message 进入 session，不设置
+  startsRequestSeries，不调用 dsh surface replace。已有旧 session 中的
+  snapshot 不做破坏性重写。
+
+兼容和回滚：
+
+- balanced：默认的初始快照 + delta；
+- legacy：恢复原有 system-prompt/assemble 的完整有界 runtime snapshot；
+- off：只保留静态 workflow 说明，不自动注入共享数据；
+- AGENT_SOCIETY_DIRECTORY=0 仍是硬关闭开关；
+- AGENT_SOCIETY_CONTEXT=0 仍只关闭 digest 写入，不改变历史语义。
 
 ## 5. 按需问答与委派（P5 / P6a）
 
@@ -74,11 +93,18 @@ scope=`consensus` / `directory` / `qa`）：
 |---|---|---|
 | `AGENT_SOCIETY_CONTEXT` | 未设 | `1` 时 worker 写入共识 digest |
 | `AGENT_SOCIETY_DIRECTORY` | 未设(`0` 关闭) | 目录同步 + 注入守卫开关 |
+| `AGENT_SOCIETY_DIRECTORY` | 启用(`0` 关闭) | 目录同步 + 注入守卫开关 |
+| `AGENT_SOCIETY_CONTEXT_MODE` | `balanced` | `balanced` / `legacy` / `off` |
 | `AGENT_SOCIETY_DIRECTORY_PULL_SECONDS` | 10 | 目录镜像拉取间隔 |
 | `AGENT_SOCIETY_QUESTIONS` | 未设(`0` 关闭) | 问题回答（worker + bridge） |
 | `AGENT_SOCIETY_QUESTION_POLICY` | auto | `auto` / `ask` / `standalone` |
 | `AGENT_SOCIETY_QUESTION_POLL_SECONDS` | 10 | 交互进程问题轮询间隔 |
 | `AGENT_SOCIETY_PRESENCE_WINDOW_MIN` | 5 | 人在场判定窗口（client 上报） |
+
+AgentSociety 在 $DSH_HOME/agent-society-context-metrics.json 保存不含内容的
+计数：初始/增量消息字节数、每 session 更新次数、digest 模型调用与被 lease
+去重次数、Hub tool schema hash。文件只用于诊断，写入失败不影响运行；agent
+doctor --json 可展示这些统计。
 
 ## 已知边界
 

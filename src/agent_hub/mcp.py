@@ -16,6 +16,9 @@ SUPPORTED_PROTOCOL_VERSIONS = frozenset(
 )
 MCP_PRINCIPAL_ID = "mcp-external"
 MCP_ACTOR_ID = "mcp-gateway"
+MCP_CONTEXT_MAX_LIMIT = 50
+MCP_DIRECTORY_MAX_LIMIT = 100
+MCP_DIRECTORY_SEARCH_MAX_LIMIT = 50
 
 TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
@@ -137,15 +140,20 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "asking anyone. The runtime-context injection only shows "
             "one-line summaries; this tool returns the full entries "
             "(objective/result text), so use it before deciding to ask "
-            "a session anything."
+            "a session anything. Results are capped at 50 entries and "
+            "include truncated/latest_seq metadata."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "after_seq": {"type": "integer"},
+                "after_seq": {"type": "integer", "minimum": 0},
                 "kind": {"type": "string"},
                 "session_id": {"type": "string"},
-                "limit": {"type": "integer"},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MCP_CONTEXT_MAX_LIMIT,
+                },
             },
             "additionalProperties": False,
         },
@@ -156,7 +164,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "List the session/agent directory of your principal: one row per "
             "session (id, actor, node, title, workspace, status, last active). "
             "USE THIS to discover which sessions/agents exist and what they "
-            "are doing, e.g. to find who can help or who owns a workspace."
+            "are doing, e.g. to find who can help or who owns a workspace. "
+            "Results are capped at 100 rows and report truncation."
         ),
         "inputSchema": {
             "type": "object",
@@ -164,7 +173,12 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "query": {"type": "string"},
                 "status": {"type": "string"},
                 "actor_id": {"type": "string"},
-                "limit": {"type": "integer"},
+                "after_seq": {"type": "integer", "minimum": 0},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MCP_DIRECTORY_MAX_LIMIT,
+                },
             },
             "additionalProperties": False,
         },
@@ -195,13 +209,18 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "description": (
             "Search the session/agent directory by title, workspace, or "
             "objective text. USE THIS when you need to find the session or "
-            "agent that worked on a topic or lives in a workspace."
+            "agent that worked on a topic or lives in a workspace. Results "
+            "are capped at 50 rows and report truncation."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
-                "limit": {"type": "integer"},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MCP_DIRECTORY_SEARCH_MAX_LIMIT,
+                },
             },
             "required": ["query"],
             "additionalProperties": False,
@@ -240,6 +259,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
 ]
+
+# Keep tools/list stable across reconnects and Python mapping changes. The
+# dsh-side guard applies the same ordering to the request catalog.
+TOOL_DEFINITIONS.sort(key=lambda tool: str(tool.get("name", "")))
 
 
 class McpService:
@@ -388,6 +411,12 @@ class McpService:
                     for key, value in arguments.items()
                     if value is not None
                 }
+                limit = _bounded_limit(
+                    query_args.get("limit"),
+                    default=20,
+                    maximum=MCP_CONTEXT_MAX_LIMIT,
+                )
+                query_args["limit"] = limit
                 # Default to the newest entries (descending) unless an
                 # incremental pull is requested; latest_seq tells the caller
                 # how far the head of the log is.
@@ -402,16 +431,34 @@ class McpService:
                     {
                         "events": result["events"],
                         "latest_seq": result.get("latest_seq"),
+                        "truncated": len(result["events"]) >= limit,
+                        "limit": limit,
                     }
                 )
             if name == "hub_directory_list":
-                query = "&".join(
-                    f"{key}={quote(str(value))}"
+                query_args = {
+                    key: value
                     for key, value in arguments.items()
                     if value is not None
+                }
+                limit = _bounded_limit(
+                    query_args.get("limit"),
+                    default=50,
+                    maximum=MCP_DIRECTORY_MAX_LIMIT,
+                )
+                query_args["limit"] = limit
+                query = "&".join(
+                    f"{key}={quote(str(value))}"
+                    for key, value in query_args.items()
                 )
                 _, result = self.api.get("/v1/hub/directory", query, context)
-                return self._tool_result({"rows": result["rows"]})
+                return self._tool_result(
+                    {
+                        "rows": result["rows"],
+                        "truncated": len(result["rows"]) >= limit,
+                        "limit": limit,
+                    }
+                )
             if name == "hub_directory_get":
                 session_id = self._required(arguments, "session_id")
                 depth = arguments.get("depth", 1)
@@ -424,14 +471,23 @@ class McpService:
                 return self._tool_result({"row": result["row"]})
             if name == "hub_directory_search":
                 query_value = self._required(arguments, "query")
-                limit = arguments.get("limit", 20)
-                limit = limit if isinstance(limit, int) else 20
+                limit = _bounded_limit(
+                    arguments.get("limit"),
+                    default=20,
+                    maximum=MCP_DIRECTORY_SEARCH_MAX_LIMIT,
+                )
                 _, result = self.api.get(
                     "/v1/hub/directory",
                     f"query={quote(query_value)}&limit={limit}",
                     context,
                 )
-                return self._tool_result({"rows": result["rows"]})
+                return self._tool_result(
+                    {
+                        "rows": result["rows"],
+                        "truncated": len(result["rows"]) >= limit,
+                        "limit": limit,
+                    }
+                )
             if name == "hub_ask":
                 return self._tool_result({"answer": self._ask(arguments, context)})
             return self._tool_error(-32601, f"Unknown tool: {name}")
@@ -624,6 +680,12 @@ class McpService:
             "id": request_id,
             "error": {"code": code, "message": message},
         }
+
+
+def _bounded_limit(value: Any, *, default: int, maximum: int) -> int:
+    """Apply MCP-side result bounds before querying the Hub store."""
+    limit = value if isinstance(value, int) and not isinstance(value, bool) else default
+    return min(max(limit, 1), maximum)
 
 
 def _safe_tenant_suffix(tenant_id: str) -> str:

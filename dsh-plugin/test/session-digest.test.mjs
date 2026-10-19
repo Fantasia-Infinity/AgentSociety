@@ -1,10 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { deterministicSummary } from '../lib/summarizer.js'
+import { deterministicSummary, summarizeLiveSession, summarizeStandalone, SUMMARIZE_SYSTEM } from '../lib/summarizer.js'
 import {
   digestEventIdForRound,
+  digestLeasePath,
   extractFields,
+  tryAcquireDigestLease,
 } from '../lib/session-digest-watcher.js'
 import { buildSessionDigest } from '../lib/digest.js'
 
@@ -40,6 +42,14 @@ test('round event id is idempotent per round and differs across rounds', () => {
   assert.notEqual(a, c)
   assert.notEqual(a, d)
   assert.equal(a.length, 64)
+})
+
+test('digest leases are independent for different rounds', () => {
+  const first = digestLeasePath('/tmp/dsh-home', 'round-a')
+  const second = digestLeasePath('/tmp/dsh-home', 'round-b')
+  assert.notEqual(first, second)
+  assert.match(first, /agent-society-digest-leases/u)
+  assert.match(first, /\.lease$/u)
 })
 
 test('buildSessionDigest accepts eventId and summary overrides', () => {
@@ -90,4 +100,99 @@ test('messageCountOf counts only user and assistant messages', async () => {
     { type: 'session/title', time: 6 },
   ]
   assert.equal(messageCountOf(events), 3)
+})
+
+test('digest lease deduplicates concurrent rounds and recovers after expiry', async () => {
+  const { mkdtempSync, readFileSync, rmSync, writeFileSync } = await import('node:fs')
+  const { join } = await import('node:path')
+  const { tmpdir } = await import('node:os')
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-digest-lease-'))
+  const path = join(dir, 'digest.lease')
+  try {
+    const first = tryAcquireDigestLease(path, 'round-a', 1000)
+    assert.equal(first.status, 'acquired')
+    assert.equal(tryAcquireDigestLease(path, 'round-a', 1001).status, 'busy')
+    first.release()
+    const second = tryAcquireDigestLease(path, 'round-a', 1002)
+    assert.equal(second.status, 'acquired')
+    second.release()
+    writeFileSync(path, JSON.stringify({ owner: 'old', eventId: 'old', createdAt: 1000 }))
+    const recovered = tryAcquireDigestLease(path, 'round-b', 1000 + 90 * 1000)
+    assert.equal(recovered.status, 'acquired')
+    assert.notEqual(JSON.parse(readFileSync(path, 'utf8')).owner, 'old')
+    recovered.release()
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('live summarizer uses the target session request header and route', async () => {
+  let preparedConfig
+  let request
+  const ctx = {
+    get(name) {
+      assert.equal(name, 'llm')
+      return {
+        async prepareCall(config) {
+          preparedConfig = config
+          return {
+            config,
+            async *stream(options) {
+              request = options
+              yield { type: 'text-delta', index: 0, text: '目标摘要' }
+            },
+          }
+        },
+      }
+    },
+  }
+  const header = {
+    config: { provider: 'target-provider', model: 'target-model', temperature: 0.2 },
+    system: 'target system',
+    tools: [{ name: 'target_tool', description: 'target', parameters: { type: 'object' } }],
+  }
+  const text = await summarizeLiveSession({
+    ctx,
+    session: { deriveMessages: () => [{ role: 'user', content: [], source: { kind: 'user' }, id: 'history' }] },
+    requestHeader: header,
+    maxTokens: 768,
+  })
+  assert.equal(text, '目标摘要')
+  assert.equal(preparedConfig.provider, 'target-provider')
+  assert.equal(preparedConfig.model, 'target-model')
+  assert.equal(preparedConfig.temperature, 0.2)
+  assert.equal(request.system, 'target system')
+  assert.deepEqual(request.tools, header.tools)
+  assert.equal(request.messages.length, 2)
+})
+
+test('standalone summarizer keeps a fixed system prompt and structured payload', async () => {
+  let request
+  const ctx = {
+    get() {
+      return {
+        async prepareCall(config) {
+          return {
+            config,
+            async *stream(options) {
+              request = options
+              yield { type: 'text-delta', index: 0, text: '独立摘要' }
+            },
+          }
+        },
+      }
+    },
+  }
+  const text = await summarizeStandalone({
+    ctx,
+    fields: { title: 'T', objective: 'O', resultText: 'R', messageCount: 2, toolCount: 1 },
+    provider: 'p',
+    model: 'm',
+    maxTokens: 4096,
+  })
+  assert.equal(text, '独立摘要')
+  assert.equal(request.system, SUMMARIZE_SYSTEM)
+  assert.deepEqual(JSON.parse(request.messages[0].content[0].text), {
+    title: 'T', objective: 'O', result: 'R', messageCount: 2, toolCount: 1,
+  })
 })
