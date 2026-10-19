@@ -27,7 +27,7 @@ import { resolve } from 'node:path'
 
 import { HubClient, type HubClaim } from './hub-client.js'
 import { buildSessionDigest } from './digest.js'
-import { lastAssistantText, TASK_PROMPT } from './worker-plugin.js'
+import { lastAssistantText, sessionEvents, TASK_PROMPT } from './worker-plugin.js'
 
 export const name = 'agent-society-task-bridge'
 export const inject = ['timer']
@@ -214,7 +214,7 @@ export function apply(ctx: Context, config: Config): void {
     )
     await agent.whenIdle()
 
-    const events = agent.session.events
+    const events = sessionEvents(agent.session)
     let resultText = ''
     try {
       resultText = lastAssistantText(events)

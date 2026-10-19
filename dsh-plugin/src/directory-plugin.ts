@@ -54,12 +54,36 @@ export const Config: Schema<Config> = Schema.object({
 
 interface SessionHeaderLike {
   readonly id: string
-  readonly createdAt: number
+  readonly createdAt?: number
   readonly cwd?: string
 }
 
 interface PersistenceLike {
-  list(): Promise<readonly SessionHeaderLike[]>
+  list(): Promise<readonly PersistenceSnapshotLike[]>
+}
+
+interface PersistenceSnapshotLike {
+  readonly header?: SessionHeaderLike
+  /** Compatibility face for the pre-0.1.5 list result. */
+  readonly id?: string
+  readonly createdAt?: number
+  readonly cwd?: string
+}
+
+function persistenceHeader(
+  snapshot: PersistenceSnapshotLike,
+): SessionHeaderLike | undefined {
+  if (snapshot.header !== undefined && typeof snapshot.header.id === 'string') {
+    return snapshot.header
+  }
+  if (typeof snapshot.id === 'string') {
+    return {
+      id: snapshot.id,
+      ...(snapshot.createdAt === undefined ? {} : { createdAt: snapshot.createdAt }),
+      ...(snapshot.cwd === undefined ? {} : { cwd: snapshot.cwd }),
+    }
+  }
+  return undefined
 }
 
 export function apply(ctx: Context, config: Config): void {
@@ -199,7 +223,8 @@ export function apply(ctx: Context, config: Config): void {
     // Push only rows whose content changed since the last sync: the Hub
     // directory is deduplicated by latest-seq, and re-pushing unchanged
     // rows on every 10s cycle would grow the shared event log without bound.
-    for (const header of headers) {
+    for (const snapshot of headers) {
+      const header = persistenceHeader(snapshot)
       if (!header || typeof header.id !== 'string') continue
       const row = buildLocalRow({
         sessionId: header.id,

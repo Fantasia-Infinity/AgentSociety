@@ -575,7 +575,7 @@ class WorkerLoop {
     const running = this.running
     if (!running || this.disposed) return
     try {
-      const events = running.agent.session.events
+      const events = sessionEvents(running.agent.session)
       const toolCalls = events.filter((event) => event?.type === 'tool/call')
       const lastToolEvent = toolCalls[toolCalls.length - 1]
       let lastTool: string | undefined
@@ -747,7 +747,7 @@ class WorkerLoop {
         )
         return
       }
-      const text = lastAssistantText(agent.session.events)
+      const text = lastAssistantText(sessionEvents(agent.session))
       const finalTitle = this.currentSessionTitle(agent.session) ?? running.title
       const transcript = await this.attachTranscript(
         task,
@@ -894,7 +894,23 @@ class WorkerLoop {
     toolPolicy: ToolPolicy,
   ): Promise<HubArtifact | undefined> {
     try {
-      const location = this.ctx.sessionPersistence.locate(session.header)
+      // dsh 0.1.5 exposes persistence through logical read handles and no
+      // longer promises a backend file path or raw-artifact reader. Keep the
+      // old physical-artifact path only when an older backend explicitly
+      // provides it; never reconstruct and upload a full transcript through a
+      // new, undocumented API.
+      const persistence = this.ctx.sessionPersistence as unknown as {
+        locate?: (header: Session['header']) => { path: string } | undefined
+        supportsRawArtifacts?: boolean
+        readRaw?: (id: Session['id']) => Promise<{ content: string } | undefined>
+      }
+      if (typeof persistence.locate !== 'function') {
+        this.ctx.logger.debug(
+          `agent-society-worker transcript artifact skipped for ${session.id}: dsh persistence has no raw artifact interface`,
+        )
+        return undefined
+      }
+      const location = persistence.locate(session.header)
       if (!location || !existsSync(location.path)) return undefined
       const name = `dsh-transcript-${runId}-${basename(location.path)}`
       const metadata: Record<string, unknown> = {
@@ -903,8 +919,8 @@ class WorkerLoop {
         ...(title === undefined ? {} : { dsh_session_title: title }),
       }
       let raw: string | undefined
-      if (this.ctx.sessionPersistence.supportsRawArtifacts) {
-        raw = (await this.ctx.sessionPersistence.readRaw(session.id))?.content
+      if (persistence.supportsRawArtifacts && typeof persistence.readRaw === 'function') {
+        raw = (await persistence.readRaw(session.id))?.content
       }
       if (raw) {
         const bytes = Buffer.byteLength(raw, 'utf8')
@@ -957,7 +973,7 @@ class WorkerLoop {
     toolPolicy: ToolPolicy
     status: 'completed' | 'failed'
   }): void {
-    const events = options.session.events
+    const events = sessionEvents(options.session)
     const toolCount = events.filter((event) => event?.type === 'tool/call').length
     const messageCount = events.filter(
       (event) => event?.type === 'user/message' || event?.type === 'assistant/message',
@@ -1282,6 +1298,17 @@ function truncateTitleUtf8(value: string, maxBytes = 80): string {
     bytes += size
   }
   return result.trim()
+}
+
+/** Read the canonical event log while keeping old test doubles usable. */
+export function sessionEvents(session: {
+  snapshotEvents?: () => readonly SessionEvent[]
+  /** Compatibility face for older dsh releases and test doubles. */
+  events?: readonly SessionEvent[]
+}): readonly SessionEvent[] {
+  return typeof session.snapshotEvents === 'function'
+    ? session.snapshotEvents()
+    : session.events ?? []
 }
 
 export function lastAssistantText(events: readonly SessionEvent[]): string {

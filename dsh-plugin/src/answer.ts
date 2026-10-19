@@ -107,9 +107,18 @@ export async function answerQuestionWithSession(
 }
 
 /** Last assistant text block of a session (shared by both answer paths). */
-function lastAssistantText(agent: { session: { events: readonly unknown[] } }): string {
-  for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
-    const event = agent.session.events[index] as
+function lastAssistantText(agent: {
+  session: {
+    snapshotEvents?: () => readonly unknown[]
+    /** Compatibility face for older test doubles and dsh releases. */
+    events?: readonly unknown[]
+  }
+}): string {
+  const events = typeof agent.session.snapshotEvents === 'function'
+    ? agent.session.snapshotEvents()
+    : agent.session.events ?? []
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index] as
       | { type?: string; data?: { message?: { content?: unknown } } }
       | undefined
     if (!event || event.type !== 'assistant/message') continue

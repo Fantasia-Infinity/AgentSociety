@@ -101,10 +101,16 @@ export async function summarizeLiveSession(options: {
   // The request's call-config fields must match the materialized prepared
   // config exactly (adapter defaults included), or the dispatch rejects
   // with "prepared LLM call config changed before adapter dispatch".
+  // Since dsh 0.1.5 the system prompt is a durable `system/message` in the
+  // session surface and therefore already appears in `history`. Keep reading
+  // the retired field only for older callers/test doubles.
+  const legacySystem = (requestHeader as EpochHeader & { system?: unknown }).system
   const stream = prepared.stream({
     ...prepared.config,
     messages: [...history, instruction],
-    ...(requestHeader.system ? { system: requestHeader.system } : {}),
+    ...(typeof legacySystem === 'string' && legacySystem.length > 0
+      ? { system: legacySystem }
+      : {}),
     ...(requestHeader.tools && requestHeader.tools.length > 0
       ? { tools: requestHeader.tools }
       : {}),

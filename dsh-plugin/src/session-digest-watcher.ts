@@ -91,9 +91,19 @@ export const Config: Schema<Config> = Schema.object({
   contextEnabled: Schema.boolean().required(false),
 })
 
+interface SessionEventLike {
+  readonly type?: string
+  readonly time?: number
+  readonly data?: unknown
+}
+
+type SessionEventList = ReadonlyArray<SessionEventLike | undefined>
+
 interface SessionLike {
   readonly id: string
-  readonly events: ReadonlyArray<{ time: number } | undefined>
+  readonly snapshotEvents?: () => SessionEventList
+  /** Compatibility face for older dsh releases and test doubles. */
+  readonly events?: SessionEventList
 }
 
 interface LiveSessionLike extends SessionLike {
@@ -103,6 +113,33 @@ interface LiveSessionLike extends SessionLike {
 
 interface SessionsLike {
   list(): SessionLike[]
+}
+
+interface PersistenceHeaderLike {
+  readonly id: string
+  readonly createdAt?: number
+  readonly cwd?: string
+}
+
+interface PersistenceSnapshotLike {
+  readonly header?: PersistenceHeaderLike
+  /** Compatibility face for the pre-0.1.5 list result. */
+  readonly id?: string
+  readonly createdAt?: number
+  readonly cwd?: string
+}
+
+interface PersistenceReadHandleLike {
+  readonly header?: PersistenceHeaderLike
+  read(): Promise<{ events: SessionEventList }>
+  close(): Promise<void>
+}
+
+interface PersistenceLike {
+  list(): Promise<ReadonlyArray<PersistenceSnapshotLike>>
+  open?(id: string, access: 'read'): Promise<PersistenceReadHandleLike>
+  /** Compatibility face for the pre-0.1.5 persistence API. */
+  inspect?(id: string): Promise<{ events: SessionEventList }>
 }
 
 interface DigestState {
@@ -166,12 +203,7 @@ export function apply(ctx: Context, config: Config): void {
 
   async function tick(): Promise<void> {
     const sessions = ctx.get('sessions') as SessionsLike | undefined
-    const persistence = ctx.get('sessionPersistence') as
-      | {
-          list(): Promise<ReadonlyArray<{ id: string; createdAt: number; cwd?: string }>>
-          inspect(id: string): Promise<{ events: ReadonlyArray<unknown> }>
-        }
-      | undefined
+    const persistence = ctx.get('sessionPersistence') as PersistenceLike | undefined
     const now = Date.now()
     const liveIds = new Set<string>()
     ctx.logger.debug(
@@ -184,7 +216,7 @@ export function apply(ctx: Context, config: Config): void {
       for (const session of sessions.list()) {
         if (!session || typeof session.id !== 'string') continue
         liveIds.add(session.id)
-        await handleRound(session.id, session.events ?? [], { live: true })
+        await handleRound(session.id, sessionEvents(session), { live: true })
       }
     }
 
@@ -202,17 +234,17 @@ export function apply(ctx: Context, config: Config): void {
         const activity = loadProjectionActivity(
           process.env.DSH_HOME?.trim() || resolve(homedir(), '.dsh'),
         )
-        for (const header of headers) {
-          if (!header || typeof header.id !== 'string') continue
+        for (const snapshot of headers) {
+          const header = persistenceHeader(snapshot)
+          if (header === undefined) continue
           if (liveIds.has(header.id)) continue
           const info = activity.get(header.id)
           const prior = state[header.id]
           let lastPromptAt = info?.lastPromptAt
           // Read the persisted tail once; it also feeds the summary below.
-          let events: ReadonlyArray<{ time: number }> | undefined
+          let events: SessionEventList | undefined
           if (lastPromptAt === undefined) {
-            const inspection = await persistence.inspect(header.id)
-            events = inspection.events as ReadonlyArray<{ time: number }>
+            events = (await readPersistedEvents(persistence, header.id))
             const lastTime = lastEventTimeMs(events)
             if (lastTime === undefined) continue
             lastPromptAt = lastTime
@@ -226,8 +258,7 @@ export function apply(ctx: Context, config: Config): void {
           let lease: DigestLeaseResult | undefined
           try {
             if (events === undefined) {
-              const inspection = await persistence.inspect(header.id)
-              events = inspection.events as ReadonlyArray<{ time: number }>
+              events = await readPersistedEvents(persistence, header.id)
             }
             const count = messageCountOf(events)
             // A session with no real conversation messages has nothing to
@@ -306,7 +337,7 @@ export function apply(ctx: Context, config: Config): void {
 
   async function handleRound(
     sessionId: string,
-    events: ReadonlyArray<{ time: number } | undefined>,
+    events: SessionEventList,
     options: { live: boolean },
   ): Promise<void> {
     const now = Date.now()
@@ -435,6 +466,46 @@ export function apply(ctx: Context, config: Config): void {
 
 }
 
+function sessionEvents(session: SessionLike): SessionEventList {
+  return typeof session.snapshotEvents === 'function'
+    ? session.snapshotEvents()
+    : session.events ?? []
+}
+
+function persistenceHeader(
+  snapshot: PersistenceSnapshotLike,
+): PersistenceHeaderLike | undefined {
+  if (snapshot.header !== undefined && typeof snapshot.header.id === 'string') {
+    return snapshot.header
+  }
+  if (typeof snapshot.id === 'string') {
+    return {
+      id: snapshot.id,
+      ...(snapshot.createdAt === undefined ? {} : { createdAt: snapshot.createdAt }),
+      ...(snapshot.cwd === undefined ? {} : { cwd: snapshot.cwd }),
+    }
+  }
+  return undefined
+}
+
+async function readPersistedEvents(
+  persistence: PersistenceLike,
+  sessionId: string,
+): Promise<SessionEventList> {
+  if (typeof persistence.open === 'function') {
+    const handle = await persistence.open(sessionId, 'read')
+    try {
+      return (await handle.read()).events
+    } finally {
+      await handle.close()
+    }
+  }
+  if (typeof persistence.inspect === 'function') {
+    return (await persistence.inspect(sessionId)).events
+  }
+  throw new Error('dsh session persistence does not expose a read API')
+}
+
 function messageTextOf(event: unknown): string {
   const data = (event as {
     data?: { message?: { content?: unknown }; content?: unknown }
@@ -454,7 +525,7 @@ function messageTextOf(event: unknown): string {
 }
 
 function lastEventTimeMs(
-  events: ReadonlyArray<{ time: number } | undefined>,
+  events: ReadonlyArray<{ time?: number } | undefined>,
 ): number | undefined {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
@@ -464,7 +535,7 @@ function lastEventTimeMs(
 }
 
 export function extractFields(session: SessionLike): SummaryFields {
-  const events = session.events ?? []
+  const events = sessionEvents(session)
   let objective = ''
   let resultText = ''
   let toolCount = 0
