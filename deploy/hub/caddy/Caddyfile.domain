@@ -17,5 +17,13 @@
 		output stdout
 		format json
 	}
+	# DSH Web tunnel retired 2026-10-21 (C1: tenant-controlled device HTML
+	# must not execute on the Hub origin). Remote device Web is intentionally
+	# unavailable through the Hub; see docs/dsh-web-hub-bridge.md.
+	@dsh_web path /v1/web /v1/web/*
+	respond @dsh_web 404
+	@dsh_web_ticket path /v1/hub/nodes/web/tunnel
+	respond @dsh_web_ticket 404
+
 	reverse_proxy agent-hub:8090
 }

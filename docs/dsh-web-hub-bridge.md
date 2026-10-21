@@ -1,5 +1,10 @@
 # Hub DSH Web Bridge
 
+> **状态（2026-10-21）：已归档停用。** 设备页面在 Hub 同源执行租户可控
+> HTML/JS（安全审查 C1），生产 Hub 已在反向代理层封锁 `/v1/web*` 与
+> `/v1/hub/nodes/web/tunnel`（返回 404）。代码保留，供以后按“每设备独立
+> 子域 / 独立 origin”方案重新实现；在完成 origin 隔离前不要重新开启本路径。
+>
 本文档描述在 AgentSociety Hub 上为 DeepSeek Harness（dsh）Web 提供
 **跨设备统一访问**的分阶段实现。第一阶段：节点可选择性向 Hub 注册
 `dsh_web` 能力，Hub 保存并对外暴露脱敏的能力视图；P1（已实现）：

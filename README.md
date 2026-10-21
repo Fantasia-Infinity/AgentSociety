@@ -31,7 +31,12 @@ flowchart LR
 AgentSociety 只负责**协调**：谁是谁、谁在跑什么、跑到哪一步、结果放在哪里。
 真正的“干活”始终发生在你自己的设备上，由你自己安装的 Agent 完成。
 
-### 最近更新：远程访问设备上的 DSH Web
+### 已归档（停用）：远程访问设备上的 DSH Web
+
+> 2026-10-21：该功能已归档。设备页面与 Hub 同源运行会带来同源脚本风险
+> （安全审查 C1），生产 Hub 已在反向代理层封锁 `/v1/web*` 与
+> `/v1/hub/nodes/web/tunnel`。代码保留；若需恢复，须先完成“每设备独立
+> origin”隔离（见 [DSH Web Hub Bridge](docs/dsh-web-hub-bridge.md) 顶部说明）。
 
 AgentSociety 现在可以把每台设备上的本地 DSH Web 安全地挂载到 Hub，浏览器无需把设备端口暴露到公网：
 
@@ -266,7 +271,7 @@ npm --prefix dsh-plugin run build
 ```
 
 ## 项目状态
-- DSH Web 远程访问已可用：`agent web-bridge` 自动管理本地 Web、通过 Hub 原生挂载到 `/v1/web/<node_id>/`，并转发 RPC 与事件 WebSocket；详见 [DSH Web Hub Bridge](docs/dsh-web-hub-bridge.md)。
+- DSH Web 远程访问已归档停用（2026-10-21，安全审查 C1）：生产 Hub 的反向代理已封锁 `/v1/web*` 与 `/v1/hub/nodes/web/tunnel`；恢复需先完成每设备独立 origin 隔离。详见 [DSH Web Hub Bridge](docs/dsh-web-hub-bridge.md)。
 
 - 默认运行时：AgentSociety 作为 dsh 插件加载；`./agent` 打开 dsh-TUI，
   `./agent worker` 启动 dsh 进程内 worker；Pi 保留为兼容回退。
