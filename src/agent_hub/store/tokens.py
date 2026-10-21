@@ -41,17 +41,25 @@ class TokenStore:
             )
         with self._condition, self._connection:
             self._tenant(item.tenant_id)
-            if item.principal_id is not None:
-                principal = self._principal(item.principal_id)
+            principal_id = item.principal_id
+            if principal_id is not None:
+                principal = self._principal(principal_id)
                 if principal["tenant_id"] != item.tenant_id:
                     raise PermissionError("principal does not belong to tenant")
             if item.actor_id is not None:
                 actor = self._actor(item.actor_id)
                 if actor["tenant_id"] != item.tenant_id:
                     raise PermissionError("actor does not belong to tenant")
+                if principal_id is None and item.role == "node":
+                    # A node token must always be bound to a principal.
+                    # A null-principal node token is treated as tenant-wide by
+                    # principal scoping, which leaks data across principals.
+                    # Derive it from the actor rather than rejecting so that
+                    # existing node-token creation flows stay compatible.
+                    principal_id = actor["principal_id"]
                 if (
-                    item.principal_id is not None
-                    and actor["principal_id"] != item.principal_id
+                    principal_id is not None
+                    and actor["principal_id"] != principal_id
                 ):
                     raise ValueError("actor does not belong to principal")
             if item.node_id is not None:
@@ -75,7 +83,7 @@ class TokenStore:
                     token_hash,
                     item.tenant_id,
                     item.role,
-                    item.principal_id,
+                    principal_id,
                     item.actor_id,
                     item.node_id,
                     item.label,
@@ -170,6 +178,10 @@ class TokenStore:
             if row["revoked_at"] is not None:
                 return None
             if row["expires_at"] is not None and float(row["expires_at"]) < time.time():
+                return None
+            # Fail closed for legacy null-principal node tokens: they would be
+            # scoped like a tenant admin by _principal_scope.
+            if str(row["role"]) == "node" and row["principal_id"] is None:
                 return None
             return AuthenticatedContext(
                 role=str(row["role"]),

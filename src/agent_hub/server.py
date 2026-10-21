@@ -75,11 +75,17 @@ class HubHttpServer(ThreadingHTTPServer):
         oidc_provider: OIDCIdentityProvider | None = None,
         enable_mcp: bool = True,
         rate_limiter: AuthRateLimiter | None = None,
+        mcp_max_streams: int = 32,
     ) -> None:
         super().__init__(address, HubRequestHandler)
         self.api = api
         self.a2a = A2AApi(api)
         self.mcp = McpService(api) if enable_mcp else None
+        # Bound the MCP SSE fan-out: one connection holds a server thread for
+        # hours, so GET /mcp is authenticated and capped below.
+        self.mcp_max_streams = mcp_max_streams
+        self._mcp_streams = 0
+        self._mcp_streams_lock = threading.Lock()
         self.api_token = api_token
         self.public_url = public_url.rstrip("/") if public_url else None
         self.web = WebSession(web_secret) if web_secret is not None else None
@@ -99,6 +105,19 @@ class HubHttpServer(ThreadingHTTPServer):
         self._subscribers_lock = threading.Lock()
         self.api.on_event = self.publish
         self.api.on_shared_event = self.publish_tenant
+
+    def acquire_mcp_stream(self) -> bool:
+        """Reserve one MCP SSE slot, or reject when the cap is reached."""
+        with self._mcp_streams_lock:
+            if self._mcp_streams >= self.mcp_max_streams:
+                return False
+            self._mcp_streams += 1
+            return True
+
+    def release_mcp_stream(self) -> None:
+        with self._mcp_streams_lock:
+            if self._mcp_streams > 0:
+                self._mcp_streams -= 1
 
     def publish_tenant(
         self, tenant_id: str, event_name: str, data: dict[str, Any]
@@ -165,6 +184,32 @@ class HubHttpServer(ThreadingHTTPServer):
             ]
 
 
+def validate_proxy_response(
+    response: dict[str, Any],
+) -> tuple[int, list[tuple[str, str]], bytes]:
+    """Validate a device tunnel response before it reaches the browser.
+
+    The device is tenant-controlled, so both the status line and every
+    forwarded header value are untrusted input. Reject anything that could
+    split the Hub response instead of trying to repair it.
+    """
+    status = int(response.get("status", 502))
+    if not 100 <= status <= 599:
+        raise ValueError("invalid tunnel response status")
+    raw_headers = response.get("headers") or {}
+    body_bytes = decode_proxy_body(response.get("body_b64")) or b""
+    forwarded: list[tuple[str, str]] = []
+    for key, value in raw_headers.items():
+        key_text = str(key)
+        if key_text.lower() not in FORWARDED_RESPONSE_HEADERS:
+            continue
+        value_text = str(value)
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value_text):
+            raise ValueError("invalid forwarded header value")
+        forwarded.append((key_text, value_text))
+    return status, forwarded, body_bytes
+
+
 class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
     server: HubHttpServer
     # Bound per-I/O waits so slowloris-style connections cannot pin threads
@@ -205,7 +250,22 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
             if self.server.mcp is None:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "mcp_disabled"})
             else:
-                self._send_mcp_endpoint()
+                # GET /mcp holds a thread for the whole SSE stream, so it must
+                # be authenticated and bounded like any other long-lived
+                # resource.
+                context = self._authorized()
+                if context is None:
+                    return
+                if not self.server.acquire_mcp_stream():
+                    self._send_json(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": "too many MCP streams"},
+                    )
+                    return
+                try:
+                    self._send_mcp_endpoint()
+                finally:
+                    self.server.release_mcp_stream()
             return
         if parsed.path == "/.well-known/agent-card.json":
             self._send_json(
@@ -215,7 +275,10 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
                 cache_control="public, max-age=300",
             )
             return
-        if not AgentHubApi.matches(parsed.path):
+        if not (
+            AgentHubApi.matches(parsed.path)
+            or parsed.path.startswith(f"{AgentHubApi.auth_prefix}/")
+        ):
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
             return
         context = self._authorized()
@@ -323,7 +386,10 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
                 return
             self._send_json(*response)
             return
-        if not AgentHubApi.matches(parsed.path):
+        if not (
+            AgentHubApi.matches(parsed.path)
+            or parsed.path.startswith(f"{AgentHubApi.auth_prefix}/")
+        ):
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
             return
         context = self._authorized()
@@ -616,6 +682,11 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
                     HTTPStatus.BAD_REQUEST, {"error": "invalid Content-Length"}
                 )
                 return
+            if length < 0:
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST, {"error": "invalid Content-Length"}
+                )
+                return
             if length > MAX_PROXY_REQUEST_BODY:
                 self._send_json(
                     HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
@@ -633,17 +704,25 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
             )
             return
         try:
-            status = int(response.get("status", 502))
-            response_headers = response.get("headers") or {}
-            body_bytes = decode_proxy_body(response.get("body_b64")) or b""
+            status, forwarded_headers, body_bytes = validate_proxy_response(response)
         except (TypeError, ValueError):
             self._send_json(HTTPStatus.BAD_GATEWAY, {"error": "bad tunnel response"})
             return
         self.send_response(status)
-        for key, value in response_headers.items():
-            if key.lower() in FORWARDED_RESPONSE_HEADERS:
-                self.send_header(key, str(value))
+        for key, value in forwarded_headers:
+            # Cache-Control is forced below: proxied content is authenticated
+            # per caller and must not be stored by browsers or shared caches.
+            if key.lower() == "cache-control":
+                continue
+            self.send_header(key, value)
         self.send_header("Content-Length", str(len(body_bytes)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Vary", "Cookie, Authorization")
+        self.send_header("X-Frame-Options", "DENY")
+        # Device content is tenant-controlled. Full isolation requires serving
+        # it from a separate origin; until then at least forbid framing and
+        # cache storage on the Hub origin.
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
         self._send_security_headers()
         self.end_headers()
         if method != "HEAD" and body_bytes:
@@ -923,6 +1002,7 @@ def main() -> None:
             auth_per_minute=settings.rate_limit_auth_per_minute,
             register_per_hour=settings.rate_limit_register_per_hour,
         ),
+        mcp_max_streams=settings.mcp_max_streams,
     )
     logger.info(
         "agent_hub_started host=%s port=%s storage=%s",

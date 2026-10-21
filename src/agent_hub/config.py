@@ -80,6 +80,7 @@ class HubSettings:
     allow_non_loopback_bind: bool
     allow_registration: bool
     enable_mcp: bool
+    mcp_max_streams: int
     rate_limit_enabled: bool
     rate_limit_auth_per_minute: int
     rate_limit_register_per_hour: int
@@ -116,6 +117,7 @@ class HubSettings:
             ),
             allow_registration=_bool("AGENT_HUB_ALLOW_REGISTRATION", True),
             enable_mcp=_bool("AGENT_HUB_ENABLE_MCP", True),
+            mcp_max_streams=_positive_int("AGENT_HUB_MCP_MAX_STREAMS", 32),
             rate_limit_enabled=_bool("AGENT_HUB_RATE_LIMIT", True),
             rate_limit_auth_per_minute=_positive_int(
                 "AGENT_HUB_RATE_LIMIT_AUTH_PER_MINUTE", 20
@@ -138,6 +140,8 @@ class HubSettings:
             raise ValueError("AGENT_HUB_HOST cannot be empty")
         if not 1 <= self.api_port <= 65535:
             raise ValueError("AGENT_HUB_PORT must be between 1 and 65535")
+        if not 1 <= self.mcp_max_streams <= 1024:
+            raise ValueError("AGENT_HUB_MCP_MAX_STREAMS must be between 1 and 1024")
         if len(self.api_token) < 24:
             raise ValueError("AGENT_HUB_TOKEN must contain at least 24 characters")
         if not self.allow_non_loopback_bind and not _loopback_host(self.api_host):
