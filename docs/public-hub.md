@@ -220,7 +220,9 @@ AGENT_HUB_NODE_TOKEN=<node token，用于 worker 领取任务>
 node token 只能领取本租户任务、心跳自己的节点、更新自己持有的 Run。
 node token 会绑定到其 actor 的 principal（未显式提供 `principal_id` 时自动
 推导），因此不会获得租户管理员级别的数据可见范围；`GET /v1/hub/tokens`
-对 node token 只返回其所属租户 + principal 的 token 元数据。
+对 node token 只返回其所属租户 + principal 的 token 元数据。node token 的
+DSH Web 访问、任务 cancel/control 也限定在自己的 node 上；隧道 ticket 有
+数量上限并在过期后自动清理，Hub 请求日志对查询串脱敏。
 
 ### 可选 OIDC 登录
 

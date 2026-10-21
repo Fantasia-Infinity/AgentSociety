@@ -29,6 +29,9 @@ def validate_password(password: str) -> str:
         raise ValueError("password must contain at least one letter")
     if not any(ch.isdigit() for ch in value):
         raise ValueError("password must contain at least one digit")
+    if len(value) > 1024:
+        # Bound the bytes fed to Argon2 by an untrusted registration/login.
+        raise ValueError("password must contain at most 1024 characters")
     return value
 
 

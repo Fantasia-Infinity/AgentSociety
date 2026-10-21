@@ -43,6 +43,40 @@ from .web_proxy import (
 
 logger = logging.getLogger(__name__)
 
+# One SSE subscriber holds a thread for hours; bound the total so a noisy or
+# malicious node set cannot exhaust the single-process server.
+MAX_SSE_SUBSCRIBERS = 256
+
+
+def node_web_allowed(
+    store: Any, context: AuthenticatedContext, node_id: str
+) -> bool:
+    """The node exists, advertises dsh_web, and the caller may reach it.
+
+    A node token is scoped to its own node only: sibling devices of the same
+    principal are reachable by the principal's human account, not by one
+    compromised device.
+    """
+    if not context.is_admin:
+        tenant_id = context.tenant_id or "default"
+        if context.role == "node":
+            if context.node_id != node_id:
+                return False
+            principal_id = context.principal_id
+        else:
+            principal_id = (
+                None if context.role == "tenant_admin" else context.principal_id
+            )
+    else:
+        tenant_id = None
+        principal_id = None
+    nodes = store.list_nodes(tenant_id=tenant_id, principal_id=principal_id)
+    node = next((item for item in nodes if item.get("node_id") == node_id), None)
+    if node is None:
+        return False
+    raw = (node.get("metadata") or {}).get("dsh_web")
+    return isinstance(raw, dict) and raw.get("enabled") is True
+
 
 def forwarded_client_ip(
     headers, client_address: tuple[str, int] | None
@@ -167,9 +201,11 @@ class HubHttpServer(ThreadingHTTPServer):
 
     def subscribe(
         self, node_id: str, tenant_id: str
-    ) -> "queue.Queue[tuple[str, dict[str, Any]]]":
+    ) -> "queue.Queue[tuple[str, dict[str, Any]]] | None":
         stream_queue: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue(maxsize=100)
         with self._subscribers_lock:
+            if len(self._subscribers) >= MAX_SSE_SUBSCRIBERS:
+                return None
             self._subscribers.append(
                 {"node_id": node_id, "tenant_id": tenant_id, "queue": stream_queue}
             )
@@ -407,7 +443,12 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
         self._send_json(*response)
 
     def log_message(self, format: str, *args: Any) -> None:
-        logger.info("http %s", format % args)
+        message = format % args
+        if "?" in message:
+            # Query strings may carry one-time tunnel tickets and other
+            # short-lived secrets; keep them out of the request log.
+            message = message.split("?", 1)[0] + "?<redacted>"
+        logger.info("http %s", message)
 
     def do_HEAD(self) -> None:
         self._web_proxy("HEAD")
@@ -487,29 +528,11 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
     def _node_web_allowed(
         self, context: AuthenticatedContext, node_id: str
     ) -> bool:
-        """The node exists, advertises dsh_web, and the caller may reach it."""
-        if not context.is_admin:
-            tenant_id = context.tenant_id or "default"
-            principal_id = (
-                None if context.role == "tenant_admin" else context.principal_id
-            )
-        else:
-            tenant_id = None
-            principal_id = None
         try:
-            nodes = self.server.api.store.list_nodes(
-                tenant_id=tenant_id, principal_id=principal_id
-            )
+            return node_web_allowed(self.server.api.store, context, node_id)
         except Exception:  # noqa: BLE001 - store failure must not leak
             logger.exception("node_web_lookup_failed node=%s", node_id)
             return False
-        node = next(
-            (item for item in nodes if item.get("node_id") == node_id), None
-        )
-        if node is None:
-            return False
-        raw = (node.get("metadata") or {}).get("dsh_web")
-        return isinstance(raw, dict) and raw.get("enabled") is True
 
     def _browser_remote_ws(self, node_id: str) -> None:
         """Browser DSH remote.mux: /v1/web/{node}/api/remote.mux.
@@ -876,6 +899,12 @@ class HubRequestHandler(WebHandlersMixin, BaseHTTPRequestHandler):
             return
 
         events = self.server.subscribe(node_id, tenant_id)
+        if events is None:
+            self._send_json(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {"error": "too many event subscribers"},
+            )
+            return
         self.protocol_version = "HTTP/1.1"
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream")
