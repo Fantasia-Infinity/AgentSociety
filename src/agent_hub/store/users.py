@@ -43,6 +43,15 @@ def _dummy_password_hash() -> str:
 class UserStore:
     """Password accounts, sessions, and password-based agent logins."""
 
+    def account_exists(self, username: str) -> bool:
+        """Whether a password account already uses this username."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT 1 FROM hub_user_accounts WHERE username=?",
+                (validate_username(username),),
+            ).fetchone()
+            return row is not None
+
     def register_user_personal(
         self,
         *,
@@ -59,14 +68,32 @@ class UserStore:
         """
 
         username = validate_username(username)
+        validate_password(password)
+        display_name = display_name.strip() or username
         tenant_id = f"user-{username}"
-        self.create_tenant(
-            TenantRegistration(
-                tenant_id=tenant_id,
-                display_name=f"{display_name.strip() or username} workspace",
-                metadata={"kind": "personal", "owner_username": username},
+        # Check the account first: a failed registration must not upsert (and
+        # overwrite) tenant metadata for an existing tenant.
+        if self.account_exists(username):
+            raise ValueError("username is already registered")
+        try:
+            tenant = self.get_tenant(tenant_id)
+        except LookupError:
+            self.create_tenant(
+                TenantRegistration(
+                    tenant_id=tenant_id,
+                    display_name=f"{display_name} workspace",
+                    metadata={"kind": "personal", "owner_username": username},
+                )
             )
-        )
+        else:
+            metadata = tenant.get("metadata") or {}
+            if (
+                metadata.get("kind") != "personal"
+                or metadata.get("owner_username") != username
+            ):
+                # Never let public registration claim a tenant that was
+                # provisioned for another purpose.
+                raise PermissionError("this tenant name is reserved")
         return self.register_user(
             username=username,
             password=password,
@@ -142,10 +169,21 @@ class UserStore:
                 verify_password(_dummy_password_hash(), password)
                 return None
             account = dict(row)
-            if account.get("locked_until") is not None and float(
-                account["locked_until"]
-            ) > now:
-                return None
+            if account.get("locked_until") is not None:
+                if float(account["locked_until"]) > now:
+                    return None
+                # The lock expired: start a fresh attempt budget instead of
+                # re-locking on the next single typo.
+                account["failed_attempts"] = 0
+                account["locked_until"] = None
+                self._connection.execute(
+                    """
+                    UPDATE hub_user_accounts
+                    SET failed_attempts=0, locked_until=NULL, updated_at=?
+                    WHERE username=?
+                    """,
+                    (now, username),
+                )
             if not verify_password(str(account["password_hash"]), password):
                 failed = int(account["failed_attempts"]) + 1
                 locked_until = now + LOCK_SECONDS if failed >= MAX_FAILED_ATTEMPTS else None

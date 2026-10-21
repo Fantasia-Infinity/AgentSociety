@@ -564,6 +564,7 @@ class AgentHubApi:
             item = NodeRegistration.from_dict(scoped)
             if item.metadata.get("dsh_web"):
                 item = self._with_node_web_capability(item)
+            self._assert_node_rebind_allowed(context, item)
             node = self.store.register_node(item, tenant_id=tenant_id)
             node["web"] = self._public_node_web(node)
             return HTTPStatus.OK, {"node": node}
@@ -924,6 +925,7 @@ class AgentHubApi:
         if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "cancel":
             task = self.store.get_task(parts[1], tenant_id=tenant_id)
             self._assert_principal_owner(context, task)
+            self._assert_node_task_scope(context, task)
             task = self.store.cancel_task(
                 parts[1],
                 actor_id=required_text(payload, "actor_id", maximum=200),
@@ -942,6 +944,7 @@ class AgentHubApi:
         if len(parts) == 3 and parts[0] == "tasks" and parts[2] == "controls":
             task = self.store.get_task(parts[1], tenant_id=tenant_id)
             self._assert_principal_owner(context, task)
+            self._assert_node_task_scope(context, task)
             control = self.store.create_task_control(
                 parts[1],
                 actor_id=required_text(payload, "actor_id", maximum=200),
@@ -1092,6 +1095,46 @@ class AgentHubApi:
             return
         if not context.is_admin and context.role != "tenant_admin":
             raise PermissionError("tenant manager role required")
+
+    def _assert_node_rebind_allowed(
+        self, context: AuthenticatedContext | None, item: NodeRegistration
+    ) -> None:
+        """Forbid re-pointing an existing node at another actor/principal.
+
+        A normal node token may only refresh its own node; tenant managers may
+        manage nodes in their tenant. Without this check a compromised worker
+        token could rebind a sibling device's node and then browse it through
+        the DSH Web tunnel.
+        """
+        if context is None or context.is_admin or context.role == "tenant_admin":
+            return
+        try:
+            existing = self.store.get_node(item.node_id)
+        except LookupError:
+            return
+        if context.role == "node":
+            if (
+                context.node_id != item.node_id
+                or context.actor_id != item.actor_id
+            ):
+                raise PermissionError(
+                    "node token cannot rebind another node"
+                )
+            return
+        if str(existing.get("actor_id")) != str(context.actor_id or ""):
+            raise PermissionError("cannot rebind another actor's node")
+
+    def _assert_node_task_scope(
+        self, context: AuthenticatedContext | None, task: dict[str, Any]
+    ) -> None:
+        """A node token may only steer/cancel tasks on its own node."""
+        if context is None or context.is_admin or context.role != "node":
+            return
+        executor = str(task.get("executor_node_id") or "")
+        if executor != str(context.node_id or ""):
+            raise PermissionError(
+                "node token cannot control another node's task"
+            )
 
     def _require_registration(
         self,

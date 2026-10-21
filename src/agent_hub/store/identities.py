@@ -246,6 +246,11 @@ class IdentityStore:
                 ).fetchall()
             return [self._actor(str(row["actor_id"])) for row in rows]
 
+    def get_node(self, node_id: str) -> dict[str, Any]:
+        """Return one node record without marking stale nodes offline."""
+        with self._lock:
+            return self._node(node_id)
+
     def list_nodes(
         self, *, tenant_id: str | None = None, principal_id: str | None = None
     ) -> list[dict[str, Any]]:

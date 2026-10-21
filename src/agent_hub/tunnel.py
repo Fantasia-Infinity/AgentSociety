@@ -18,6 +18,11 @@ TUNNEL_TICKET_TTL_SECONDS = 120
 SendFn = Callable[[dict[str, Any]], None]
 CloseFn = Callable[[], None]
 
+# Unused tickets expire after the TTL, but an authenticated node can still
+# request them in a loop; bound how many can pile up.
+MAX_PENDING_TICKETS_PER_NODE = 8
+MAX_PENDING_TICKETS = 1024
+
 
 class TunnelRegistry:
     """Ticket issuance plus one active outbound tunnel per node."""
@@ -34,12 +39,45 @@ class TunnelRegistry:
     def ticket_ttl_seconds(self) -> int:
         return self._ticket_ttl
 
+    @property
+    def pending_ticket_count(self) -> int:
+        with self._lock:
+            return len(self._tickets)
+
+    def _prune_tickets_locked(self, now: float) -> None:
+        expired = [
+            ticket
+            for ticket, row in self._tickets.items()
+            if float(row["expires_at"]) <= now
+        ]
+        for ticket in expired:
+            del self._tickets[ticket]
+
     def issue_ticket(self, node_id: str) -> str:
         ticket = secrets.token_urlsafe(32)
+        now = time.time()
         with self._lock:
+            self._prune_tickets_locked(now)
+            pending = [
+                candidate
+                for candidate, row in self._tickets.items()
+                if row["node_id"] == node_id
+            ]
+            while len(pending) >= MAX_PENDING_TICKETS_PER_NODE:
+                oldest = min(
+                    pending, key=lambda candidate: self._tickets[candidate]["expires_at"]
+                )
+                del self._tickets[oldest]
+                pending.remove(oldest)
+            while len(self._tickets) >= MAX_PENDING_TICKETS:
+                oldest = min(
+                    self._tickets,
+                    key=lambda candidate: self._tickets[candidate]["expires_at"],
+                )
+                del self._tickets[oldest]
             self._tickets[ticket] = {
                 "node_id": node_id,
-                "expires_at": time.time() + self._ticket_ttl,
+                "expires_at": now + self._ticket_ttl,
             }
         return ticket
 
