@@ -308,19 +308,27 @@ class SharedStore:
         *,
         tenant_id: str,
         session_id: str,
+        principal_id: str | None = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
         """Artifacts whose runs recorded this session (dsh_session_id)."""
         limit = min(max(limit, 1), 100)
-        pattern = f'%"dsh_session_id":"{session_id}"%'
+        # Escape LIKE metacharacters: a caller-supplied session id such as
+        # "%" must match literally, never enumerate other runs.
+        pattern = f'%"dsh_session_id":"{_like_pattern(session_id)}"%'
+        run_clauses = ["tenant_id=?", "result_json LIKE ? ESCAPE '\\'"]
+        run_params: list[Any] = [tenant_id, pattern]
+        if principal_id is not None:
+            run_clauses.append("principal_id=?")
+            run_params.append(principal_id)
         with self._lock:
             runs = self._connection.execute(
-                """
+                f"""
                 SELECT run_id, task_id FROM hub_runs
-                WHERE tenant_id=? AND result_json LIKE ? ESCAPE '\\'
+                WHERE {' AND '.join(run_clauses)}
                 ORDER BY started_at DESC LIMIT 50
                 """,
-                (tenant_id, pattern),
+                tuple(run_params),
             ).fetchall()
             run_ids = [str(run["run_id"]) for run in runs]
             task_ids = [str(run["task_id"]) for run in runs if run["task_id"]]

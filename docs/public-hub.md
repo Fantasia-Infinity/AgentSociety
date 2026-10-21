@@ -172,6 +172,8 @@ Codex/OpenCode/Claude 等 MCP 客户端配置
 `"url": "https://<VPS>/mcp"` + `Authorization` 头即可获得
 `hub_create_task`、`hub_list_tasks`、`hub_get_task`、`hub_get_task_events`、
 `hub_cancel_task` 等工具。默认开启，`AGENT_HUB_ENABLE_MCP=false` 可关闭。
+`GET /mcp` 的 SSE 通道同样要求该 Bearer token，并发流数量由
+`AGENT_HUB_MCP_MAX_STREAMS`（默认 32）限制。
 详见 `docs/agent-adapters.md`。
 
 ## 6. 多租户与租户自带 worker
@@ -216,6 +218,9 @@ AGENT_HUB_NODE_TOKEN=<node token，用于 worker 领取任务>
 ```
 
 node token 只能领取本租户任务、心跳自己的节点、更新自己持有的 Run。
+node token 会绑定到其 actor 的 principal（未显式提供 `principal_id` 时自动
+推导），因此不会获得租户管理员级别的数据可见范围；`GET /v1/hub/tokens`
+对 node token 只返回其所属租户 + principal 的 token 元数据。
 
 ### 可选 OIDC 登录
 

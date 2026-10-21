@@ -26,6 +26,7 @@ from .domain import (
     required_text,
 )
 from .errors import ApiError, map_error
+from .passwords import public_account
 from .store import AgentHubStore
 from .object_store import ObjectStore
 from urllib.parse import unquote
@@ -181,7 +182,8 @@ class AgentHubApi:
                 if context.role != "tenant_admin":
                     return HTTPStatus.OK, {
                         "tokens": self.store.list_auth_tokens(
-                            principal_id=context.principal_id
+                            tenant_id=tenant_id,
+                            principal_id=context.principal_id,
                         )
                     }
             return HTTPStatus.OK, {
@@ -350,6 +352,7 @@ class AgentHubApi:
                 row["artifacts"] = self.store.artifacts_for_session(
                     tenant_id=tenant_id or "default",
                     session_id=session_id,
+                    principal_id=principal_scope,
                 )
             return HTTPStatus.OK, {"row": row}
 
@@ -394,8 +397,8 @@ class AgentHubApi:
             self._assert_principal_owner(context, run)
             return HTTPStatus.OK, {"run": run}
         if path == f"{self.auth_prefix}/me":
-            if context is None or not context.principal_id:
-                raise ApiError("authentication required", HTTPStatus.UNAUTHORIZED)
+            self._require_account_context(context)
+            assert context is not None
             principal = self.store._principal(context.principal_id)
             account = self.store.account_for_principal(context.principal_id)
             sessions = self.store.list_sessions(
@@ -405,7 +408,7 @@ class AgentHubApi:
             return HTTPStatus.OK, {
                 "me": {
                     "principal": principal,
-                    "account": account,
+                    "account": public_account(account) if account else None,
                     "tenant_id": context.tenant_id,
                     "role": context.role,
                 },
@@ -485,8 +488,8 @@ class AgentHubApi:
                 "session": self.store.revoke_session(context.session_id)
             }
         if path == f"{self.auth_prefix}/change-password":
-            if context is None or not context.principal_id:
-                raise ApiError("authentication required", HTTPStatus.UNAUTHORIZED)
+            self._require_account_context(context)
+            assert context is not None
             account = self.store.account_for_principal(context.principal_id)
             if account is None:
                 raise ApiError(
@@ -505,18 +508,19 @@ class AgentHubApi:
             self.store.revoke_principal_tokens(context.principal_id)
             return HTTPStatus.OK, {"changed": True}
         if path == f"{self.auth_prefix}/sessions/revoke":
-            if context is None or not context.principal_id:
-                raise ApiError("authentication required", HTTPStatus.UNAUTHORIZED)
+            self._require_account_context(context)
+            assert context is not None
             session_hash = str(payload.get("session_token_id", "")).strip()
             if not session_hash:
                 raise ValueError("session_token_id is required")
-            record = self.store.revoke_session(session_hash)
+            record = self.store.get_session(session_hash)
             if record["principal_id"] != context.principal_id:
                 raise ApiError("session not found", HTTPStatus.NOT_FOUND)
+            record = self.store.revoke_session(session_hash)
             return HTTPStatus.OK, {"session": record}
         if path == f"{self.auth_prefix}/tokens/revoke":
-            if context is None or not context.principal_id:
-                raise ApiError("authentication required", HTTPStatus.UNAUTHORIZED)
+            self._require_account_context(context)
+            assert context is not None
             token_id = str(payload.get("token_id", "")).strip()
             if not token_id:
                 raise ValueError("token_id is required")
@@ -1042,7 +1046,23 @@ class AgentHubApi:
             return None
         if context.role == "tenant_admin":
             return None
+        if context.role == "node" and not context.principal_id:
+            # Fail closed: a null-principal node token must never be treated
+            # as tenant-wide (that is the tenant_admin scope value).
+            raise PermissionError("node token is not bound to a principal")
         return context.principal_id
+
+    def _require_account_context(
+        self, context: AuthenticatedContext | None
+    ) -> None:
+        """Account endpoints are for human accounts, never node tokens."""
+        if context is None or not context.principal_id:
+            raise ApiError("authentication required", HTTPStatus.UNAUTHORIZED)
+        if context.role == "node":
+            raise ApiError(
+                "node tokens cannot access account endpoints",
+                HTTPStatus.FORBIDDEN,
+            )
 
     def _assert_principal_owner(
         self,

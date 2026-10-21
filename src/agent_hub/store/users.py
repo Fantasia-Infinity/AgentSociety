@@ -231,6 +231,11 @@ class UserStore:
                 session_id=str(row["session_token_hash"]),
             )
 
+    def get_session(self, session_token_hash: str) -> dict[str, Any]:
+        """Return one session record without mutating it."""
+        with self._lock:
+            return self._session_record(session_token_hash)
+
     def revoke_session(self, session_token_hash: str) -> dict[str, Any]:
         now = time.time()
         with self._condition, self._connection:
