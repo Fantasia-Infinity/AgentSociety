@@ -1,0 +1,22 @@
+# Keep the Hub image build context to what deploy/hub/Dockerfile copies.
+.git
+.gitignore
+.github
+.private
+.env*
+**/node_modules
+**/__pycache__
+**/*.pyc
+**/*.pyo
+deploy
+docs
+scripts
+tests
+agent
+agent.ps1
+agent-host
+dsh-plugin
+agent-config
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
