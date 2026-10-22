@@ -38,7 +38,7 @@ services:
       start_period: 5s
 
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16.15-alpine
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${AGENT_HUB_POSTGRES_DB:-agenthub}
@@ -59,7 +59,7 @@ services:
   caddy:
     profiles:
       - caddy
-    image: caddy:2-alpine
+    image: caddy:2.11.7-alpine
     restart: unless-stopped
     depends_on:
       - agent-hub
