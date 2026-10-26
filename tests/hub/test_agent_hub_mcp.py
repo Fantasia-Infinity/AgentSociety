@@ -49,6 +49,7 @@ class McpServiceTests(unittest.TestCase):
             self.assertIn("tools", initialized["result"]["capabilities"])
             listed = mcp_call(service, "tools/list", {})
             names = {tool["name"] for tool in listed["result"]["tools"]}
+            ordered_names = [tool["name"] for tool in listed["result"]["tools"]]
             self.assertEqual(
                 names,
                 {
@@ -67,6 +68,7 @@ class McpServiceTests(unittest.TestCase):
                     "hub_ask",
                 },
             )
+            self.assertEqual(ordered_names, sorted(ordered_names))
 
     def test_resources_list_is_supported(self) -> None:
         with TemporaryDirectory() as temporary:
